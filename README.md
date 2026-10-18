@@ -43,7 +43,7 @@ P0 画像 → P1 价值判断+验收标准 → P2 入门诊断 → P3 大纲
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| Phase 0 | 基线测量 + 脚手架 | 🔄 进行中 |
-| Phase 1 | 首模块「文件与目录导航」全流程 | ⏸ 等待 Phase 0 数据 |
+| Phase 0 | 基线测量 + 脚手架 | ✅ 完成（回忆式基线，量化缺失与方法论调整见 [evidence/baseline.md](evidence\baseline.md)） |
+| Phase 1 | 模块「管道与对象（掌握版）」 | 🔄 生产已完成至「已审查」（[tutorials/cli/03-pipes-mastery.md](tutorials\cli\03-pipes-mastery.md)），待 P6 执行验证 |
 | Phase 2 | 第二模块 + 修订回路验证 | ⏸ |
 | Phase 3 | 决策点：是否进入方案 B（独立仓库、同栈 Next.js） | ⏸ |
