@@ -36,7 +36,8 @@ class Settings:
         self.llm_timeout = int(os.getenv("LLM_TIMEOUT", "120") or 120)
         self.database_url = os.getenv("DATABASE_URL", "sqlite:///./data/aiedu.db").strip()
         self.cors_origins = os.getenv(
-            "CORS_ORIGINS", "http://127.0.0.1:3000,http://localhost:3000"
+            "CORS_ORIGINS",
+            "http://127.0.0.1:3000,http://localhost:3000,http://127.0.0.1:3001,http://localhost:3001",
         ).strip()
         self.demo_mode = os.getenv("DEMO_MODE", "1").strip() not in ("0", "false", "False")
 
