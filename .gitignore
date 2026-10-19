@@ -1,0 +1,31 @@
+# dependencies
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# build
+.next/
+out/
+dist/
+build/
+
+# runtime data
+*.db
+*.sqlite3
+data/
+logs/
+*.log
+
+# env & secrets
+.env
+.env.*
+!.env.example
+
+# editor / os
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

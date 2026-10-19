@@ -1,49 +1,71 @@
-# ai-edu — 第一阶段：教程生产流水线（方案 A）
+﻿# AI Edu — 个人 AI 学习工具
 
-> 目标：验证「验收标准先行 + 分节生成 + 质量门」能否显著改善教程质量与学习效果（假设 A1）
-> 方式：零 API、零新代码——Git 仓库 + 网页模型（经 AI Hub）+ 人工执行质量门
-> 上游文档：[Stage 1.md](D:\桌面\记录\Stage 1.md) ｜ [首轮交付物](D:\桌面\dsh\AI-Edu-Stage1-首轮交付物.md) ｜ [基线诊断](tutorials\cli\diagnosis-基线诊断.md)
+> **当前执行基线：** [AI-Edu-最终执行方案-Agent版-v2.0.md](../AI-Edu-最终执行方案-Agent版-v2.0.md)（工作区根目录）
+> 本仓库按该方案实现：以学习目标为起点、以可执行教程和真实实践为载体、以证据反馈和独立能力验证为闭环的 AI 辅助学习系统。
 
-## 目录
+## 目录结构
 
 ```
 ai-edu/
-├─ README.md                 本文件
-├─ profile.md                学习者画像（每次生成前取摘要）
-├─ templates/
-│  ├─ acceptance.md          验收标准写法模板（P1 用）
-│  ├─ generation-prompt.md   生成 prompt 组装模板（P3/P4 用）
-│  └─ question.md            中途提问模板（学习中随时用）
-├─ checklists/
-│  └─ quality.md             教程质量 9 项清单（P5 审查用）
-├─ tutorials/
-│  └─ cli/                   命令行教程（素材与重构产物）
-│     ├─ diagnosis-基线诊断.md
-│     └─ source-原始教程.md   ← Phase 0 你手动复制进来
-├─ evidence/                 执行记录、任务完成记录（T1–T5）
-│  └─ baseline.md            Phase 0 基线测量（现在开始填）
-├─ learning-log.md           追问与反馈台账（每次提问记一行）
-└─ tutorial-log.md           成本台账（每教程记一行）
+├─ apps/web/                # Next.js 前端（App Router + TypeScript + Tailwind）
+├─ services/api/            # FastAPI 后端（SQLite + SQLAlchemy + Pydantic）
+├─ docs/                    # architecture.md · decisions.md · user-guide.md
+├─ scripts/                 # 开发辅助脚本
+├─ legacy/phase0/           # 阶段 0（Markdown 教程流水线）资产存档，仅参考
+├─ .env.example
+├─ .gitignore
+└─ README.md
 ```
 
-## 生产管线（P0–P7）
+## 快速开始
+
+### 1. 后端（services/api）
+
+```powershell
+cd services/api
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+copy ..\..\.env.example ..\..\.env   # 可选：配置真实模型
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
+```
+
+API 文档：http://127.0.0.1:8000/docs　健康检查：`GET /api/health`
+
+### 2. 前端（apps/web）
+
+```powershell
+cd apps/web
+npm install
+npm run dev
+```
+
+打开 http://127.0.0.1:3000
+
+### 3. 模型配置
+
+在 `.env` 中配置任意 OpenAI 兼容接口即可接入真实模型：
 
 ```
-P0 画像 → P1 价值判断+验收标准 → P2 入门诊断 → P3 大纲
-→ P4 分节生成 → P5 质量审查 → P6 实践验证 → P7 反馈与修订
-        ↑门槛：G1 可判定性    ↑门槛：G2 双向映射  ↑G3 节结构  ↑G4 九项清单
+LLM_BASE_URL=https://api.example.com/v1
+LLM_API_KEY=sk-...
+LLM_MODEL=glm-4.5
 ```
 
-三条铁律：
-1. **先标准、后教程**——没有已确认的验收标准，不生成任何教程内容
-2. **确认权在人**——AI 起草，你逐条确认；不确认不进下一阶段
-3. **单节 ≤ 单次专注时长（40 分钟）且映射 ≥1 条验收标准**——防止重蹈 1455 行覆辙
+未配置时后端进入**演示模式**：结构化生成结果由确定性演示生成器产生，并在响应中明确标记 `demo: true`，绝不伪造为真实模型输出。
 
-## 阶段进度
+### 4. 测试
 
-| 阶段 | 内容 | 状态 |
-|---|---|---|
-| Phase 0 | 基线测量 + 脚手架 | ✅ 完成（回忆式基线，量化缺失与方法论调整见 [evidence/baseline.md](evidence\baseline.md)） |
-| Phase 1 | 模块「管道与对象（掌握版）」 | 🔄 生产已完成至「已审查」（[tutorials/cli/03-pipes-mastery.md](tutorials\cli\03-pipes-mastery.md)），待 P6 执行验证 |
-| Phase 2 | 第二模块 + 修订回路验证 | ⏸ |
-| Phase 3 | 决策点：是否进入方案 B（独立仓库、同栈 Next.js） | ⏸ |
+```powershell
+cd services/api
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+## 核心闭环
+
+**目标 → 诊断/价值分析 → 领域地图与计划 → 验收标准 → 教程（分节 + 质量检查）→ 实践尝试 → 逐项反馈 → 独立/迁移评估 → 复盘 → 知识记录**
+
+计算机/命令行 与 数学/数据分析 两种学科配置共用同一学习引擎，通过 DisciplineProfile 体现差异。
+
+## 阶段 0 存档
+
+`legacy/phase0/` 保存了早期「教程生产流水线」实验（学习者画像、验收模板、质量清单、真实命令行教程素材）。它们是产品种子数据的来源，也是「先标准后教程」理念的原始实践。
