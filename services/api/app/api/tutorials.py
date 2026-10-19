@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import json
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..db import get_db
@@ -50,6 +51,14 @@ def regenerate_section(tutorial_id: str, section_id: str, db: Session = Depends(
 @router.post("/tutorials/{tutorial_id}/restore/{version}", response_model=TutorialOut, tags=["tutorials"])
 def restore_version(tutorial_id: str, version: int, db: Session = Depends(get_db)):
     return tutorials_service.restore_version(db, tutorial_id, version)
+
+
+@router.get("/tutorials/{tutorial_id}/export", tags=["tutorials"])
+def export_tutorial(tutorial_id: str, db: Session = Depends(get_db)):
+    """导出当前教程版本为 Markdown 文件。"""
+    filename, markdown = tutorials_service.export_markdown(db, tutorial_id)
+    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"}
+    return Response(content=markdown, media_type="text/markdown; charset=utf-8", headers=headers)
 
 
 @router.get("/generation-jobs/{job_id}", response_model=JobOut, tags=["tutorials"])

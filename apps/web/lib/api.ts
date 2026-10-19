@@ -48,3 +48,25 @@ export const api = {
 };
 
 export const API_BASE = BASE;
+
+/** 下载文件（如教程 Markdown 导出）：同源请求，返回 Blob 后触发浏览器下载。 */
+export async function downloadFile(path: string, fallbackName: string): Promise<void> {
+  const res = await fetch(`${BASE}${path}`, { cache: "no-store" });
+  if (!res.ok) {
+    let message = `导出失败（${res.status}）`;
+    try {
+      const body = await res.json();
+      if (body?.detail?.message) message = body.detail.message;
+    } catch {
+      /* ignore */
+    }
+    throw new ApiError(res.status, "download_failed", message);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fallbackName;
+  a.click();
+  URL.revokeObjectURL(url);
+}

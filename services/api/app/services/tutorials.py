@@ -352,3 +352,153 @@ def restore_version(db: Session, tutorial_id: str, version_number: int) -> dict:
     tutorial.current_version_id = version.id
     db.commit()
     return tutorial_dict(db, tutorial)
+
+
+def _safe_filename(name: str) -> str:
+    import re
+
+    cleaned = re.sub(r'[\\/:*?"<>|\r\n]+', " ", name).strip()
+    return cleaned or "tutorial"
+
+
+def export_markdown(db: Session, tutorial_id: str) -> tuple[str, str]:
+    """把当前教程版本导出为 Markdown，返回 (文件名, 内容)。"""
+    tutorial = _get_tutorial(db, tutorial_id)
+    goal = _goal_for(db, tutorial.goal_id)
+    version = _current_version(db, tutorial)
+    if version is None:
+        raise HTTPException(status_code=409, detail={"code": "no_content", "message": "教程尚无内容"})
+    content = jload(version.content_json, {"outline": [], "sections": []})
+    quality = jload(version.quality_report, {})
+    profile = get_profile(goal.domain_key)
+    criteria = goals_service.list_criteria(db, goal.id)
+    crit_by_id = {c["id"]: c for c in criteria}
+
+    lines: list[str] = []
+    lines.append(f"# {tutorial.title}")
+    lines.append("")
+    lines.append(f"- 学习目标：{goal.title}")
+    lines.append(f"- 学科：{profile.display_name}")
+    if goal.application_context:
+        lines.append(f"- 应用场景：{goal.application_context}")
+    if goal.current_level:
+        lines.append(f"- 当前基础：{goal.current_level}")
+    lines.append(f"- 生成时间：{version.created_at or ''}")
+    lines.append(f"- 模型：{version.model_provider} / {version.model_name}")
+    quality_text = "通过" if quality.get("passed") else "待改进"
+    lines.append(f"- 版本：v{version.version} ｜ 质量检查：{quality_text}")
+    lines.append("")
+
+    lines.append("## 验收标准")
+    lines.append("")
+    if criteria:
+        for idx, c in enumerate(criteria, 1):
+            lines.append(f"{idx}. [ ] {c['statement']}")
+            if c.get("conditions"):
+                lines.append(f"   - 条件：{c['conditions']}")
+            if c.get("pass_rule"):
+                lines.append(f"   - 通过条件：{c['pass_rule']}")
+    else:
+        lines.append("（无验收标准）")
+    lines.append("")
+
+    outline = content.get("outline", [])
+    sections = content.get("sections", [])
+    if outline:
+        lines.append("## 目录")
+        lines.append("")
+        for idx, o in enumerate(outline, 1):
+            lines.append(f"{idx}. {o.get('title', '')}")
+        lines.append("")
+
+    for idx, s in enumerate(sections, 1):
+        lines.append(f"## 第 {idx} 节：{s.get('title', '')}")
+        lines.append("")
+        if s.get("goal_statement"):
+            lines.append(f"> {s['goal_statement']}")
+            lines.append("")
+        if s.get("prerequisites"):
+            lines.append("**前置要求**")
+            lines.append("")
+            for p in s["prerequisites"]:
+                lines.append(f"- {p}")
+            lines.append("")
+        for block in s.get("explanation", []):
+            lines.append(f"### {block.get('heading', '')}")
+            lines.append("")
+            lines.append(str(block.get("body", "")))
+            lines.append("")
+        steps = s.get("steps", [])
+        if steps:
+            lines.append("### 操作步骤")
+            lines.append("")
+            for si, st in enumerate(steps, 1):
+                lines.append(f"{si}. {st.get('text', '')}")
+                if st.get("expected_result"):
+                    lines.append(f"   - 预期结果：{st['expected_result']}")
+                if st.get("verification"):
+                    lines.append(f"   - 验证方式：{st['verification']}")
+            lines.append("")
+        if s.get("examples"):
+            lines.append("### 示例")
+            lines.append("")
+            for e in s["examples"]:
+                lines.append(f"- {e}")
+            lines.append("")
+        if s.get("exercises"):
+            lines.append("### 练习")
+            lines.append("")
+            for e in s["exercises"]:
+                lines.append(f"- [ ] {e}")
+            lines.append("")
+        if s.get("variation_task"):
+            lines.append("### 变式任务（检查迁移）")
+            lines.append("")
+            lines.append(f"- {s['variation_task']}")
+            lines.append("")
+        if s.get("common_errors"):
+            lines.append("### 常见错误")
+            lines.append("")
+            for e in s["common_errors"]:
+                lines.append(f"- **{e.get('error', '')}** — 原因：{e.get('cause', '')}；排查：{e.get('diagnose', '')}")
+            lines.append("")
+        mapped = s.get("mapping_criteria", [])
+        if mapped:
+            lines.append("### 对应验收标准")
+            lines.append("")
+            for cid in mapped:
+                stmt = crit_by_id.get(cid, {}).get("statement", cid)
+                lines.append(f"- {stmt}")
+            lines.append("")
+        sources = s.get("sources", [])
+        if sources:
+            lines.append("### 来源与可信度")
+            lines.append("")
+            for src in sources:
+                url = f"（{src['url']}）" if src.get("url") else ""
+                note = f" — {src['note']}" if src.get("note") else ""
+                lines.append(f"- {src.get('title', '')}{url}{note}")
+            lines.append("")
+
+    checks = quality.get("checks", [])
+    if checks:
+        lines.append("## 质量报告")
+        lines.append("")
+        for c in checks:
+            mark = "✅" if c.get("passed") else "❌"
+            lines.append(f"- {mark} {c.get('name', '')}：{c.get('detail', '')}")
+        lines.append("")
+    if quality.get("issues"):
+        lines.append("### 待改进项")
+        lines.append("")
+        for issue in quality["issues"]:
+            lines.append(f"- {issue}")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("")
+    lines.append("> 由 AI Edu 生成。教程内容需结合实践核验；证据比感觉更可靠。")
+    lines.append("")
+
+    filename = f"{_safe_filename(goal.title)}-教程-v{version.version}.md"
+    return filename, "\n".join(lines)

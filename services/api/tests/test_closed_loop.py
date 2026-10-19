@@ -88,6 +88,17 @@ def test_closed_loop_demo(client):
     assert report["passed"] is True, report
     section_ids = [s["id"] for s in content["sections"]]
 
+    # 导出 Markdown
+    resp = client.get(f"/api/tutorials/{tutorial_id}/export")
+    assert resp.status_code == 200, resp.text
+    assert "text/markdown" in resp.headers["content-type"]
+    md = resp.text
+    assert md.startswith("# ")
+    assert "验收标准" in md
+    assert "操作步骤" in md
+    assert "质量报告" in md
+    assert "attachment" in resp.headers["content-disposition"]
+
     # 章节重生成（版本递增）
     resp = client.post(f"/api/tutorials/{tutorial_id}/sections/{section_ids[0]}/regenerate")
     assert resp.status_code == 200, resp.text

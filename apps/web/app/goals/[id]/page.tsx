@@ -3,7 +3,7 @@
 import { Suspense, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { api, ApiError } from "@/lib/api";
+import { api, ApiError, downloadFile } from "@/lib/api";
 import type {
   Assessment,
   Attempt,
@@ -684,6 +684,8 @@ function TutorialView({
   onGenerateSections: () => void;
   onRegenerateSection: (sectionId: string) => void;
 }) {
+  const [exporting, setExporting] = useState(false);
+  const [exportErr, setExportErr] = useState("");
   const version = tutorial.current_version;
   const content = version?.content;
   const outline = content?.outline ?? [];
@@ -700,6 +702,27 @@ function TutorialView({
           生成中：{gen.stage}（{gen.progress}%）
         </div>
       )}
+
+      <div className="flex items-center gap-2">
+        <Button
+          variant="secondary"
+          disabled={exporting || !version}
+          onClick={async () => {
+            setExporting(true);
+            setExportErr("");
+            try {
+              await downloadFile(`/api/tutorials/${tutorial.id}/export`, `${tutorial.title || "tutorial"}.md`);
+            } catch (e) {
+              setExportErr(errMsg(e));
+            } finally {
+              setExporting(false);
+            }
+          }}
+        >
+          {exporting ? "导出中…" : "下载 Markdown 教程"}
+        </Button>
+        {exportErr && <span className="text-[11px] text-[#a33]">{exportErr}</span>}
+      </div>
 
       <div>
         <div className="mb-1.5 text-[11px] font-bold text-[#5a6a86]">大纲（{outline.length} 节）</div>
