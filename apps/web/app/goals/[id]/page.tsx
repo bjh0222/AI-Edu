@@ -70,6 +70,7 @@ function GoalWorkspace() {
   const [chatLog, setChatLog] = useState<{ q: string; a: string; demo: boolean }[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [decisionReason, setDecisionReason] = useState("");
+  const [gen, setGen] = useState<{ stage: string; progress: number } | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -123,6 +124,49 @@ function GoalWorkspace() {
       setError(errMsg(e));
     } finally {
       setBusy("");
+    }
+  };
+
+  const pollJob = (jobId: string) => {
+    const tick = async () => {
+      try {
+        const job = await api.get<{ status: string; stage: string; progress: number; error_code: string }>(
+          `/api/generation-jobs/${jobId}`
+        );
+        setGen({ stage: job.stage, progress: job.progress });
+        if (job.status === "done") {
+          setGen(null);
+          setBusy("");
+          await loadAll();
+          setNotice("教程章节已生成，质量检查完成");
+        } else if (job.status === "failed") {
+          setGen(null);
+          setBusy("");
+          setError(`章节生成失败（${job.error_code || "unknown"}），请检查模型配置后重试`);
+        } else {
+          setTimeout(tick, 2000);
+        }
+      } catch (e) {
+        setGen(null);
+        setBusy("");
+        setError(errMsg(e));
+      }
+    };
+    setTimeout(tick, 1500);
+  };
+
+  const startSections = async () => {
+    if (!tutorial) return;
+    setBusy("sections");
+    setError("");
+    setNotice("");
+    try {
+      const resp = await api.post<{ job_id: string }>(`/api/tutorials/${tutorial.id}/sections/generate`);
+      setGen({ stage: "已提交，等待模型返回…", progress: 0 });
+      pollJob(resp.job_id);
+    } catch (e) {
+      setBusy("");
+      setError(errMsg(e));
     }
   };
 
@@ -383,14 +427,9 @@ function GoalWorkspace() {
               <TutorialView
                 tutorial={tutorial}
                 busy={busy}
+                gen={gen}
                 confirmDisabled={false}
-                onGenerateSections={() =>
-                  run(
-                    "sections",
-                    async () => { await api.post(`/api/tutorials/${tutorial.id}/sections/generate`); },
-                    "教程章节已生成，质量检查完成"
-                  )
-                }
+                onGenerateSections={startSections}
                 onRegenerateSection={(sid) =>
                   run(
                     `regen-${sid}`,
@@ -634,11 +673,13 @@ function proposalText(p: Proposal): string {
 function TutorialView({
   tutorial,
   busy,
+  gen,
   onGenerateSections,
   onRegenerateSection,
 }: {
   tutorial: Tutorial;
   busy: string;
+  gen: { stage: string; progress: number } | null;
   confirmDisabled: boolean;
   onGenerateSections: () => void;
   onRegenerateSection: (sectionId: string) => void;
@@ -653,6 +694,12 @@ function TutorialView({
   return (
     <div className="grid gap-3">
       <DemoNotice show={!!isDemo}>教程由演示生成器产生，关键事实与命令需人工核验。</DemoNotice>
+
+      {gen && (
+        <div className="rounded-xl border border-[#c9c2ff] bg-[#f8f7ff] px-3 py-2 text-[11px] text-brand">
+          生成中：{gen.stage}（{gen.progress}%）
+        </div>
+      )}
 
       <div>
         <div className="mb-1.5 text-[11px] font-bold text-[#5a6a86]">大纲（{outline.length} 节）</div>

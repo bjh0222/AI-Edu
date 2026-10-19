@@ -1,5 +1,7 @@
 """核心闭环测试：目标 → 诊断 → 计划 → 验收 → 教程 → 实践 → 反馈 → 评估 → 复盘 → 知识。"""
 
+import time
+
 
 def _create_goal(client) -> dict:
     resp = client.post(
@@ -67,9 +69,18 @@ def test_closed_loop_demo(client):
     tutorial_id = gen["tutorial"]["id"]
     assert gen["tutorial"]["current_version"]["content"]["outline"]
 
-    # 教程：分节生成 + 质量检查
+    # 教程：分节生成（后台任务，轮询进度）+ 质量检查
     resp = client.post(f"/api/tutorials/{tutorial_id}/sections/generate")
     assert resp.status_code == 200, resp.text
+    job_id = resp.json()["job_id"]
+    status = ""
+    for _ in range(200):
+        job = client.get(f"/api/generation-jobs/{job_id}").json()
+        status = job["status"]
+        if status in ("done", "failed"):
+            break
+        time.sleep(0.05)
+    assert status == "done", f"章节生成未完成：{status}"
     tut = client.get(f"/api/tutorials/{tutorial_id}").json()
     content = tut["current_version"]["content"]
     assert len(content["sections"]) >= 3

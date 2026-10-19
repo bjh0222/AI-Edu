@@ -1,11 +1,13 @@
 """教程服务：大纲 → 分节生成 → 质量检查 → 版本管理。"""
 from __future__ import annotations
 
+import threading
 import uuid
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..learning.disciplines import get_profile
 from ..learning.engine import check_structure
 from ..llm.service import AIService, AIServiceError
@@ -86,7 +88,7 @@ def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
 
     job = GenerationJob(goal_id=goal.id, job_type="tutorial_outline", status="running", progress=10, stage="生成大纲")
     db.add(job)
-    db.flush()
+    db.commit()  # 先提交，避免在等待模型返回期间持有写锁
     try:
         data = ai.outline(goal, profile, [{"id": c["id"], "statement": c["statement"]} for c in criteria])
         raw_sections = data.get("sections", [])[:MAX_SECTIONS_HINT]
@@ -132,93 +134,157 @@ def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
         raise HTTPException(status_code=502, detail={"code": "llm_error", "message": str(exc)}) from exc
 
 
-def generate_sections(db: Session, tutorial_id: str, ai: AIService) -> dict:
+def start_sections(db: Session, tutorial_id: str, ai: AIService) -> dict:
+    """启动后台章节生成任务并立即返回（前端轮询 /generation-jobs/{id} 获取进度）。"""
     tutorial = _get_tutorial(db, tutorial_id)
     goal = _goal_for(db, tutorial.goal_id)
-    profile = get_profile(goal.domain_key)
-    criteria_dicts = goals_service.confirmed_criteria(db, goal.id)
-    criteria_by_id = {c["id"]: c for c in criteria_dicts}
+    _criteria_list(db, goal.id)  # 校验：必须先有已确认验收标准
     version = _current_version(db, tutorial)
     if version is None:
         raise HTTPException(status_code=409, detail={"code": "no_outline", "message": "教程尚无大纲"})
     content = jload(version.content_json, {"outline": [], "sections": []})
-    outline = content.get("outline", [])
-    if not outline:
+    if not content.get("outline"):
         raise HTTPException(status_code=409, detail={"code": "no_outline", "message": "教程尚无大纲"})
 
-    job = GenerationJob(goal_id=goal.id, job_type="tutorial_sections", status="running", progress=5, stage="分节生成")
+    job = GenerationJob(goal_id=goal.id, job_type="tutorial_sections", status="queued", progress=0, stage="排队")
     db.add(job)
-    db.flush()
+    db.commit()  # 释放写锁后再启动后台线程
+
+    thread = threading.Thread(target=_sections_worker, args=(tutorial.id, job.id), daemon=True)
+    thread.start()
+    return {"tutorial": tutorial_dict(db, tutorial), "job": job, "demo": ai.is_demo}
+
+
+def _update_job(
+    db: Session, job_id: str, *, progress: int | None = None, stage: str | None = None, status: str | None = None
+) -> None:
+    job = db.get(GenerationJob, job_id)
+    if job is None:
+        return
+    if progress is not None:
+        job.progress = progress
+    if stage is not None:
+        job.stage = stage
+    if status is not None:
+        job.status = status
+
+
+def _fail_job(db: Session, job_id: str, code: str) -> None:
     try:
-        sections = []
-        prior_titles: list[str] = []
-        for idx, item in enumerate(outline):
-            job.progress = min(85, 10 + idx * 12)
-            job.stage = f"生成第 {idx + 1}/{len(outline)} 节：{item.get('title', '')}"
-            db.flush()
-            mapped = [criteria_by_id[cid] for cid in item.get("criteria_ids", []) if cid in criteria_by_id]
-            raw = ai.section(goal, profile, item, mapped or criteria_dicts, prior_titles)
-            section = {
-                "id": uuid.uuid4().hex[:8],
-                "title": item.get("title", ""),
-                "goal_statement": str(raw.get("goal_statement", "")),
-                "prerequisites": [str(x) for x in raw.get("prerequisites", [])],
-                "explanation": raw.get("explanation", []),
-                "steps": raw.get("steps", []),
-                "examples": [str(x) for x in raw.get("examples", [])],
-                "exercises": [str(x) for x in raw.get("exercises", [])],
-                "variation_task": str(raw.get("variation_task", "")),
-                "common_errors": raw.get("common_errors", []),
-                "sources": raw.get("sources", []),
-                # 以大纲映射为准，保证双向覆盖
-                "mapping_criteria": [cid for cid in item.get("criteria_ids", [])],
-            }
-            sections.append(section)
-            prior_titles.append(item.get("title", ""))
+        db.rollback()
+        job = db.get(GenerationJob, job_id)
+        if job:
+            job.status = "failed"
+            job.error_code = code
+            db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
 
-        new_content = {"outline": outline, "sections": sections}
-        quality = check_structure(new_content, criteria_dicts)
 
-        prev = _current_version(db, tutorial)
-        base_version = prev.version if prev else 1
-        new_version = TutorialVersion(
+def _sections_worker(tutorial_id: str, job_id: str) -> None:
+    """后台线程：独立会话逐节生成；每节完成即提交，失败时保留已完成内容。"""
+    from ..db import SessionLocal
+    from ..models import LearningGoal
+
+    db = SessionLocal()
+    try:
+        tutorial = db.get(Tutorial, tutorial_id)
+        if tutorial is None:
+            _fail_job(db, job_id, "tutorial_not_found")
+            return
+        goal = db.get(LearningGoal, tutorial.goal_id)
+        if goal is None:
+            _fail_job(db, job_id, "goal_not_found")
+            return
+        profile = get_profile(goal.domain_key)
+        criteria_dicts = goals_service.confirmed_criteria(db, goal.id)
+        criteria_by_id = {c["id"]: c for c in criteria_dicts}
+        version = db.get(TutorialVersion, tutorial.current_version_id) if tutorial.current_version_id else None
+        content = jload(version.content_json, {"outline": [], "sections": []}) if version else {}
+        outline = content.get("outline", [])
+        if not outline:
+            _fail_job(db, job_id, "no_outline")
+            return
+
+        # 草稿版本：每完成一节即写入，避免中断丢失已完成章节
+        base_version = version.version if version else 0
+        draft = TutorialVersion(
             tutorial_id=tutorial.id,
             version=base_version + 1,
-            content_json=jdump(new_content),
+            content_json=jdump({"outline": outline, "sections": []}),
             prompt_version="v1",
-            model_provider="demo" if ai.is_demo else "openai-compatible",
-            model_name="demo" if ai.is_demo else "configured",
-            quality_report=jdump(quality),
+            model_provider="demo" if not settings.llm_configured else "openai-compatible",
+            model_name=settings.llm_model or "demo",
+            quality_report=jdump({}),
         )
-        db.add(new_version)
-        db.flush()
-        tutorial.current_version_id = new_version.id
-        tutorial.status = "drafted" if quality.get("passed") else "drafted_with_issues"
+        db.add(draft)
+        db.commit()
 
-        # 自动生成一个实践任务（来源于最后一节的练习与变式任务）
+        sections: list[dict] = list(content.get("sections", []))
+        prior_titles = [s.get("title", "") for s in sections]
+
+        for idx, item in enumerate(outline):
+            title = item.get("title", "")
+            _update_job(
+                db,
+                job_id,
+                progress=min(85, 5 + idx * 15),
+                stage=f"生成第 {idx + 1}/{len(outline)} 节：{title}",
+                status="running",
+            )
+            db.commit()
+            mapped = [criteria_by_id[cid] for cid in item.get("criteria_ids", []) if cid in criteria_by_id]
+            raw = AIService(db).section(goal, profile, item, mapped or criteria_dicts, prior_titles)
+            sections.append(
+                {
+                    "id": uuid.uuid4().hex[:8],
+                    "title": title,
+                    "goal_statement": str(raw.get("goal_statement", "")),
+                    "prerequisites": [str(x) for x in raw.get("prerequisites", [])],
+                    "explanation": raw.get("explanation", []),
+                    "steps": raw.get("steps", []),
+                    "examples": [str(x) for x in raw.get("examples", [])],
+                    "exercises": [str(x) for x in raw.get("exercises", [])],
+                    "variation_task": str(raw.get("variation_task", "")),
+                    "common_errors": raw.get("common_errors", []),
+                    "sources": raw.get("sources", []),
+                    "mapping_criteria": [cid for cid in item.get("criteria_ids", [])],
+                }
+            )
+            prior_titles.append(title)
+            draft.content_json = jdump({"outline": outline, "sections": sections})
+            db.commit()
+
+        _update_job(db, job_id, progress=90, stage="质量检查")
+        db.commit()
+        new_content = {"outline": outline, "sections": sections}
+        quality = check_structure(new_content, criteria_dicts)
+        draft.quality_report = jdump(quality)
+        draft.content_json = jdump(new_content)
+        tutorial.current_version_id = draft.id
+        tutorial.status = "drafted" if quality.get("passed") else "drafted_with_issues"
         last = sections[-1] if sections else {}
         exercises = last.get("exercises", [])
-        practice_task = PracticeTask(
-            goal_id=goal.id,
-            tutorial_id=tutorial.id,
-            title=f"实践：完成「{goal.title}」的最小真实任务",
-            instructions="\n".join(str(x) for x in exercises) or "按教程完成最小可运行任务。",
-            task_type="practice",
-            expected_artifact=last.get("variation_task") or "产物 + 你的解释",
-            validation_rule="；".join(c["pass_rule"] for c in criteria_dicts if c.get("pass_rule")),
+        db.add(
+            PracticeTask(
+                goal_id=goal.id,
+                tutorial_id=tutorial.id,
+                title=f"实践：完成「{goal.title}」的最小真实任务",
+                instructions="\n".join(str(x) for x in exercises) or "按教程完成最小可运行任务。",
+                task_type="practice",
+                expected_artifact=last.get("variation_task") or "产物 + 你的解释",
+                validation_rule="；".join(c["pass_rule"] for c in criteria_dicts if c.get("pass_rule")),
+            )
         )
-        db.add(practice_task)
         set_status_at_least(goal, "practice")
-        job.status = "done"
-        job.progress = 100
-        job.stage = "完成"
+        _update_job(db, job_id, status="done", progress=100, stage="完成")
         db.commit()
-        return {"tutorial": tutorial_dict(db, tutorial), "job": job, "demo": ai.is_demo}
-    except AIServiceError as exc:
-        job.status = "failed"
-        job.error_code = "llm_error"
-        db.commit()
-        raise HTTPException(status_code=502, detail={"code": "llm_error", "message": str(exc)}) from exc
+    except AIServiceError:
+        _fail_job(db, job_id, "llm_error")
+    except Exception:  # noqa: BLE001
+        _fail_job(db, job_id, "internal_error")
+    finally:
+        db.close()
 
 
 def regenerate_section(db: Session, tutorial_id: str, section_id: str, ai: AIService) -> dict:

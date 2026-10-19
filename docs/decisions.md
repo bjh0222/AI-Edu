@@ -67,3 +67,21 @@
 - **决策**：旧 ai-edu 阶段 0 内容（学习者画像、验收模板、质量清单、命令行教程素材）移动到 `legacy/phase0/`，历史保留；可复用为种子数据/测试素材。
 - **理由**：v2.0 §0.1.2「先检查现状，已有内容尽可能复用，不推倒重建」。
 - **推翻条件**：无。
+
+## ADR-012 真实模型接入（OpenAI 兼容 / DeepSeek）
+
+- **决策**：模型通过 `LLM_BASE_URL`（OpenAI 兼容 `/chat/completions`）+ `LLM_API_KEY` + `LLM_MODEL` 配置；默认接入 DeepSeek（`deepseek-flash` 快速档 / `deepseek-v4-pro` 质量档）；JSON 模式用 `response_format=json_object`，并兼容推理内容与代码围栏。
+- **理由**：模型服务可替换（v2.0 §7.1）；DeepSeek 提供 OpenAI 兼容接口；测试环境强制演示模式（conftest 置空 LLM 变量），避免测试调用真实模型。
+- **推翻条件**：切换其他 OpenAI 兼容服务时只需改 `.env`，无需改代码。
+
+## ADR-013 SQLite 并发策略
+
+- **决策**：WAL 模式 + `busy_timeout=30000`；`ModelCallLog` 使用独立短事务写入，不占用请求事务；生成类接口保持同步执行。
+- **理由**：实测多请求并发（一请求等待模型返回时另一请求写入）会触发 `database is locked`；WAL 提升读写并发，独立日志事务把锁窗口缩到毫秒级。
+- **推翻条件**：并发写需求持续增长时迁移到 PostgreSQL（repository 边界已就绪）。
+
+## ADR-014 测试与演示模式隔离
+
+- **决策**：pytest 通过 conftest 显式置空 `LLM_BASE_URL/LLM_API_KEY/LLM_MODEL`，确保测试永远运行演示生成器，结果确定且零 token 成本。
+- **理由**：测试不应依赖外部网络与密钥；v2.0 §11 要求测试可重复。
+- **推翻条件**：需要真实模型契约测试时，单独标记 `@pytest.mark.live` 的测试集。

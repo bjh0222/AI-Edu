@@ -32,19 +32,26 @@ class AIService:
 
     # ------------------------------------------------------------ internal
     def _log(self, feature: str, status: str, latency_ms: int = 0, error_category: str = "") -> None:
+        """模型调用日志：使用独立短事务写入，避免与请求事务互相持锁。"""
         if self.db is None:
             return
-        self.db.add(
-            ModelCallLog(
-                feature=feature,
-                provider="demo" if self.is_demo else "openai-compatible",
-                model=settings.llm_model or "demo",
-                latency_ms=latency_ms,
-                status=status,
-                error_category=error_category,
-            )
-        )
-        self.db.flush()
+        from ..db import SessionLocal
+
+        try:
+            with SessionLocal() as log_db:
+                log_db.add(
+                    ModelCallLog(
+                        feature=feature,
+                        provider="demo" if self.is_demo else "openai-compatible",
+                        model=settings.llm_model or "demo",
+                        latency_ms=latency_ms,
+                        status=status,
+                        error_category=error_category,
+                    )
+                )
+                log_db.commit()
+        except Exception:  # noqa: BLE001  日志失败不影响主流程
+            pass
 
     def _real_json(self, feature: str, system: str, user: str, required: tuple[str, ...]) -> dict:
         try:

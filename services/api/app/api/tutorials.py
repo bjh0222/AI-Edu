@@ -36,7 +36,7 @@ def get_tutorial(tutorial_id: str, db: Session = Depends(get_db)):
 
 @router.post("/tutorials/{tutorial_id}/sections/generate", response_model=GenerateOut, tags=["tutorials"])
 def generate_sections(tutorial_id: str, db: Session = Depends(get_db), ai: AIService = Depends(get_ai)):
-    result = tutorials_service.generate_sections(db, tutorial_id, ai)
+    result = tutorials_service.start_sections(db, tutorial_id, ai)
     job = result["job"]
     return GenerateOut(tutorial=result["tutorial"], job_id=job.id, demo=result["demo"])
 
