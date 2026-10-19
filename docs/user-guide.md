@@ -17,7 +17,7 @@ python -m venv .venv
 - 数据文件：`services/api/data/aiedu.db`（SQLite，可直接备份）
 - 首次启动自动建表。
 
-### 前端（端口 3000，被占用时会自动改用 3001）
+### 前端（默认 3000，被占用时自动顺延）
 
 ```powershell
 cd apps/web
@@ -25,7 +25,7 @@ npm install
 npm run dev
 ```
 
-打开终端提示的地址（http://localhost:3000 或 3001）。
+打开终端提示的地址（通常 http://localhost:3000）。前端所有接口走**同源 `/api`**，由 Next 服务端反向代理到 `http://127.0.0.1:8000`（见 `next.config.ts` 的 rewrites），因此无需处理跨源；如需直连其他后端，可设置 `NEXT_PUBLIC_API_BASE`。
 
 ### 模型配置（可选）
 
@@ -60,8 +60,9 @@ LLM_MODEL=your-model
 
 | 问题 | 处理 |
 |---|---|
-| 页面提示「无法连接后端」 | 确认 uvicorn 已启动（端口 8000），或检查 CORS 配置 |
-| 3000 端口被占用 | Next 会自动改用 3001；或 `npm run dev -- -p 3000` 指定端口 |
+| 页面提示「无法连接后端」 | 确认 uvicorn 已启动（端口 8000）；前端经同源 `/api` 代理访问 |
+| 页面一直「加载中」 | 硬刷新（Ctrl+F5）以清除旧缓存；确认 dev 服务器在终端提示的端口上运行 |
+| 3000 端口被占用 | Next 会自动顺延；或 `npm run dev -- -p 3000` 指定端口 |
 | 模型调用失败（502） | 检查 `.env` 的 Base URL / Key / Model；确认网络可访问该服务商 |
 | 安装依赖很慢 | 使用镜像：`pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple`；npm 使用 `--registry=https://registry.npmmirror.com` |
 | 想清空数据 | 停止后端，删除 `services/api/data/aiedu.db` 后重启 |

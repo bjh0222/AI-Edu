@@ -91,7 +91,9 @@ export default function SettingsPage() {
           <div className="grid gap-2 text-[12px]">
             <div className="flex items-center justify-between rounded-lg border border-line px-3 py-2">
               <span>后端地址</span>
-              <span className="font-mono text-[11px] text-muted">{API_BASE}</span>
+              <span className="font-mono text-[11px] text-muted">
+                {API_BASE || "同源 /api（Next 反向代理 → 127.0.0.1:8000）"}
+              </span>
             </div>
             <div className="flex items-center justify-between rounded-lg border border-line px-3 py-2">
               <span>模型配置</span>

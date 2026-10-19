@@ -1,4 +1,6 @@
-const BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
+// 默认使用同源 /api（由 Next 服务端反向代理到 FastAPI，见 next.config.ts rewrites）。
+// 需要直连其他后端时可设置 NEXT_PUBLIC_API_BASE（如 http://127.0.0.1:8000）。
+const BASE = process.env.NEXT_PUBLIC_API_BASE ?? "";
 
 export class ApiError extends Error {
   code: string;
