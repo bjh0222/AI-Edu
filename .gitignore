@@ -29,3 +29,5 @@ logs/
 Thumbs.db
 .vscode/
 .idea/
+services/api/pip-*/
+apps/web/.next/
