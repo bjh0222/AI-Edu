@@ -13,9 +13,33 @@ from .db import init_db
 from .llm.service import AIServiceError
 
 
+def _sweep_stale_jobs() -> None:
+    """启动时把上次进程中断遗留的排队/运行中任务标记为失败，避免界面永久转圈。"""
+    from .db import SessionLocal
+    from .models import GenerationJob
+
+    db = SessionLocal()
+    try:
+        stale = (
+            db.query(GenerationJob)
+            .filter(GenerationJob.status.in_(["queued", "running"]))
+            .all()
+        )
+        for job in stale:
+            job.status = "failed"
+            job.error_code = "server_restart"
+        if stale:
+            db.commit()
+    except Exception:  # noqa: BLE001  清理失败不阻塞启动
+        db.rollback()
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    _sweep_stale_jobs()
     yield
 
 
