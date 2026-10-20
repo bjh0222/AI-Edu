@@ -234,6 +234,29 @@ export interface TrainingStats {
   feedback: { positive: number; negative: number; with_comment: number };
 }
 
+export interface Material {
+  id: string;
+  goal_id: string;
+  kind: string; // reference / example_source
+  filename: string;
+  ext: string;
+  content_type: string;
+  size: number;
+  status: string;
+  error_message: string;
+  extract_status: string; // ok / empty / unsupported / failed / pending
+  char_count: number;
+  note: string;
+  created_at?: string;
+  excerpt_preview: string;
+}
+
+export interface MaterialLimits {
+  max_bytes: number;
+  allowed_extensions: string[];
+  kinds: { key: string; label: string }[];
+}
+
 export interface Task {
   id: string;
   goal_id: string;

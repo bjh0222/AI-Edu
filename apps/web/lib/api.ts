@@ -12,6 +12,24 @@ export class ApiError extends Error {
   }
 }
 
+async function errorFrom(status: number, bodyText: string): Promise<ApiError> {
+  let code = "error";
+  let message = `请求失败（${status}）`;
+  try {
+    const body = JSON.parse(bodyText);
+    if (body?.detail?.message) {
+      code = body.detail.code ?? code;
+      message = body.detail.message;
+    } else if (body?.message) {
+      code = body.code ?? code;
+      message = body.message;
+    }
+  } catch {
+    /* ignore */
+  }
+  return new ApiError(status, code, message);
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
@@ -19,21 +37,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   if (!res.ok) {
-    let code = "error";
-    let message = `请求失败（${res.status}）`;
-    try {
-      const body = await res.json();
-      if (body?.detail?.message) {
-        code = body.detail.code ?? code;
-        message = body.detail.message;
-      } else if (body?.message) {
-        code = body.code ?? code;
-        message = body.message;
-      }
-    } catch {
-      /* ignore */
-    }
-    throw new ApiError(res.status, code, message);
+    throw await errorFrom(res.status, await res.text());
   }
   return (await res.json()) as T;
 }
@@ -46,6 +50,42 @@ export const api = {
     request<T>(path, { method: "PATCH", body: JSON.stringify(body ?? {}) }),
   del: <T>(path: string) => request<T>(path, { method: "DELETE" }),
 };
+
+/**
+ * 上传文件（multipart）。用 XHR 而不是 fetch：fetch 没有上传进度事件，
+ * 而材料上传需要展示逐文件的百分比进度。Content-Type 交给浏览器设置（含 boundary）。
+ */
+export function uploadFile<T>(
+  path: string,
+  form: FormData,
+  onProgress?: (percent: number) => void
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${BASE}${path}`);
+    xhr.responseType = "text";
+    xhr.upload.onprogress = (event) => {
+      if (onProgress && event.lengthComputable && event.total > 0) {
+        onProgress(Math.min(100, Math.round((event.loaded / event.total) * 100)));
+      }
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText) as T);
+        } catch {
+          reject(new ApiError(xhr.status, "bad_response", "上传响应无法解析"));
+        }
+        return;
+      }
+      void errorFrom(xhr.status, xhr.responseText).then(reject);
+    };
+    xhr.onerror = () => reject(new ApiError(0, "network_error", "上传失败：网络错误或服务未启动"));
+    xhr.ontimeout = () => reject(new ApiError(0, "timeout", "上传超时，请重试"));
+    xhr.onabort = () => reject(new ApiError(0, "aborted", "上传已取消"));
+    xhr.send(form);
+  });
+}
 
 export const API_BASE = BASE;
 
