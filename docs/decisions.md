@@ -70,7 +70,10 @@
 
 ## ADR-012 真实模型接入（OpenAI 兼容 / DeepSeek）
 
-- **决策**：模型通过 `LLM_BASE_URL`（OpenAI 兼容 `/chat/completions`）+ `LLM_API_KEY` + `LLM_MODEL` 配置；默认接入 DeepSeek（`deepseek-flash` 快速档 / `deepseek-v4-pro` 质量档）；JSON 模式用 `response_format=json_object`，并兼容推理内容与代码围栏。
+- **决策**：模型通过 `LLM_BASE_URL`（OpenAI 兼容 `/chat/completions`）+ `LLM_API_KEY` + `LLM_MODEL` 配置；默认接入 DeepSeek：
+  - `deepseek-flash` = **DeepSeek-V4.1-Flash-1017**（快速档，支持 JSON 输出与工具调用；旧名 `deepseek-v4-flash` 仍可调用，服务端映射到同一模型）；
+  - `deepseek-v4-pro` = DeepSeek-V4-Pro-0813（质量档）。
+  切换只改 `.env` 的 `LLM_MODEL` 并重启后端；JSON 模式用 `response_format=json_object`，并兼容推理内容与代码围栏。
 - **理由**：模型服务可替换（v2.0 §7.1）；DeepSeek 提供 OpenAI 兼容接口；测试环境强制演示模式（conftest 置空 LLM 变量），避免测试调用真实模型。
 - **推翻条件**：切换其他 OpenAI 兼容服务时只需改 `.env`，无需改代码。
 
