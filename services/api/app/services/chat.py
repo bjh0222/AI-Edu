@@ -47,6 +47,10 @@ def chat(db: Session, payload, ai: AIService) -> dict:
     chat_goal = goal or SimpleNamespace(
         title="学习答疑", motivation="", application_context="", current_level="", time_budget=""
     )
+    # 让 token 日志 / 训练样本能关联到目标、教程与章节
+    ai.goal_id = payload.goal_id
+    ai.tutorial_id = payload.tutorial_id
+    ai.section_id = payload.section_id
     try:
         data = ai.chat(chat_goal, payload.question, context)
     except AIServiceError as exc:

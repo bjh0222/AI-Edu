@@ -114,6 +114,11 @@ class TutorialVersion(Base):
     model_name = Column(String(100), default="demo")
     quality_report = Column(Text, default="{}")  # JSON
     source_refs = Column(Text, default="[]")
+    # 生成本版本消耗的 token（真实 usage 或按字符估算，见 usage_source）
+    prompt_tokens = Column(Integer, default=0)
+    completion_tokens = Column(Integer, default=0)
+    total_tokens = Column(Integer, default=0)
+    usage_source = Column(String(20), default="")
     created_at = Column(String(40), default=lambda: _now().isoformat())
 
 
@@ -249,6 +254,10 @@ class GenerationJob(Base):
     stage = Column(String(200), default="")
     error_code = Column(String(50), default="")
     retry_count = Column(Integer, default=0)
+    prompt_tokens = Column(Integer, default=0)
+    completion_tokens = Column(Integer, default=0)
+    total_tokens = Column(Integer, default=0)
+    usage_source = Column(String(20), default="")
     created_at = Column(String(40), default=lambda: _now().isoformat())
     updated_at = Column(String(40), default=lambda: _now().isoformat(), onupdate=lambda: _now().isoformat())
 
@@ -260,7 +269,41 @@ class ModelCallLog(Base):
     feature = Column(String(50), default="")
     provider = Column(String(50), default="")
     model = Column(String(100), default="")
+    goal_id = Column(String(36), nullable=True, index=True)
+    tutorial_id = Column(String(36), nullable=True, index=True)
+    job_id = Column(String(36), nullable=True)
     latency_ms = Column(Integer, default=0)
     status = Column(String(20), default="ok")
     error_category = Column(String(50), default="")
+    prompt_tokens = Column(Integer, default=0)
+    completion_tokens = Column(Integer, default=0)
+    total_tokens = Column(Integer, default=0)
+    usage_source = Column(String(20), default="")  # provider / estimated
+    created_at = Column(String(40), default=lambda: _now().isoformat())
+
+
+class TrainingRecord(Base):
+    """测试版训练数据：生成材料（material）与用户反馈（feedback）。"""
+
+    __tablename__ = "training_records"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    source_type = Column(String(20), default="material", index=True)  # material / feedback
+    feature = Column(String(50), default="")  # diagnose / plan / criteria / outline / section / ...
+    goal_id = Column(String(36), nullable=True, index=True)
+    tutorial_id = Column(String(36), nullable=True, index=True)
+    section_id = Column(String(36), nullable=True)
+    system_prompt = Column(Text, default="")
+    user_prompt = Column(Text, default="")
+    output_text = Column(Text, default="")
+    model_provider = Column(String(50), default="")
+    model_name = Column(String(100), default="")
+    prompt_tokens = Column(Integer, default=0)
+    completion_tokens = Column(Integer, default=0)
+    total_tokens = Column(Integer, default=0)
+    usage_source = Column(String(20), default="")
+    rating = Column(Integer, nullable=True)  # feedback: 1 有帮助 / -1 需改进
+    tags = Column(Text, default="[]")
+    comment = Column(Text, default="")
+    context_json = Column(Text, default="{}")
     created_at = Column(String(40), default=lambda: _now().isoformat())

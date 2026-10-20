@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..llm.service import AIService
 from ..schemas import (
+    ConfirmAllIn,
+    ConfirmAllOut,
     CriterionCreate,
     CriterionDraft,
     CriterionOut,
@@ -93,6 +95,13 @@ def generate_criteria(goal_id: str, db: Session = Depends(get_db), ai: AIService
 @router.post("/goals/{goal_id}/criteria/manual", response_model=CriterionOut, tags=["goals"])
 def create_criterion(goal_id: str, payload: CriterionCreate, db: Session = Depends(get_db)):
     return goals_service.create_criterion(db, goal_id, payload)
+
+
+@router.post("/goals/{goal_id}/criteria/confirm-all", response_model=ConfirmAllOut, tags=["goals"])
+def confirm_all_criteria(goal_id: str, payload: ConfirmAllIn | None = None, db: Session = Depends(get_db)):
+    """一键同意：批量确认该目标下待确认的验收标准。"""
+    criterion_ids = payload.criterion_ids if payload else []
+    return goals_service.confirm_all_criteria(db, goal_id, criterion_ids or None)
 
 
 @router.patch("/criteria/{criterion_id}", response_model=CriterionOut, tags=["goals"])

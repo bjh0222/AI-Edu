@@ -49,3 +49,42 @@ def init_db() -> None:
     from . import models  # noqa: F401  确保模型注册
 
     Base.metadata.create_all(bind=engine)
+    _migrate_sqlite_columns()
+
+
+def _migrate_sqlite_columns() -> None:
+    """轻量迁移：为已存在的 SQLite 表补上新增列（create_all 不会改旧表）。
+
+    只处理「新增可空列 / 带常量默认值的列」；不处理删列、改类型等破坏性变更。
+    """
+    if not _is_sqlite:
+        return
+    with engine.begin() as conn:
+        existing_tables = {
+            row[0]
+            for row in conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue
+            columns = {
+                row[1]
+                for row in conn.exec_driver_sql(f'PRAGMA table_info("{table.name}")').fetchall()
+            }
+            for column in table.columns:
+                if column.name in columns:
+                    continue
+                ddl = (
+                    f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" '
+                    f"{column.type.compile(dialect=engine.dialect)}"
+                )
+                default = getattr(column, "default", None)
+                arg = getattr(default, "arg", None)
+                if arg is not None and not callable(arg):
+                    if isinstance(arg, bool):
+                        ddl += f" DEFAULT {1 if arg else 0}"
+                    elif isinstance(arg, (int, float)):
+                        ddl += f" DEFAULT {arg}"
+                    elif isinstance(arg, str):
+                        ddl += " DEFAULT '" + arg.replace("'", "''") + "'"
+                conn.exec_driver_sql(ddl)

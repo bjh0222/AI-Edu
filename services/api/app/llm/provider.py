@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from typing import Any
 
 import httpx
 
@@ -32,6 +33,37 @@ def extract_json(text: str) -> dict:
     raise LLMError(f"模型输出无法解析为 JSON：{text[:200]}")
 
 
+def parse_usage(data: dict[str, Any]) -> dict[str, Any] | None:
+    """解析 OpenAI 兼容响应中的 usage；不同提供方字段名略有差异。
+
+    返回 None 表示响应未提供 usage（由上层按字符估算并标记 estimated）。
+    """
+    usage = data.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    prompt = usage.get("prompt_tokens", usage.get("input_tokens"))
+    completion = usage.get("completion_tokens", usage.get("output_tokens"))
+    total = usage.get("total_tokens")
+    if prompt is None and completion is None and total is None:
+        return None
+
+    def _int(value: Any) -> int | None:
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    prompt_i, completion_i, total_i = _int(prompt), _int(completion), _int(total)
+    if total_i is None:
+        total_i = (prompt_i or 0) + (completion_i or 0)
+    return {
+        "prompt_tokens": prompt_i or 0,
+        "completion_tokens": completion_i or 0,
+        "total_tokens": total_i or 0,
+        "usage_source": "provider",
+    }
+
+
 class OpenAICompatibleProvider:
     def __init__(self, settings: Settings):
         self.base_url = settings.llm_base_url.rstrip("/")
@@ -39,7 +71,7 @@ class OpenAICompatibleProvider:
         self.model = settings.llm_model
         self.timeout = settings.llm_timeout
 
-    def _post(self, messages: list[dict], json_mode: bool) -> tuple[str, int]:
+    def _post(self, messages: list[dict], json_mode: bool) -> tuple[str, int, dict[str, Any] | None]:
         url = f"{self.base_url}/chat/completions"
         payload = {
             "model": self.model,
@@ -74,16 +106,17 @@ class OpenAICompatibleProvider:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, json.JSONDecodeError) as exc:
             raise LLMError("模型响应格式异常") from exc
-        return content, latency_ms
+        usage = parse_usage(data) if isinstance(data, dict) else None
+        return content, latency_ms, usage
 
-    def complete_json(self, system: str, user: str) -> tuple[dict, int]:
-        content, latency = self._post(
+    def complete_json(self, system: str, user: str) -> tuple[dict, int, dict[str, Any] | None]:
+        content, latency, usage = self._post(
             [{"role": "system", "content": system}, {"role": "user", "content": user}], json_mode=True
         )
-        return extract_json(content), latency
+        return extract_json(content), latency, usage
 
-    def complete_text(self, system: str, user: str) -> tuple[str, int]:
-        content, latency = self._post(
+    def complete_text(self, system: str, user: str) -> tuple[str, int, dict[str, Any] | None]:
+        content, latency, usage = self._post(
             [{"role": "system", "content": system}, {"role": "user", "content": user}], json_mode=False
         )
-        return content.strip(), latency
+        return content.strip(), latency, usage

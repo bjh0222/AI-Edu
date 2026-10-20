@@ -94,6 +94,36 @@ def task_dict(t) -> dict:
     }
 
 
+def token_usage_dict(
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
+    usage_source: str = "",
+    calls: int = 0,
+) -> dict:
+    prompt = int(prompt_tokens or 0)
+    completion = int(completion_tokens or 0)
+    total = int(total_tokens or 0)
+    if total == 0 and (prompt or completion):
+        total = prompt + completion
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total,
+        "usage_source": usage_source or "",
+        "calls": int(calls or 0),
+    }
+
+
+def add_usage(target: dict, prompt: int | None, completion: int | None, total: int | None) -> dict:
+    """把一次调用累加进 usage 字典（就地修改并返回）。"""
+    target["prompt_tokens"] = int(target.get("prompt_tokens") or 0) + int(prompt or 0)
+    target["completion_tokens"] = int(target.get("completion_tokens") or 0) + int(completion or 0)
+    target["total_tokens"] = int(target.get("total_tokens") or 0) + int(total or 0)
+    target["calls"] = int(target.get("calls") or 0) + 1
+    return target
+
+
 def tutorial_version_dict(v) -> dict:
     return {
         "id": v.id,
@@ -105,5 +135,12 @@ def tutorial_version_dict(v) -> dict:
         "model_name": v.model_name or "demo",
         "quality_report": jload(v.quality_report, {}),
         "source_refs": jload(v.source_refs, []),
+        "token_usage": token_usage_dict(
+            v.prompt_tokens,
+            v.completion_tokens,
+            v.total_tokens,
+            v.usage_source or "",
+            calls=1 if (v.total_tokens or 0) > 0 else 0,
+        ),
         "created_at": v.created_at,
     }

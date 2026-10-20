@@ -11,9 +11,17 @@ from ..config import settings
 from ..learning.disciplines import get_profile
 from ..learning.engine import check_structure
 from ..llm.service import AIService, AIServiceError
-from ..models import GenerationJob, PracticeTask, Tutorial, TutorialVersion
+from ..models import GenerationJob, ModelCallLog, PracticeTask, Tutorial, TutorialVersion
 from . import goals as goals_service
-from .utils import criterion_dict, jdump, jload, set_status_at_least, tutorial_version_dict
+from .utils import (
+    add_usage,
+    criterion_dict,
+    jdump,
+    jload,
+    set_status_at_least,
+    token_usage_dict,
+    tutorial_version_dict,
+)
 
 MAX_SECTIONS_HINT = 8
 
@@ -40,6 +48,29 @@ def _current_version(db: Session, tutorial: Tutorial) -> TutorialVersion | None:
     return db.get(TutorialVersion, tutorial.current_version_id)
 
 
+def tutorial_tokens(db: Session, tutorial: Tutorial) -> dict:
+    """教程累计 token：优先按调用日志汇总，旧数据回退到版本字段。"""
+    usage = token_usage_dict()
+    source = ""
+    rows = db.query(ModelCallLog).filter(ModelCallLog.tutorial_id == tutorial.id).all()
+    for row in rows:
+        add_usage(usage, row.prompt_tokens, row.completion_tokens, row.total_tokens)
+        if row.usage_source == "provider":
+            source = "provider"
+        elif row.usage_source == "estimated" and source != "provider":
+            source = "estimated"
+    if usage["calls"] == 0:
+        versions = db.query(TutorialVersion).filter(TutorialVersion.tutorial_id == tutorial.id).all()
+        for version in versions:
+            add_usage(usage, version.prompt_tokens, version.completion_tokens, version.total_tokens)
+            if version.usage_source == "provider":
+                source = "provider"
+            elif version.usage_source == "estimated" and source != "provider":
+                source = "estimated"
+    usage["usage_source"] = source
+    return usage
+
+
 def tutorial_dict(db: Session, tutorial: Tutorial) -> dict:
     version = _current_version(db, tutorial)
     count = db.query(TutorialVersion).filter(TutorialVersion.tutorial_id == tutorial.id).count()
@@ -51,6 +82,7 @@ def tutorial_dict(db: Session, tutorial: Tutorial) -> dict:
         "status": tutorial.status,
         "current_version": tutorial_version_dict(version) if version else None,
         "history_count": count,
+        "tokens": tutorial_tokens(db, tutorial),
     }
 
 
@@ -89,6 +121,11 @@ def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
     job = GenerationJob(goal_id=goal.id, job_type="tutorial_outline", status="running", progress=10, stage="生成大纲")
     db.add(job)
     db.commit()  # 先提交，避免在等待模型返回期间持有写锁
+
+    tutorial = Tutorial(goal_id=goal.id, title=f"{goal.title} · 学习教程", status="outline")
+    db.add(tutorial)
+    db.commit()  # 先落库，让本次调用的 token / 训练样本能关联到 tutorial_id
+    ai.tutorial_id = tutorial.id
     try:
         data = ai.outline(goal, profile, [{"id": c["id"], "statement": c["statement"]} for c in criteria])
         raw_sections = data.get("sections", [])[:MAX_SECTIONS_HINT]
@@ -101,14 +138,8 @@ def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
                 "criteria_ids": [str(x) for x in raw.get("criteria_ids", []) if str(x)],
             })
         content = {"outline": outline, "sections": []}
+        usage = dict(ai.usage_last)
 
-        tutorial = Tutorial(
-            goal_id=goal.id,
-            title=f"{goal.title} · 学习教程",
-            status="outline",
-        )
-        db.add(tutorial)
-        db.flush()
         version = TutorialVersion(
             tutorial_id=tutorial.id,
             version=1,
@@ -117,6 +148,10 @@ def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
             model_provider="demo" if ai.is_demo else "openai-compatible",
             model_name="demo" if ai.is_demo else "configured",
             quality_report=jdump({}),
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            total_tokens=usage.get("total_tokens", 0),
+            usage_source=usage.get("usage_source", ""),
         )
         db.add(version)
         db.flush()
@@ -125,12 +160,26 @@ def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
         job.status = "done"
         job.progress = 100
         job.stage = "大纲完成"
+        job.prompt_tokens = usage.get("prompt_tokens", 0)
+        job.completion_tokens = usage.get("completion_tokens", 0)
+        job.total_tokens = usage.get("total_tokens", 0)
+        job.usage_source = usage.get("usage_source", "")
         db.commit()
         return {"tutorial": tutorial_dict(db, tutorial), "job": job, "demo": ai.is_demo}
     except AIServiceError as exc:
         job.status = "failed"
         job.error_code = "llm_error"
         db.commit()
+        # 清理本次未产出任何版本的「空壳教程」，避免列表出现空教程
+        try:
+            has_version = (
+                db.query(TutorialVersion).filter(TutorialVersion.tutorial_id == tutorial.id).count() > 0
+            )
+            if not has_version:
+                db.delete(tutorial)
+                db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
         raise HTTPException(status_code=502, detail={"code": "llm_error", "message": str(exc)}) from exc
 
 
@@ -216,12 +265,18 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
             model_provider="demo" if not settings.llm_configured else "openai-compatible",
             model_name=settings.llm_model or "demo",
             quality_report=jdump({}),
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+            usage_source="",
         )
         db.add(draft)
         db.commit()
 
         sections: list[dict] = list(content.get("sections", []))
         prior_titles = [s.get("title", "") for s in sections]
+        ai = AIService(db, goal_id=goal.id, tutorial_id=tutorial.id, job_id=job_id)
+        draft_usage_source = ""
 
         for idx, item in enumerate(outline):
             title = item.get("title", "")
@@ -234,10 +289,13 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
             )
             db.commit()
             mapped = [criteria_by_id[cid] for cid in item.get("criteria_ids", []) if cid in criteria_by_id]
-            raw = AIService(db).section(goal, profile, item, mapped or criteria_dicts, prior_titles)
+            section_id = uuid.uuid4().hex[:8]
+            ai.section_id = section_id
+            raw = ai.section(goal, profile, item, mapped or criteria_dicts, prior_titles)
+            usage = dict(ai.usage_last)
             sections.append(
                 {
-                    "id": uuid.uuid4().hex[:8],
+                    "id": section_id,
                     "title": title,
                     "goal_statement": str(raw.get("goal_statement", "")),
                     "prerequisites": [str(x) for x in raw.get("prerequisites", [])],
@@ -249,9 +307,25 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
                     "common_errors": raw.get("common_errors", []),
                     "sources": raw.get("sources", []),
                     "mapping_criteria": [cid for cid in item.get("criteria_ids", [])],
+                    "token_usage": usage,
                 }
             )
             prior_titles.append(title)
+            # 版本 / 任务级 token 累计（真实 usage 优先，缺失时为估算值）
+            draft.prompt_tokens = (draft.prompt_tokens or 0) + int(usage.get("prompt_tokens") or 0)
+            draft.completion_tokens = (draft.completion_tokens or 0) + int(usage.get("completion_tokens") or 0)
+            draft.total_tokens = (draft.total_tokens or 0) + int(usage.get("total_tokens") or 0)
+            if usage.get("usage_source") == "provider":
+                draft_usage_source = "provider"
+            elif usage.get("usage_source") == "estimated" and draft_usage_source != "provider":
+                draft_usage_source = "estimated"
+            draft.usage_source = draft_usage_source
+            job = db.get(GenerationJob, job_id)
+            if job is not None:
+                job.prompt_tokens = (job.prompt_tokens or 0) + int(usage.get("prompt_tokens") or 0)
+                job.completion_tokens = (job.completion_tokens or 0) + int(usage.get("completion_tokens") or 0)
+                job.total_tokens = (job.total_tokens or 0) + int(usage.get("total_tokens") or 0)
+                job.usage_source = draft_usage_source
             draft.content_json = jdump({"outline": outline, "sections": sections})
             db.commit()
 
@@ -304,10 +378,13 @@ def regenerate_section(db: Session, tutorial_id: str, section_id: str, ai: AISer
         raise HTTPException(status_code=404, detail={"code": "section_not_found", "message": "章节不存在"})
     item = outline[target_idx] if target_idx < len(outline) else {"title": sections[target_idx].get("title", ""), "criteria_ids": sections[target_idx].get("mapping_criteria", [])}
     mapped = [criteria_by_id[cid] for cid in item.get("criteria_ids", []) if cid in criteria_by_id]
+    ai.tutorial_id = tutorial.id
+    ai.section_id = section_id
     try:
         raw = ai.section(goal, profile, item, mapped or criteria_dicts, [o.get("title", "") for o in outline[:target_idx]])
     except AIServiceError as exc:
         raise HTTPException(status_code=502, detail={"code": "llm_error", "message": str(exc)}) from exc
+    usage = dict(ai.usage_last)
     sections[target_idx] = {
         "id": section_id,
         "title": item.get("title", sections[target_idx].get("title", "")),
@@ -321,6 +398,7 @@ def regenerate_section(db: Session, tutorial_id: str, section_id: str, ai: AISer
         "common_errors": raw.get("common_errors", []),
         "sources": raw.get("sources", []),
         "mapping_criteria": list(item.get("criteria_ids", [])),
+        "token_usage": usage,
     }
     new_content = {"outline": outline, "sections": sections}
     quality = check_structure(new_content, criteria_dicts)
@@ -332,12 +410,45 @@ def regenerate_section(db: Session, tutorial_id: str, section_id: str, ai: AISer
         model_provider="demo" if ai.is_demo else "openai-compatible",
         model_name="demo" if ai.is_demo else "configured",
         quality_report=jdump(quality),
+        prompt_tokens=usage.get("prompt_tokens", 0),
+        completion_tokens=usage.get("completion_tokens", 0),
+        total_tokens=usage.get("total_tokens", 0),
+        usage_source=usage.get("usage_source", ""),
     )
     db.add(new_version)
     db.flush()
     tutorial.current_version_id = new_version.id
     db.commit()
     return {"tutorial": tutorial_dict(db, tutorial), "demo": ai.is_demo}
+
+
+def get_section(db: Session, tutorial_id: str, section_id: str) -> dict:
+    """章节详情：单节内容 + 所属教程 / 目标 + 前后导航。"""
+    tutorial = _get_tutorial(db, tutorial_id)
+    goal = _goal_for(db, tutorial.goal_id)
+    version = _current_version(db, tutorial)
+    if version is None:
+        raise HTTPException(status_code=409, detail={"code": "no_content", "message": "教程尚无内容"})
+    content = jload(version.content_json, {"outline": [], "sections": []})
+    sections = content.get("sections", [])
+    index = next((i for i, s in enumerate(sections) if s.get("id") == section_id), None)
+    if index is None:
+        raise HTTPException(status_code=404, detail={"code": "section_not_found", "message": "章节不存在"})
+    section = sections[index]
+    return {
+        **section,
+        "id": section.get("id", section_id),
+        "token_usage": section.get("token_usage") or token_usage_dict(),
+        "goal_id": goal.id,
+        "goal_title": goal.title,
+        "tutorial_id": tutorial.id,
+        "tutorial_title": tutorial.title,
+        "index": index,
+        "total": len(sections),
+        "version": version.version,
+        "prev_section_id": sections[index - 1].get("id") if index > 0 else None,
+        "next_section_id": sections[index + 1].get("id") if index + 1 < len(sections) else None,
+    }
 
 
 def restore_version(db: Session, tutorial_id: str, version_number: int) -> dict:
@@ -387,6 +498,10 @@ def export_markdown(db: Session, tutorial_id: str) -> tuple[str, str]:
     lines.append(f"- 模型：{version.model_provider} / {version.model_name}")
     quality_text = "通过" if quality.get("passed") else "待改进"
     lines.append(f"- 版本：v{version.version} ｜ 质量检查：{quality_text}")
+    usage = tutorial_tokens(db, tutorial)
+    if usage["total_tokens"]:
+        usage_label = "实测" if usage["usage_source"] == "provider" else "估算"
+        lines.append(f"- Token 消耗：{usage['total_tokens']}（{usage_label}）")
     lines.append("")
 
     lines.append("## 验收标准")

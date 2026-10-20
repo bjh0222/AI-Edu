@@ -307,3 +307,33 @@ def confirmed_criteria(db: Session, goal_id: str) -> list[dict]:
         .all()
     )
     return [criterion_dict(c) for c in rows]
+
+
+def confirm_all_criteria(db: Session, goal_id: str, criterion_ids: list[str] | None = None) -> dict:
+    """一键同意：把待确认的验收标准批量置为 confirmed。
+
+    - 不覆盖用户已显式「拒绝」的标准（rejected 保持不变）；
+    - 可传入 criterion_ids 只确认指定项，否则确认该目标下全部待确认项。
+    """
+    goal = _get_goal(db, goal_id)
+    query = db.query(AcceptanceCriterion).filter(AcceptanceCriterion.goal_id == goal.id)
+    if criterion_ids:
+        query = query.filter(AcceptanceCriterion.id.in_(criterion_ids))
+    rows = query.order_by(AcceptanceCriterion.created_at.asc()).all()
+    confirmed = 0
+    changed = 0
+    for row in rows:
+        if row.status == "confirmed":
+            confirmed += 1
+        elif row.status == "pending":
+            row.status = "confirmed"
+            confirmed += 1
+            changed += 1
+    set_status_at_least(goal, "acceptance_design")
+    db.commit()
+    return {
+        "goal_id": goal.id,
+        "confirmed": confirmed,
+        "changed": changed,
+        "criteria": [criterion_dict(c) for c in rows],
+    }

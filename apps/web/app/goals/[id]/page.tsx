@@ -9,15 +9,22 @@ import type {
   Attempt,
   ChatResponse,
   Criterion,
+  GenerationJob,
   Goal,
   GoalAssessment,
+  GoalUsage,
   Knowledge,
   Plan,
   Proposal,
+  QuickStartResult,
+  QuickStartStep,
   Reflection,
   Task,
   Tutorial,
 } from "@/lib/types";
+import { fmtTokens, usageSourceLabel } from "@/lib/format";
+import { OutlineList, SectionContent, TokenLine } from "@/components/tutorial";
+import { FeedbackForm } from "@/components/FeedbackForm";
 import { Badge, Button, Card, DemoNotice, Empty, inputCls } from "@/components/ui";
 
 const PHASES: { key: string; label: string }[] = [
@@ -70,16 +77,19 @@ function GoalWorkspace() {
   const [chatLog, setChatLog] = useState<{ q: string; a: string; demo: boolean }[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [decisionReason, setDecisionReason] = useState("");
-  const [gen, setGen] = useState<{ stage: string; progress: number } | null>(null);
+  const [gen, setGen] = useState<{ stage: string; progress: number; tokens: number } | null>(null);
+  const [usage, setUsage] = useState<GoalUsage | null>(null);
+  const [quickSteps, setQuickSteps] = useState<QuickStartStep[]>([]);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
   const tutorial = tutorials[0] ?? null;
   const confirmedCount = criteria.filter((c) => c.status === "confirmed").length;
+  const pendingCount = criteria.filter((c) => c.status === "pending").length;
 
   const loadAll = useCallback(async () => {
-    const [g, d, p, c, ts, tk, as, rf, kn] = await Promise.all([
+    const [g, d, p, c, ts, tk, as, rf, kn, u] = await Promise.all([
       api.get<Goal>(`/api/goals/${goalId}`),
       api.get<GoalAssessment | null>(`/api/goals/${goalId}/diagnose`).catch(() => null),
       api.get<Plan | null>(`/api/goals/${goalId}/plan`).catch(() => null),
@@ -89,6 +99,7 @@ function GoalWorkspace() {
       api.get<Assessment[]>(`/api/goals/${goalId}/assessments`).catch(() => []),
       api.get<Reflection[]>(`/api/goals/${goalId}/reflections`).catch(() => []),
       api.get<Knowledge>("/api/knowledge").catch(() => ({ concepts: [], relations: [], proposals: [] })),
+      api.get<GoalUsage>(`/api/goals/${goalId}/usage`).catch(() => null),
     ]);
     setGoal(g);
     setDiagnosis(d);
@@ -99,6 +110,7 @@ function GoalWorkspace() {
     setAssessments(as);
     setReflections(rf);
     setProposals(kn.proposals.filter((x) => x.status === "pending"));
+    setUsage(u);
 
     const pairs = await Promise.all(
       tk.map(async (t) => [t.id, await api.get<Attempt[]>(`/api/tasks/${t.id}/attempts`).catch(() => [])] as const)
@@ -130,15 +142,19 @@ function GoalWorkspace() {
   const pollJob = (jobId: string) => {
     const tick = async () => {
       try {
-        const job = await api.get<{ status: string; stage: string; progress: number; error_code: string }>(
-          `/api/generation-jobs/${jobId}`
-        );
-        setGen({ stage: job.stage, progress: job.progress });
+        const job = await api.get<GenerationJob>(`/api/generation-jobs/${jobId}`);
+        setGen({
+          stage: job.stage,
+          progress: job.progress,
+          tokens: job.token_usage?.total_tokens ?? 0,
+        });
         if (job.status === "done") {
           setGen(null);
           setBusy("");
           await loadAll();
-          setNotice("教程章节已生成，质量检查完成");
+          setNotice(
+            `教程章节已生成，质量检查完成${job.token_usage?.total_tokens ? ` · 本次消耗 ${fmtTokens(job.token_usage.total_tokens)} tokens` : ""}`
+          );
         } else if (job.status === "failed") {
           setGen(null);
           setBusy("");
@@ -162,13 +178,45 @@ function GoalWorkspace() {
     setNotice("");
     try {
       const resp = await api.post<{ job_id: string }>(`/api/tutorials/${tutorial.id}/sections/generate`);
-      setGen({ stage: "已提交，等待模型返回…", progress: 0 });
+      setGen({ stage: "已提交，等待模型返回…", progress: 0, tokens: 0 });
       pollJob(resp.job_id);
     } catch (e) {
       setBusy("");
       setError(errMsg(e));
     }
   };
+
+  const startQuickstart = async () => {
+    if (busy) return;
+    setBusy("quickstart");
+    setError("");
+    setNotice("");
+    setQuickSteps([]);
+    try {
+      const resp = await api.post<QuickStartResult>(`/api/goals/${goalId}/tutorials/quickstart`);
+      setQuickSteps(resp.steps);
+      await loadAll();
+      if (resp.job_id) {
+        setGen({ stage: "一键生成已提交，正在生成全部章节…", progress: 0, tokens: 0 });
+        pollJob(resp.job_id);
+      } else {
+        setBusy("");
+        setNotice("教材已是最新状态：没有重复生成。");
+      }
+    } catch (e) {
+      setBusy("");
+      setError(errMsg(e));
+    }
+  };
+
+  const confirmAllCriteria = () =>
+    run(
+      "confirm-all",
+      async () => {
+        await api.post(`/api/goals/${goalId}/criteria/confirm-all`);
+      },
+      "已一键同意全部待确认验收标准"
+    );
 
   if (!goal) {
     return (
@@ -333,10 +381,19 @@ function GoalWorkspace() {
             title="③ 验收标准"
             desc="先定义「学会的证据」，再生成教程。确认后的标准才会进入教程验收"
             actions={
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <Badge tone={confirmedCount === criteria.length && criteria.length > 0 ? "done" : "warn"}>
                   {confirmedCount}/{criteria.length} 已确认
                 </Badge>
+                {pendingCount > 0 && (
+                  <Button
+                    variant="secondary"
+                    onClick={confirmAllCriteria}
+                    disabled={busy === "confirm-all"}
+                  >
+                    {busy === "confirm-all" ? "确认中…" : `一键同意全部（${pendingCount}）`}
+                  </Button>
+                )}
                 <Button
                   variant="secondary"
                   onClick={() => run("criteria", async () => { await api.post(`/api/goals/${goalId}/criteria`); }, "验收标准已生成")}
@@ -396,48 +453,82 @@ function GoalWorkspace() {
           {/* 4 教程 */}
           <Card
             title="④ 教程与资料"
-            desc="先大纲、后分节；每节含预期结果与验证方式；质量报告逐项检查"
+            desc="一键生成会按顺序补齐：诊断 → 计划 → 验收标准（一键同意）→ 大纲 → 全部章节；每一步都可点进详情"
             actions={
-              tutorial ? (
-                <Badge tone={tutorial.current_version?.quality_report?.passed ? "done" : "warn"}>
-                  v{tutorial.current_version?.version ?? 1} · 质量
-                  {tutorial.current_version?.quality_report?.passed ? "通过" : "待改进"}
-                </Badge>
-              ) : undefined
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                {usage && (
+                  <Badge tone="neutral">累计 {fmtTokens(usage.totals.total_tokens)} tokens</Badge>
+                )}
+                {tutorial && (
+                  <Badge tone={tutorial.current_version?.quality_report?.passed ? "done" : "warn"}>
+                    v{tutorial.current_version?.version ?? 1} · 质量
+                    {tutorial.current_version?.quality_report?.passed ? "通过" : "待改进"}
+                  </Badge>
+                )}
+              </div>
             }
           >
+            {quickSteps.length > 0 && <QuickStepsPanel steps={quickSteps} />}
+
             {!tutorial ? (
               <div className="grid gap-2">
                 <div className="text-[12px] text-muted">
-                  教程生成前需已有已确认的验收标准。当前已确认 {confirmedCount} 条。
+                  一键生成会自动生成并同意验收标准，不需要逐条点击。当前已确认 {confirmedCount} 条。
                 </div>
-                <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button onClick={startQuickstart} disabled={busy === "quickstart" || !!gen}>
+                    {busy === "quickstart" ? "一键生成中…" : "一键生成教材（推荐）"}
+                  </Button>
                   <Button
+                    variant="secondary"
                     onClick={() => run("outline", async () => { await api.post(`/api/goals/${goalId}/tutorials/generate`); }, "教程大纲已生成")}
                     disabled={busy === "outline" || confirmedCount === 0}
                   >
-                    {busy === "outline" ? "生成中…" : "生成教程大纲"}
+                    {busy === "outline" ? "生成中…" : "只生成大纲"}
                   </Button>
                   {confirmedCount === 0 && (
-                    <span className="ml-3 text-[11px] text-[#c47b12]">请先确认至少一条验收标准（先标准、后教程）</span>
+                    <span className="text-[11px] text-[#c47b12]">「只生成大纲」需先确认至少一条验收标准</span>
                   )}
                 </div>
               </div>
             ) : (
-              <TutorialView
-                tutorial={tutorial}
-                busy={busy}
-                gen={gen}
-                confirmDisabled={false}
-                onGenerateSections={startSections}
-                onRegenerateSection={(sid) =>
-                  run(
-                    `regen-${sid}`,
-                    async () => { await api.post(`/api/tutorials/${tutorial.id}/sections/${sid}/regenerate`); },
-                    "章节已重新生成"
-                  )
-                }
-              />
+              <div className="grid gap-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Link
+                    href={`/tutorials/${tutorial.id}`}
+                    className="rounded-[10px] bg-brand px-3.5 py-2 text-[12px] font-semibold text-white shadow-[0_5px_15px_#6d5dfc2a] hover:bg-brand-dark"
+                  >
+                    打开教程详情 →
+                  </Link>
+                  <Button
+                    variant="secondary"
+                    onClick={startQuickstart}
+                    disabled={busy === "quickstart" || !!gen}
+                  >
+                    {busy === "quickstart" ? "补齐中…" : tutorial.current_version?.content.sections.length ? "一键补齐流程" : "一键生成全部章节"}
+                  </Button>
+                  {gen && (
+                    <span className="text-[11px] text-brand">
+                      {gen.stage}（{gen.progress}%）· 已用 {fmtTokens(gen.tokens)} tokens
+                    </span>
+                  )}
+                </div>
+                <TutorialView
+                  tutorial={tutorial}
+                  criteria={criteria}
+                  usage={usage}
+                  busy={busy}
+                  gen={gen}
+                  onGenerateSections={startSections}
+                  onRegenerateSection={(sid) =>
+                    run(
+                      `regen-${sid}`,
+                      async () => { await api.post(`/api/tutorials/${tutorial.id}/sections/${sid}/regenerate`); },
+                      "章节已重新生成"
+                    )
+                  }
+                />
+              </div>
             )}
           </Card>
 
@@ -670,17 +761,49 @@ function proposalText(p: Proposal): string {
   return JSON.stringify(payload);
 }
 
+const QUICK_STATUS: Record<string, { label: string; cls: string }> = {
+  created: { label: "已生成", cls: "text-[#128b78]" },
+  reused: { label: "沿用", cls: "text-muted" },
+  running: { label: "生成中", cls: "text-brand" },
+};
+
+function QuickStepsPanel({ steps }: { steps: QuickStartStep[] }) {
+  return (
+    <div className="mb-3 rounded-xl border border-line bg-[#fbfcff] p-3">
+      <div className="mb-1.5 text-[11px] font-bold">一键生成流程</div>
+      <ol className="grid gap-1">
+        {steps.map((step, index) => {
+          const status = QUICK_STATUS[step.status] ?? { label: step.status, cls: "text-muted" };
+          return (
+            <li key={step.key} className="flex flex-wrap items-start gap-x-2 text-[11px]">
+              <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-[#f0edff] text-[9px] font-bold text-brand">
+                {index + 1}
+              </span>
+              <span className="font-semibold text-[#33415c]">{step.label}</span>
+              <span className={status.cls}>· {status.label}</span>
+              {step.detail && <span className="text-muted">{step.detail}</span>}
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
 function TutorialView({
   tutorial,
+  criteria,
+  usage,
   busy,
   gen,
   onGenerateSections,
   onRegenerateSection,
 }: {
   tutorial: Tutorial;
+  criteria: Criterion[];
+  usage: GoalUsage | null;
   busy: string;
-  gen: { stage: string; progress: number } | null;
-  confirmDisabled: boolean;
+  gen: { stage: string; progress: number; tokens: number } | null;
   onGenerateSections: () => void;
   onRegenerateSection: (sectionId: string) => void;
 }) {
@@ -700,10 +823,17 @@ function TutorialView({
       {gen && (
         <div className="rounded-xl border border-[#c9c2ff] bg-[#f8f7ff] px-3 py-2 text-[11px] text-brand">
           生成中：{gen.stage}（{gen.progress}%）
+          {gen.tokens ? ` · 已消耗 ${fmtTokens(gen.tokens)} tokens` : ""}
         </div>
       )}
 
-      <div className="flex items-center gap-2">
+      <TokenLine
+        versionTokens={version?.token_usage}
+        tutorialTokens={tutorial.tokens}
+        goalTokens={usage?.totals}
+      />
+
+      <div className="flex flex-wrap items-center gap-2">
         <Button
           variant="secondary"
           disabled={exporting || !version}
@@ -721,114 +851,62 @@ function TutorialView({
         >
           {exporting ? "导出中…" : "下载 Markdown 教程"}
         </Button>
+        <Link href={`/tutorials/${tutorial.id}`} className="text-[11px] font-semibold text-brand hover:underline">
+          完整教程详情 →
+        </Link>
         {exportErr && <span className="text-[11px] text-[#a33]">{exportErr}</span>}
       </div>
 
       <div>
-        <div className="mb-1.5 text-[11px] font-bold text-[#5a6a86]">大纲（{outline.length} 节）</div>
-        <ol className="grid gap-1.5">
-          {outline.map((o, i) => (
-            <li key={o.id || i} className="flex items-center gap-2 rounded-lg bg-[#fafbfc] px-3 py-2 text-[11px]">
-              <span className="grid h-5 w-5 place-items-center rounded bg-white text-[10px] font-bold text-brand">
-                {i + 1}
-              </span>
-              <span className="font-semibold">{o.title}</span>
-              <span className="ml-auto text-[10px] text-muted">{o.criteria_ids.length} 条标准</span>
-            </li>
-          ))}
-        </ol>
+        <div className="mb-1.5 text-[11px] font-bold text-[#5a6a86]">
+          大纲（{outline.length} 节）· 点击任意一步进入详情
+        </div>
+        <OutlineList tutorialId={tutorial.id} outline={outline} sections={sections} />
       </div>
 
       {sections.length === 0 ? (
-        <div>
+        <div className="flex flex-wrap items-center gap-2">
           <Button onClick={onGenerateSections} disabled={busy === "sections"}>
             {busy === "sections" ? "生成中…" : "生成全部章节并执行质量检查"}
           </Button>
+          <span className="text-[11px] text-muted">
+            如需连同诊断 / 计划 / 标准一起补齐，请使用上方「一键生成」。
+          </span>
         </div>
       ) : (
         <div className="grid gap-3">
           {sections.map((s, i) => (
             <div key={s.id} className="rounded-xl border border-line p-3">
               <div className="flex items-start justify-between gap-2">
-                <b className="text-[13px]">
-                  {i + 1}. {s.title}
-                </b>
-                <button
-                  className="text-[10px] font-semibold text-brand hover:underline disabled:opacity-40"
-                  disabled={busy === `regen-${s.id}`}
-                  onClick={() => onRegenerateSection(s.id)}
+                <Link
+                  href={`/tutorials/${tutorial.id}/sections/${s.id}`}
+                  className="text-[13px] font-bold hover:text-brand"
                 >
-                  {busy === `regen-${s.id}` ? "重生成中…" : "重新生成本节"}
-                </button>
+                  {i + 1}. {s.title}
+                </Link>
+                <div className="flex shrink-0 items-center gap-3">
+                  <Link
+                    href={`/tutorials/${tutorial.id}/sections/${s.id}`}
+                    className="text-[10px] font-semibold text-brand hover:underline"
+                  >
+                    查看详情 →
+                  </Link>
+                  <button
+                    className="text-[10px] font-semibold text-brand hover:underline disabled:opacity-40"
+                    disabled={busy === `regen-${s.id}`}
+                    onClick={() => onRegenerateSection(s.id)}
+                  >
+                    {busy === `regen-${s.id}` ? "重生成中…" : "重新生成本节"}
+                  </button>
+                </div>
               </div>
-              {s.goal_statement && <div className="mt-1 text-[11px] text-muted">{s.goal_statement}</div>}
-
-              {s.explanation.length > 0 && (
-                <div className="mt-2 grid gap-1.5">
-                  {s.explanation.map((e, j) => (
-                    <div key={j} className="rounded-lg bg-[#fafbfc] p-2.5 text-[11px] leading-relaxed">
-                      <b className="text-[#4f45a6]">{e.heading}</b>
-                      <div className="whitespace-pre-wrap">{e.body}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {s.steps.length > 0 && (
-                <div className="mt-2">
-                  <div className="mb-1 text-[10px] font-bold text-muted">操作步骤</div>
-                  <ol className="grid gap-1.5">
-                    {s.steps.map((st, j) => (
-                      <li key={j} className="rounded-lg border border-line p-2.5 text-[11px] leading-relaxed">
-                        <div className="font-semibold">{st.text}</div>
-                        <div className="mt-0.5 text-muted">预期结果：{st.expected_result}</div>
-                        <div className="text-muted">验证方式：{st.verification}</div>
-                      </li>
-                    ))}
-                  </ol>
-                </div>
-              )}
-
-              {s.exercises.length > 0 && (
-                <div className="mt-2 text-[11px]">
-                  <div className="mb-1 text-[10px] font-bold text-muted">练习</div>
-                  <ul className="list-disc pl-4 leading-relaxed text-[#33415c]">
-                    {s.exercises.map((x, j) => (
-                      <li key={j}>{x}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-
-              {s.variation_task && (
-                <div className="mt-2 rounded-lg border border-[#e7e3ff] bg-[#f7f6ff] p-2.5 text-[11px] leading-relaxed">
-                  <b className="text-[#6255e8]">变式任务：</b>
-                  {s.variation_task}
-                </div>
-              )}
-
-              {s.common_errors.length > 0 && (
-                <div className="mt-2 text-[11px]">
-                  <div className="mb-1 text-[10px] font-bold text-muted">常见错误</div>
-                  <ul className="grid gap-1">
-                    {s.common_errors.map((e, j) => (
-                      <li key={j} className="text-muted">
-                        <b className="text-[#a33]">{e.error}</b> · {e.cause} · 排查：{e.diagnose}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-
-              {s.sources.length > 0 && (
-                <div className="mt-2 text-[10px] text-muted">
-                  来源：
-                  {s.sources.map((src, j) => (
-                    <span key={j} className="mr-2">
-                      {src.title}
-                      {src.note ? `（${src.note}）` : ""}
-                    </span>
-                  ))}
+              <div className="mt-2">
+                <SectionContent section={s} criteria={criteria} />
+              </div>
+              {s.token_usage && (
+                <div className="mt-2 text-[10px] text-[#99a2b3]">
+                  本节 token：{fmtTokens(s.token_usage.total_tokens)}（
+                  {usageSourceLabel(s.token_usage.usage_source)}）
                 </div>
               )}
             </div>
@@ -862,6 +940,13 @@ function TutorialView({
           )}
         </div>
       )}
+
+      <FeedbackForm
+        goalId={tutorial.goal_id}
+        tutorialId={tutorial.id}
+        targetType="tutorial"
+        title="这套教程对你有帮助吗？"
+      />
     </div>
   );
 }

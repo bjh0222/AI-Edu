@@ -125,8 +125,11 @@ export default function GoalsPage() {
                     {g.application_context ? ` · ${g.application_context}` : ""}
                   </div>
                   <div className="mt-2 flex items-center justify-between">
-                    <Link href={`/goals/${g.id}`} className="text-[11px] font-semibold text-brand hover:underline">
-                      进入学习 →
+                    <Link
+                      href={`/goals/${g.id}`}
+                      className="rounded-lg border border-line bg-white px-2.5 py-1 text-[11px] font-semibold text-brand transition-colors hover:border-[#c9c3ff] hover:bg-[#f8f7ff]"
+                    >
+                      查看 →
                     </Link>
                     <button
                       onClick={() => archive(g.id)}

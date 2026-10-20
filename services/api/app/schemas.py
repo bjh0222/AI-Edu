@@ -15,6 +15,14 @@ class HealthOut(BaseModel):
     llm_configured: bool
 
 
+class TokenUsage(BaseModel):
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    usage_source: str = ""  # provider / estimated / ""
+    calls: int = 0
+
+
 # ---------------------------------------------------------------- goals
 
 
@@ -106,6 +114,10 @@ class CriterionPatch(BaseModel):
     rationale: Optional[str] = None
 
 
+class ConfirmAllIn(BaseModel):
+    criterion_ids: list[str] = []
+
+
 class CriterionOut(BaseModel):
     id: str
     goal_id: str
@@ -172,6 +184,7 @@ class SectionOut(BaseModel):
     common_errors: list[CommonError] = []
     sources: list[SourceRef] = []
     mapping_criteria: list[str] = []
+    token_usage: TokenUsage = Field(default_factory=TokenUsage)
 
 
 class TutorialContent(BaseModel):
@@ -196,6 +209,7 @@ class TutorialVersionOut(BaseModel):
     model_name: str
     quality_report: QualityReport
     source_refs: list[str] = []
+    token_usage: TokenUsage = Field(default_factory=TokenUsage)
     created_at: Optional[str] = None
 
 
@@ -207,6 +221,19 @@ class TutorialOut(BaseModel):
     status: str
     current_version: Optional[TutorialVersionOut] = None
     history_count: int = 0
+    tokens: TokenUsage = Field(default_factory=TokenUsage)
+
+
+class SectionDetailOut(SectionOut):
+    goal_id: str
+    goal_title: str = ""
+    tutorial_id: str
+    tutorial_title: str = ""
+    index: int = 0
+    total: int = 0
+    version: int = 1
+    prev_section_id: Optional[str] = None
+    next_section_id: Optional[str] = None
 
 
 class SectionGenerateRequest(BaseModel):
@@ -226,6 +253,96 @@ class JobOut(BaseModel):
     progress: int
     stage: str
     error_code: str
+    token_usage: TokenUsage = Field(default_factory=TokenUsage)
+
+
+class QuickStartStep(BaseModel):
+    key: str
+    label: str
+    status: str  # created / reused / confirmed / running
+    detail: str = ""
+
+
+class QuickStartOut(BaseModel):
+    goal_id: str
+    steps: list[QuickStartStep] = []
+    tutorial: TutorialOut
+    job_id: Optional[str] = None
+    demo: bool = False
+
+
+class ConfirmAllOut(BaseModel):
+    goal_id: str
+    confirmed: int = 0
+    changed: int = 0
+    criteria: list[CriterionOut] = []
+
+
+class FeatureUsageOut(TokenUsage):
+    feature: str
+
+
+class TutorialUsageOut(TokenUsage):
+    tutorial_id: str
+    tutorial_title: str = ""
+
+
+class GoalUsageOut(BaseModel):
+    goal_id: str
+    totals: TokenUsage = Field(default_factory=TokenUsage)
+    provider_calls: int = 0
+    estimated_calls: int = 0
+    by_feature: list[FeatureUsageOut] = []
+    by_tutorial: list[TutorialUsageOut] = []
+
+
+# ---------------------------------------------------------------- training
+
+
+class TrainingFeedbackIn(BaseModel):
+    goal_id: Optional[str] = None
+    tutorial_id: Optional[str] = None
+    section_id: Optional[str] = None
+    target_type: Literal["general", "generation", "tutorial", "section"] = "general"
+    rating: Literal[-1, 1]
+    tags: list[str] = []
+    comment: str = ""
+    context: dict[str, Any] = {}
+
+
+class TrainingRecordOut(BaseModel):
+    id: str
+    source_type: str
+    feature: str = ""
+    goal_id: Optional[str] = None
+    tutorial_id: Optional[str] = None
+    section_id: Optional[str] = None
+    rating: Optional[int] = None
+    tags: list[str] = []
+    comment: str = ""
+    created_at: Optional[str] = None
+    model_provider: str = ""
+    model_name: str = ""
+    token_usage: TokenUsage = Field(default_factory=TokenUsage)
+    context: dict[str, Any] = {}
+    prompt_preview: str = ""
+    output_preview: str = ""
+    prompt_chars: int = 0
+    output_chars: int = 0
+
+
+class TrainingListOut(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    items: list[TrainingRecordOut] = []
+
+
+class TrainingStatsOut(BaseModel):
+    totals: dict[str, Any] = {}
+    by_feature: list[dict[str, Any]] = []
+    tokens: TokenUsage = Field(default_factory=TokenUsage)
+    feedback: dict[str, Any] = {}
 
 
 # ---------------------------------------------------------------- practice

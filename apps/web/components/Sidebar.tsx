@@ -7,6 +7,7 @@ const items = [
   { href: "/", label: "学习工作台", icon: "▦" },
   { href: "/goals", label: "学习目标", icon: "◎" },
   { href: "/knowledge", label: "知识网络", icon: "◉" },
+  { href: "/training", label: "测试数据", icon: "◈" },
   { href: "/settings", label: "偏好设置", icon: "⚙" },
 ];
 

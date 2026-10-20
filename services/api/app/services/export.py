@@ -26,6 +26,7 @@ from ..models import (
     PracticeTask,
     Reflection,
     Source,
+    TrainingRecord,
     Tutorial,
     TutorialVersion,
 )
@@ -52,6 +53,7 @@ TABLES = [
     ("chat_messages", ChatMessage),
     ("generation_jobs", GenerationJob),
     ("model_call_logs", ModelCallLog),
+    ("training_records", TrainingRecord),
 ]
 
 

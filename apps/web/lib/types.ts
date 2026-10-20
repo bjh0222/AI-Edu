@@ -68,6 +68,14 @@ export interface OutlineItem {
   criteria_ids: string[];
 }
 
+export interface TokenUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  usage_source: string;
+  calls?: number;
+}
+
 export interface StepBlock {
   text: string;
   expected_result: string;
@@ -87,6 +95,19 @@ export interface Section {
   common_errors: { error: string; cause: string; diagnose: string }[];
   sources: { title: string; url: string; note: string }[];
   mapping_criteria: string[];
+  token_usage?: TokenUsage;
+}
+
+export interface SectionDetail extends Section {
+  goal_id: string;
+  goal_title: string;
+  tutorial_id: string;
+  tutorial_title: string;
+  index: number;
+  total: number;
+  version: number;
+  prev_section_id?: string | null;
+  next_section_id?: string | null;
 }
 
 export interface QualityCheck {
@@ -112,6 +133,7 @@ export interface TutorialVersion {
   model_name: string;
   quality_report: QualityReport;
   source_refs: string[];
+  token_usage?: TokenUsage;
   created_at?: string;
 }
 
@@ -123,6 +145,93 @@ export interface Tutorial {
   status: string;
   current_version?: TutorialVersion | null;
   history_count: number;
+  tokens?: TokenUsage;
+}
+
+export interface QuickStartStep {
+  key: string;
+  label: string;
+  status: string;
+  detail: string;
+}
+
+export interface QuickStartResult {
+  goal_id: string;
+  steps: QuickStartStep[];
+  tutorial: Tutorial;
+  job_id?: string | null;
+  demo: boolean;
+}
+
+export interface ConfirmAllResult {
+  goal_id: string;
+  confirmed: number;
+  changed: number;
+  criteria: Criterion[];
+}
+
+export interface FeatureUsage extends TokenUsage {
+  feature: string;
+}
+
+export interface TutorialUsage extends TokenUsage {
+  tutorial_id: string;
+  tutorial_title: string;
+}
+
+export interface GoalUsage {
+  goal_id: string;
+  totals: TokenUsage;
+  provider_calls: number;
+  estimated_calls: number;
+  by_feature: FeatureUsage[];
+  by_tutorial: TutorialUsage[];
+}
+
+export interface GenerationJob {
+  id: string;
+  goal_id: string;
+  job_type: string;
+  status: string;
+  progress: number;
+  stage: string;
+  error_code: string;
+  token_usage?: TokenUsage;
+}
+
+export interface TrainingRecord {
+  id: string;
+  source_type: string;
+  feature: string;
+  goal_id?: string | null;
+  tutorial_id?: string | null;
+  section_id?: string | null;
+  rating?: number | null;
+  tags: string[];
+  comment: string;
+  created_at?: string;
+  model_provider: string;
+  model_name: string;
+  token_usage: TokenUsage;
+  context: Record<string, unknown>;
+  prompt_preview: string;
+  output_preview: string;
+  prompt_chars: number;
+  output_chars: number;
+}
+
+export interface TrainingList {
+  total: number;
+  limit: number;
+  offset: number;
+  items: TrainingRecord[];
+}
+
+export interface TrainingStats {
+  totals: Record<string, number>;
+  by_feature: { feature: string; records: number; total_tokens: number }[];
+  tokens: TokenUsage;
+  feedback: { positive: number; negative: number; with_comment: number };
 }
 
 export interface Task {
