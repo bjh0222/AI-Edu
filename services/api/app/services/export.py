@@ -18,6 +18,7 @@ from ..models import (
     ConceptRelation,
     GenerationJob,
     GoalAssessment,
+    GoalMaterial,
     KnowledgeProposal,
     LearningGoal,
     LearningPlan,
@@ -37,6 +38,7 @@ EXPORT_VERSION = 1
 TABLES = [
     ("learning_goals", LearningGoal),
     ("goal_assessments", GoalAssessment),
+    ("goal_materials", GoalMaterial),
     ("learning_plans", LearningPlan),
     ("plan_steps", PlanStep),
     ("acceptance_criteria", AcceptanceCriterion),

@@ -251,6 +251,7 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
             _fail_job(db, job_id, "goal_not_found")
             return
         profile = get_profile(goal.domain_key)
+        materials_text = materials_service.materials_context(db, goal.id)
         criteria_dicts = goals_service.confirmed_criteria(db, goal.id)
         criteria_by_id = {c["id"]: c for c in criteria_dicts}
         version = db.get(TutorialVersion, tutorial.current_version_id) if tutorial.current_version_id else None
@@ -296,7 +297,7 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
             mapped = [criteria_by_id[cid] for cid in item.get("criteria_ids", []) if cid in criteria_by_id]
             section_id = uuid.uuid4().hex[:8]
             ai.section_id = section_id
-            raw = ai.section(goal, profile, item, mapped or criteria_dicts, prior_titles)
+            raw = ai.section(goal, profile, item, mapped or criteria_dicts, prior_titles, materials_text)
             usage = dict(ai.usage_last)
             sections.append(
                 {
@@ -385,8 +386,11 @@ def regenerate_section(db: Session, tutorial_id: str, section_id: str, ai: AISer
     mapped = [criteria_by_id[cid] for cid in item.get("criteria_ids", []) if cid in criteria_by_id]
     ai.tutorial_id = tutorial.id
     ai.section_id = section_id
+    materials_text = materials_service.materials_context(db, goal.id)
     try:
-        raw = ai.section(goal, profile, item, mapped or criteria_dicts, [o.get("title", "") for o in outline[:target_idx]])
+        raw = ai.section(
+            goal, profile, item, mapped or criteria_dicts, [o.get("title", "") for o in outline[:target_idx]], materials_text
+        )
     except AIServiceError as exc:
         raise HTTPException(status_code=502, detail={"code": "llm_error", "message": str(exc)}) from exc
     usage = dict(ai.usage_last)
