@@ -9,7 +9,7 @@
 - **方法一（保留 Windows「智能应用控制」）**：打开「Windows PowerShell」，输入 `aiedu` 回车。
 - **方法二（双击）**：双击 `ai-edu\启动 AI Edu.cmd`（需先关闭「智能应用控制」，否则会被系统拦截）。
 
-两种方式都会启动后端（8000）与前端（3000）两个窗口，并打开浏览器 http://127.0.0.1:3000。停止服务 = 关闭这两个窗口。
+两种方式都会启动后端（8000）与前端（3001）两个窗口，并打开浏览器 http://127.0.0.1:3001。停止服务 = 关闭这两个窗口。
 
 > 若双击 .cmd/.lnk 时提示「智能应用控制已阻止不安全文件」：这是 Windows 11 对危险脚本扩展名的拦截。改用 `aiedu` 命令即可；或到「设置 → 隐私和安全性 → Windows 安全中心 → 应用和浏览器控制 → 智能应用控制」关闭该功能（关闭后不可恢复，需重装系统才能重新开启）。
 
@@ -26,7 +26,7 @@ python -m venv .venv
 - 数据文件：`services/api/data/aiedu.db`（SQLite，可直接备份）
 - 首次启动自动建表。
 
-### 前端（默认 3000，被占用时自动顺延）
+### 前端（默认 3001，被占用时自动顺延）
 
 ```powershell
 cd apps/web
@@ -34,7 +34,7 @@ npm install
 npm run dev
 ```
 
-打开终端提示的地址（通常 http://localhost:3000）。前端所有接口走**同源 `/api`**，由 Next 服务端反向代理到 `http://127.0.0.1:8000`（见 `next.config.ts` 的 rewrites），因此无需处理跨源；如需直连其他后端，可设置 `NEXT_PUBLIC_API_BASE`。
+打开终端提示的地址（通常是 http://localhost:3001）。前端所有接口走**同源 `/api`**，由 Next 服务端反向代理到 `http://127.0.0.1:8000`（见 `next.config.ts` 的 rewrites），因此无需处理跨源；如需直连其他后端，可设置 `NEXT_PUBLIC_API_BASE`。
 
 ### 模型配置（可选）
 
@@ -71,7 +71,7 @@ LLM_MODEL=your-model
 |---|---|
 | 页面提示「无法连接后端」 | 确认 uvicorn 已启动（端口 8000）；前端经同源 `/api` 代理访问 |
 | 页面一直「加载中」 | 硬刷新（Ctrl+F5）以清除旧缓存；确认 dev 服务器在终端提示的端口上运行 |
-| 3000 端口被占用 | Next 会自动顺延；或 `npm run dev -- -p 3000` 指定端口 |
+| 3001 端口被占用 | Next 会自动顺延；或 `npm run dev -- -p 3001` 指定端口 |
 | 模型调用失败（502） | 检查 `.env` 的 Base URL / Key / Model；确认网络可访问该服务商 |
 | 安装依赖很慢 | 使用镜像：`pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple`；npm 使用 `--registry=https://registry.npmmirror.com` |
 | 想清空数据 | 停止后端，删除 `services/api/data/aiedu.db` 后重启 |

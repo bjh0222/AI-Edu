@@ -1,4 +1,4 @@
-﻿# AI Edu 一键启动：后端（8000）+ 前端（3000）
+﻿# AI Edu 一键启动：后端（8000）+ 前端（3001）
 # 用法：双击仓库根目录的「启动 AI Edu.cmd」，或在 PowerShell 执行本脚本。
 
 $ErrorActionPreference = "Continue"
@@ -42,18 +42,18 @@ if ($busy) {
     Write-Host "后端已就绪：http://127.0.0.1:8000/docs" -ForegroundColor Green
 }
 
-# 前端：3000 空闲则用 3000；被占用则 Next 自动顺延，实际端口看“AI Edu 前端”窗口输出
-if (-not (Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue)) {
-    Write-Host "启动前端（新窗口“AI Edu 前端”，端口 3000）..." -ForegroundColor Cyan
+# 前端：3001 空闲则用 3001；被占用则 Next 自动顺延，实际端口看“AI Edu 前端”窗口输出
+if (-not (Get-NetTCPConnection -LocalPort 3001 -State Listen -ErrorAction SilentlyContinue)) {
+    Write-Host "启动前端（新窗口“AI Edu 前端”，端口 3001）..." -ForegroundColor Cyan
     Start-Process -FilePath "cmd.exe" `
         -ArgumentList "/k", "title AI Edu 前端 && npm run dev" `
         -WorkingDirectory $frontendDir
 } else {
-    Write-Host "[提示] 端口 3000 已被占用，前端可能已在运行；若未运行请查看已有窗口。" -ForegroundColor Yellow
+    Write-Host "[提示] 端口 3001 已被占用，前端可能已在运行；若未运行请查看已有窗口。" -ForegroundColor Yellow
 }
 
 # 等待前端就绪并打开浏览器
-$url = "http://127.0.0.1:3000"
+$url = "http://127.0.0.1:3001"
 for ($i = 0; $i -lt 60; $i++) {
     Start-Sleep -Seconds 1
     try {
