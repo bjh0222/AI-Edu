@@ -204,29 +204,31 @@ class AIService:
         )
         return _require(data, *required)
 
-    def _demo(self, feature: str, output: Any, goal=None) -> Any:
+    def _demo(self, feature: str, output: Any, goal=None, extra_user: str = "") -> Any:
         """演示模式：记录估算 token 与「合成输入」，训练样本标记 demo=true。"""
         system = f"（演示生成器：{feature}，未配置真实模型）"
         user = goal_context_text(goal)
+        if (extra_user or "").strip():
+            user = f"{user}\n{extra_user.strip()}"
         usage = estimate_usage(f"{system}\n{user}", json.dumps(output, ensure_ascii=False))
         self._record(feature, system=system, user=user, output=output, usage=usage, goal=goal)
         return output
 
     # ------------------------------------------------------------ features
-    def diagnose(self, goal, discipline) -> dict:
+    def diagnose(self, goal, discipline, materials_text: str = "") -> dict:
         if self.is_demo:
-            return self._demo("diagnose", demo.diagnose(goal, discipline), goal)
-        system, user = prompts.diagnose(goal, discipline)
+            return self._demo("diagnose", demo.diagnose(goal, discipline), goal, materials_text)
+        system, user = prompts.diagnose(goal, discipline, materials_text)
         return self._real_json(
             "diagnose", system, user,
             ("benefits", "prerequisites", "alternatives", "assumptions", "uncertainties", "recommendation"),
             goal,
         )
 
-    def plan(self, goal, discipline) -> dict:
+    def plan(self, goal, discipline, materials_text: str = "") -> dict:
         if self.is_demo:
-            return self._demo("plan", demo.plan(goal, discipline), goal)
-        system, user = prompts.plan(goal, discipline)
+            return self._demo("plan", demo.plan(goal, discipline), goal, materials_text)
+        system, user = prompts.plan(goal, discipline, materials_text)
         data = self._real_json("plan", system, user, ("steps",), goal)
         if not isinstance(data.get("steps"), list) or not data["steps"]:
             raise AIServiceError("模型输出缺少有效步骤列表")
@@ -241,21 +243,29 @@ class AIService:
             raise AIServiceError("模型输出缺少有效验收标准列表")
         return data
 
-    def outline(self, goal, discipline, criteria_list) -> dict:
+    def outline(self, goal, discipline, criteria_list, materials_text: str = "") -> dict:
         if self.is_demo:
             ids = [c["id"] for c in criteria_list]
-            return self._demo("outline", {"sections": demo.outline(goal, discipline, ids)}, goal)
-        system, user = prompts.outline(goal, discipline, criteria_list)
+            return self._demo(
+                "outline", {"sections": demo.outline(goal, discipline, ids)}, goal, materials_text
+            )
+        system, user = prompts.outline(goal, discipline, criteria_list, materials_text)
         data = self._real_json("outline", system, user, ("sections",), goal)
         if not isinstance(data.get("sections"), list) or not data["sections"]:
             raise AIServiceError("模型输出缺少有效大纲")
         return data
 
-    def section(self, goal, discipline, item, criteria_list, prior_titles) -> dict:
+    def section(
+        self, goal, discipline, item, criteria_list, prior_titles, materials_text: str = ""
+    ) -> dict:
         if self.is_demo:
             by_id = {c["id"]: c for c in criteria_list}
-            return self._demo("section", demo.section(goal, discipline, item, by_id), goal)
-        system, user = prompts.section(goal, discipline, item, criteria_list, prior_titles)
+            return self._demo(
+                "section", demo.section(goal, discipline, item, by_id), goal, materials_text
+            )
+        system, user = prompts.section(
+            goal, discipline, item, criteria_list, prior_titles, materials_text
+        )
         data = self._real_json(
             "section", system, user,
             ("title", "explanation", "steps", "exercises", "variation_task", "sources", "mapping_criteria"),

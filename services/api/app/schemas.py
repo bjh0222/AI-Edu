@@ -138,6 +138,34 @@ class CriterionDraft(BaseModel):
     rationale: str = ""
 
 
+# ---------------------------------------------------------------- materials
+
+
+class MaterialOut(BaseModel):
+    id: str
+    goal_id: str
+    kind: str = "reference"  # reference / example_source
+    filename: str = ""
+    ext: str = ""
+    content_type: str = ""
+    size: int = 0
+    status: str = "ready"
+    error_message: str = ""
+    extract_status: str = "pending"  # ok / empty / unsupported / failed
+    char_count: int = 0
+    note: str = ""
+    created_at: Optional[str] = None
+    excerpt_preview: str = ""
+
+
+class MaterialLimitsOut(BaseModel):
+    """前端上传前的校验参数：允许的扩展名与单文件上限。"""
+
+    max_bytes: int
+    allowed_extensions: list[str] = []
+    kinds: list[dict[str, str]] = []
+
+
 # ---------------------------------------------------------------- tutorials
 
 

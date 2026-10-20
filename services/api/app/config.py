@@ -35,6 +35,9 @@ class Settings:
         self.llm_model = os.getenv("LLM_MODEL", "").strip()
         self.llm_timeout = int(os.getenv("LLM_TIMEOUT", "120") or 120)
         self.database_url = os.getenv("DATABASE_URL", "sqlite:///./data/aiedu.db").strip()
+        # 用户上传的参考资料 / 例题来源：文件落在 MATERIALS_DIR，元数据落库
+        self.materials_dir = os.getenv("MATERIALS_DIR", "data/materials").strip() or "data/materials"
+        self.material_max_bytes = int(os.getenv("MATERIAL_MAX_BYTES", str(20 * 1024 * 1024)) or 20 * 1024 * 1024)
         self.cors_origins = os.getenv(
             "CORS_ORIGINS",
             "http://127.0.0.1:3000,http://localhost:3000,http://127.0.0.1:3001,http://localhost:3001",

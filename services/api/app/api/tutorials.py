@@ -17,7 +17,6 @@ from ..schemas import (
     JobOut,
     QuickStartOut,
     SectionDetailOut,
-    SectionGenerateRequest,
     TokenUsage,
     TutorialOut,
 )

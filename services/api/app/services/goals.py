@@ -8,6 +8,7 @@ from ..learning.disciplines import get_profile
 from ..learning.engine import PHASES
 from ..llm.service import AIService
 from ..models import AcceptanceCriterion, GoalAssessment, LearningGoal, LearningPlan, PlanStep
+from . import materials as materials_service
 from .utils import criterion_dict, goal_dict, jdump, set_status_at_least, step_dict
 
 
@@ -67,7 +68,8 @@ def archive_goal(db: Session, goal_id: str) -> dict:
 def diagnose_goal(db: Session, goal_id: str, ai: AIService) -> dict:
     goal = _get_goal(db, goal_id)
     profile = get_profile(goal.domain_key)
-    data = ai.diagnose(goal, profile)
+    materials_text = materials_service.materials_context(db, goal.id)
+    data = ai.diagnose(goal, profile, materials_text)
 
     assessment = (
         db.query(GoalAssessment)
@@ -171,7 +173,8 @@ def get_plan(db: Session, goal_id: str) -> dict | None:
 def generate_plan(db: Session, goal_id: str, ai: AIService) -> dict:
     goal = _get_goal(db, goal_id)
     profile = get_profile(goal.domain_key)
-    data = ai.plan(goal, profile)
+    materials_text = materials_service.materials_context(db, goal.id)
+    data = ai.plan(goal, profile, materials_text)
 
     last = (
         db.query(LearningPlan)

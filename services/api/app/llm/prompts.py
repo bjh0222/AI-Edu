@@ -19,10 +19,24 @@ def _goal_ctx(goal) -> dict:
     }
 
 
-def diagnose(goal, discipline) -> tuple[str, str]:
+def _materials_section(materials_text: str) -> str:
+    """用户上传材料（参考资料 / 例题来源）的注入块；无材料时返回空串，保持原 prompt 不变。"""
+    text = (materials_text or "").strip()
+    if not text:
+        return ""
+    return (
+        "\n用户上传的参考资料 / 例题来源（仅作依据，不得编造材料中没有的内容）：\n"
+        f"{text}\n"
+        "要求：引用材料内容时标注「来自材料 N（文件名）」；例题来源里的题型风格优先沿用；"
+        "材料未覆盖的部分明确标注为推断或需核验。\n"
+    )
+
+
+def diagnose(goal, discipline, materials_text: str = "") -> tuple[str, str]:
     user = (
         f"学科：{discipline.display_name}\n"
-        f"学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n\n"
+        f"学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
+        f"{_materials_section(materials_text)}\n"
         "请输出 JSON：{\"benefits\": str, \"prerequisites\": str, \"alternatives\": str, "
         "\"assumptions\": str, \"uncertainties\": str, \"recommendation\": str}。\n"
         "benefits/alternatives 用编号列表；recommendation 给出明确建议（推进/缩小范围/暂缓）。"
@@ -30,10 +44,11 @@ def diagnose(goal, discipline) -> tuple[str, str]:
     return SYSTEM, user
 
 
-def plan(goal, discipline) -> tuple[str, str]:
+def plan(goal, discipline, materials_text: str = "") -> tuple[str, str]:
     user = (
         f"学科：{discipline.display_name}\n学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
-        f"该学科的常见实践形式：{discipline.practice_templates}\n\n"
+        f"该学科的常见实践形式：{discipline.practice_templates}\n"
+        f"{_materials_section(materials_text)}\n"
         "输出 JSON：{\"steps\": [{\"title\": str, \"objective\": str, \"estimated_effort\": str}]}。"
         "步骤 4–6 个，按依赖顺序，第一步必须是范围收窄与环境确认。"
     )
@@ -52,10 +67,11 @@ def criteria(goal, discipline) -> tuple[str, str]:
     return SYSTEM, user
 
 
-def outline(goal, discipline, criteria_list) -> tuple[str, str]:
+def outline(goal, discipline, criteria_list, materials_text: str = "") -> tuple[str, str]:
     user = (
         f"学科：{discipline.display_name}\n学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
-        f"已确认的验收标准：{json.dumps(criteria_list, ensure_ascii=False)}\n\n"
+        f"已确认的验收标准：{json.dumps(criteria_list, ensure_ascii=False)}\n"
+        f"{_materials_section(materials_text)}\n"
         "输出 JSON：{\"sections\": [{\"title\": str, \"summary\": str, \"criteria_ids\": [str]}]}。"
         "章节 4–6 个；每章至少映射一条验收标准；所有验收标准都必须被至少一个章节覆盖；"
         "最后一章必须包含变式任务与复盘。"
@@ -63,12 +79,15 @@ def outline(goal, discipline, criteria_list) -> tuple[str, str]:
     return SYSTEM, user
 
 
-def section(goal, discipline, outline_item, criteria_list, prior_titles) -> tuple[str, str]:
+def section(
+    goal, discipline, outline_item, criteria_list, prior_titles, materials_text: str = ""
+) -> tuple[str, str]:
     user = (
         f"学科：{discipline.display_name}\n学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
         f"已学过章节：{prior_titles}\n"
         f"本章大纲：{json.dumps(outline_item, ensure_ascii=False)}\n"
-        f"相关验收标准：{json.dumps(criteria_list, ensure_ascii=False)}\n\n"
+        f"相关验收标准：{json.dumps(criteria_list, ensure_ascii=False)}\n"
+        f"{_materials_section(materials_text)}\n"
         "输出 JSON，字段如下：\n"
         "{\"title\": str, \"goal_statement\": str, \"prerequisites\": [str], "
         "\"explanation\": [{\"heading\": str, \"body\": str}], "

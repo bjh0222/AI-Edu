@@ -30,7 +30,10 @@ services/api (FastAPI)
 | PlanStep | plan_id, order_index, title, objective, status, dependencies, estimated_effort, completion_evidence_refs | 计划步骤 |
 | AcceptanceCriterion | goal_id, plan_step_id, statement, conditions, evidence_type, pass_rule, status, rationale | 验收标准 |
 | Tutorial | goal_id, plan_step_id, title, status, current_version_id | 教程 |
-| TutorialVersion | tutorial_id, version, content_json, prompt_version, model_provider, model_name, quality_report, source_refs | 教程版本（内容为结构化 JSON，含章节） |
+| TutorialVersion | tutorial_id, version, content_json, prompt_version, model_provider, model_name, quality_report, source_refs, prompt_tokens, completion_tokens, total_tokens, usage_source | 教程版本（内容为结构化 JSON，含章节；token 为生成本版本消耗） |
+| GenerationJob | goal_id, job_type, status, progress, stage, error_code, prompt_tokens, completion_tokens, total_tokens, usage_source | 后台生成任务（分节生成进度 + 本次 token） |
+| ModelCallLog | feature, provider, model, goal_id, tutorial_id, job_id, latency_ms, status, prompt_tokens, completion_tokens, total_tokens, usage_source | 模型调用日志（token 累计来源） |
+| TrainingRecord | source_type(material/feedback), feature, goal_id, tutorial_id, section_id, system_prompt, user_prompt, output_text, model_provider/model_name, tokens, rating, tags, comment, context_json | 测试版训练数据：生成材料 + 用户反馈 |
 | PracticeTask | goal_id, plan_step_id, tutorial_id, title, instructions, task_type, expected_artifact, validation_rule, status | 实践任务 |
 | Attempt | task_id, artifact, artifact_type, result, errors, help_level, user_explanation, feedback, created_at | 尝试与证据 |
 | Assessment | goal_id, task_id, assessment_type, rubric, result, confidence, evidence_refs, weak_points, created_at | 能力评估 |
@@ -67,6 +70,10 @@ v1 内置两套：`computer_cli`（计算机/命令行/编程）与 `math_data`�
 ## 5. 教程生成流水线与质量分级（v2.0 §6）
 
 > 实现说明：**大纲生成**为同步请求（通常 <60s）；**分节生成**为后台任务——`POST /tutorials/{id}/sections/generate` 立即返回 `job_id`，前端轮询 `GET /api/generation-jobs/{job_id}` 显示进度；每完成一节即提交草稿版本，失败/中断不会丢失已完成章节（数据保留在草稿 TutorialVersion 中）。
+>
+> **一键生成（quickstart）**：`POST /api/goals/{id}/tutorials/quickstart` 串起「诊断 → 用户决定 → 计划 → 验收标准（批量同意）→ 大纲 → 全部章节」，每步幂等：已完成阶段复用、已有章节不重复生成；返回逐步状态与 `job_id`。验收标准可单独用 `POST /api/goals/{id}/criteria/confirm-all` 批量确认（不覆盖用户已拒绝项）。
+>
+> **token 记账**：优先读取提供方返回的 `usage`；缺失时按字符估算并标记 `usage_source=estimated`。每次调用写入 ModelCallLog，并累计到 GenerationJob / TutorialVersion；`GET /api/goals/{id}/usage` 按目标 / 功能 / 教程聚合。
 
 1. 校验目标 + 学科配置 + 验收标准齐全；
 2. 生成大纲与验收标准双向映射；
@@ -87,15 +94,24 @@ v1 内置两套：`computer_cli`（计算机/命令行/编程）与 `math_data`�
 
 见 `services/api/app/api/` 下各路由；统一前缀 `/api`。错误响应：`{code, message}`（message 为中文可读，不含敏感信息）。
 
+四项改造新增 / 扩展的接口：
+
+- `POST /api/goals/{id}/tutorials/quickstart`：一键生成教材（幂等，返回步骤状态 + job_id）。
+- `POST /api/goals/{id}/criteria/confirm-all`：一键同意全部待确认验收标准。
+- `GET /api/goals/{id}/usage`：token 用量（总量 / 按功能 / 按教程 / 实测与估算调用数）。
+- `GET /api/generation-jobs/{id}`：返回任务进度与本次 token 用量。
+- `GET /api/tutorials/{id}`、`GET /api/tutorials/{id}/sections/{sid}`：教程 / 章节详情（章节含前后导航与 token）。
+- `POST /api/training/feedback`、`GET /api/training/records`、`GET /api/training/stats`、`GET /api/training/export`：测试版训练数据采集、统计与 JSONL/JSON 导出。
+
 ## 7. 前端信息架构（v2.0 §9.1）
 
 - `/` 工作台（当前目标、下一步、近期实践、待处理反馈）
-- `/goals` 目标列表 / `/goals/new` 新建 / `/goals/[id]` 目标详情（诊断、计划、验收标准、阶段状态、地图缩略）
-- `/goals/[id]/tutorials/[tid]` 教程阅读（章节、答疑、质量报告）
-- `/goals/[id]/practice` 实践任务与提交
-- `/goals/[id]/assessment` 能力评估
-- `/goals/[id]/reflection` 复盘
+- `/goals` 目标列表（每项「查看」经前端路由进入详情）/ 目标创建
+- `/goals/[id]` 目标详情（诊断、计划、验收标准、一键生成、教程摘要、实践、评估、复盘）
+- `/tutorials/[tid]` 教程阅读（大纲 + 全部章节 + 质量报告 + token + 导出 + 用户反馈）
+- `/tutorials/[tid]/sections/[sid]` 章节详情（单节完整内容、前后导航、重生成、反馈）
 - `/knowledge` 知识网络（概念、关系、提议）
+- `/training` 测试版数据采集（生成材料 / 用户反馈统计与导出）
 - `/settings` 模型配置状态、导入导出
 
 视觉基线来自阶段 0 HTML 原型（`D:\BJH\AI%20Edu%E5%8E%9F%E5%9E%8B.html`），Tailwind 令牌对齐原型 CSS 变量。
@@ -103,6 +119,7 @@ v1 内置两套：`computer_cli`（计算机/命令行/编程）与 `math_data`�
 ## 8. 演示模式
 
 未配置 `LLM_API_KEY` 时，`llm/provider.py` 返回 `DemoProvider`：输出确定性结构化内容（与真实输出 schema 完全一致），所有响应带 `demo: true` 标记；不得写入长期真实学习记录时冒充真实模型结果。
+演示调用同样记录 token（按字符估算，`usage_source=estimated`）与训练样本（`metadata.demo=true`），导出时可用「排除演示材料」过滤。
 
 ## 9. 安全
 

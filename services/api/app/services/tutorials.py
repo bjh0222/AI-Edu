@@ -13,6 +13,7 @@ from ..learning.engine import check_structure
 from ..llm.service import AIService, AIServiceError
 from ..models import GenerationJob, ModelCallLog, PracticeTask, Tutorial, TutorialVersion
 from . import goals as goals_service
+from . import materials as materials_service
 from .utils import (
     add_usage,
     criterion_dict,
@@ -126,8 +127,11 @@ def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
     db.add(tutorial)
     db.commit()  # 先落库，让本次调用的 token / 训练样本能关联到 tutorial_id
     ai.tutorial_id = tutorial.id
+    materials_text = materials_service.materials_context(db, goal.id)
     try:
-        data = ai.outline(goal, profile, [{"id": c["id"], "statement": c["statement"]} for c in criteria])
+        data = ai.outline(
+            goal, profile, [{"id": c["id"], "statement": c["statement"]} for c in criteria], materials_text
+        )
         raw_sections = data.get("sections", [])[:MAX_SECTIONS_HINT]
         outline = []
         for raw in raw_sections:
@@ -148,6 +152,7 @@ def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
             model_provider="demo" if ai.is_demo else "openai-compatible",
             model_name="demo" if ai.is_demo else "configured",
             quality_report=jdump({}),
+            source_refs=jdump(materials_service.materials_source_refs(db, goal.id)),
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
             total_tokens=usage.get("total_tokens", 0),

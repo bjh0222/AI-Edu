@@ -206,6 +206,31 @@ class ConceptRelation(Base, TimestampMixin):
     confidence = Column(Float, default=0.5)
 
 
+class GoalMaterial(Base, TimestampMixin):
+    """学习目标下用户上传的参考资料 / 例题来源。
+
+    文件本体落在 MATERIALS_DIR/{goal_id}/{id}{ext}，这里只存元数据与正文摘录，
+    摘录供「价值诊断 / 学习计划 / 教程生成」的 prompt 注入使用。
+    """
+
+    __tablename__ = "goal_materials"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    goal_id = Column(String(36), ForeignKey("learning_goals.id"), index=True)
+    kind = Column(String(20), default="reference")  # reference / example_source
+    filename = Column(String(255), default="")
+    stored_name = Column(String(255), default="")
+    ext = Column(String(20), default="")
+    content_type = Column(String(120), default="")
+    size = Column(Integer, default=0)
+    status = Column(String(20), default="ready")  # ready / failed
+    error_message = Column(Text, default="")
+    extract_status = Column(String(20), default="pending")  # ok / empty / unsupported / failed
+    text_excerpt = Column(Text, default="")
+    char_count = Column(Integer, default=0)
+    note = Column(Text, default="")
+
+
 class Source(Base):
     __tablename__ = "sources"
 
