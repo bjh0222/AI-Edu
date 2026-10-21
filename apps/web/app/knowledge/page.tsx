@@ -359,9 +359,13 @@ function KnowledgePageInner() {
 
           {selectedNode?.type === "goal" && (
             <Card title="学习目标" desc="图谱中的目标节点">
-              <div className="text-[14px] font-bold">{selectedNode.title}</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="text-[14px] font-bold">{selectedNode.title}</div>
+                {selectedNode.status === "archived" && <Badge tone="neutral">已归档</Badge>}
+              </div>
               <div className="mt-1 text-[11px] text-muted">
                 领域：{selectedNode.domain_name} ｜ 关联概念 {selectedNode.degree} 个
+                {selectedNode.status === "archived" && " ｜ 该目标已归档，其知识仍保留在学习记录中"}
               </div>
               <div className="mt-3">
                 <Link

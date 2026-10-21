@@ -367,7 +367,8 @@ export default function GraphCanvas({
                   fill={fill}
                   stroke={stroke}
                   strokeWidth={n.type === "goal" ? 2.5 : 2.2}
-                  fillOpacity={n.type === "goal" ? 0.9 : 0.85}
+                  strokeDasharray={n.type === "goal" && n.status === "archived" ? "3 3" : undefined}
+                  fillOpacity={n.type === "goal" ? (n.status === "archived" ? 0.45 : 0.9) : 0.85}
                 />
                 <text
                   y={radius(n) + 13}

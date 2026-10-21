@@ -150,15 +150,18 @@ export default function Sidebar() {
                                     </button>
                                     <Link
                                       href={`/knowledge?domain=${d.key}&goal=${g.id}`}
-                                      title={g.title}
+                                      title={g.archived ? `${g.title}（已归档）` : g.title}
                                       className={`flex-1 truncate rounded-lg px-1.5 py-1 text-[10.5px] ${
                                         goalActive
                                           ? "bg-[#6d5dfc36] font-semibold text-white"
-                                          : "text-[#8a99b5] hover:bg-white/5 hover:text-white"
+                                          : g.archived
+                                            ? "text-[#5f6d87] hover:bg-white/5 hover:text-[#94a4be]"
+                                            : "text-[#8a99b5] hover:bg-white/5 hover:text-white"
                                       }`}
                                     >
                                       {g.title}
                                       <span className="ml-1 text-[9px] text-[#7787a2]">{g.concept_count}</span>
+                                      {g.archived && <span className="ml-1 text-[9px] text-[#5f6d87]">已归档</span>}
                                     </Link>
                                   </div>
                                   {goalOpen && (

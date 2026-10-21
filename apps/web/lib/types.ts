@@ -421,6 +421,7 @@ export interface NavGoal {
   id: string;
   title: string;
   status: string;
+  archived: boolean;
   concept_count: number;
 }
 

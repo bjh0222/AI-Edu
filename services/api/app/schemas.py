@@ -613,6 +613,7 @@ class NavGoal(BaseModel):
     id: str
     title: str
     status: str
+    archived: bool = False
     concept_count: int = 0
 
 
