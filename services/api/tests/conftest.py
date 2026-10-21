@@ -10,6 +10,8 @@ os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DB.as_posix()}"
 # 上传材料的落盘目录也放到测试目录，避免污染 data/materials
 TEST_MATERIALS = Path(__file__).resolve().parent / "test_materials"
 os.environ["MATERIALS_DIR"] = TEST_MATERIALS.as_posix()
+# 删除目标前的 JSON 备份放到测试目录
+os.environ["BACKUP_DIR"] = (Path(__file__).resolve().parent / "test_backups").as_posix()
 # 测试必须运行在演示模式：显式置空（环境下已有的同名变量优先于 .env，防止测试意外调用真实模型）
 os.environ["LLM_BASE_URL"] = ""
 os.environ["LLM_API_KEY"] = ""
