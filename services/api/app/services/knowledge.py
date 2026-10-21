@@ -14,7 +14,7 @@ import re
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from ..learning.disciplines import get_profile
+from ..learning.disciplines import PROFILES, get_profile
 from ..llm.service import AIService, AIServiceError
 from ..models import (
     Attempt,
@@ -49,6 +49,15 @@ _NORMALIZE_RE = re.compile(r"[\s\u3000·・、，。：:;；!！?？'\"()（）\
 def _norm_title(title: str) -> str:
     """规范化标题：小写、去空白与常见标点，用于概念去重与别名匹配。"""
     return _NORMALIZE_RE.sub("", (title or "").lower()).strip()
+
+
+def _domain_name(key: str) -> str:
+    """领域展示名：规范学科用 display_name；模型提议的扩展标签保持原 key，避免都显示成「通用学科」。"""
+    if not key:
+        return ""
+    if key in PROFILES:
+        return PROFILES[key].display_name
+    return key.replace("_", " ").strip()
 
 
 
@@ -462,8 +471,9 @@ def extract_from_tutorial(
             continue
         section_id = str(raw.get("section_id", "") or "")
         domains = [goal.domain_key]
+        # 只接受规范学科目录里的扩展领域，避免模型自造 xxx_yyy 标签把领域目录拆碎
         extra_domain = str(raw.get("domain_key", "") or "")
-        if extra_domain and extra_domain != goal.domain_key:
+        if extra_domain in PROFILES and extra_domain != goal.domain_key:
             domains.append(extra_domain)
         source_ref = {
             "type": _SECTION_REF,
@@ -585,8 +595,8 @@ def _goal_node_dict(g: LearningGoal) -> dict:
         "type": "goal",
         "title": g.title,
         "domain_key": g.domain_key,
-        "domain_name": get_profile(g.domain_key).display_name,
-        "status": g.status,
+        "domain_name": _domain_name(g.domain_key),
+        "status": "archived" if g.archived else g.status,
         "ref_id": g.id,
     }
 
@@ -595,7 +605,7 @@ def _goal_node_dict(g: LearningGoal) -> dict:
 def graph(db: Session, *, domain: str | None = None, goal_id: str | None = None) -> dict:
     """构建图谱：节点（概念 / 学习目标）与有向边（有效关系）。
 
-    - 全局：全部 active 概念 + 全部未归档目标；
+    - 全局：全部 active 概念 + 全部目标（已归档目标节点 status=archived）；
     - 领域：domain_keys 或目标领域命中该领域；
     - 目标：服务该目标的概念 + 该目标节点。
     撤销 / 驳回关系不进图；proposed 边保留但带待核实标记。
@@ -641,7 +651,7 @@ def graph(db: Session, *, domain: str | None = None, goal_id: str | None = None)
                 "type": "concept",
                 "title": c.title,
                 "domain_keys": jload(c.domain_keys, [c.domain_key] if c.domain_key else []),
-                "domain_name": get_profile(c.domain_key).display_name,
+                "domain_name": _domain_name(c.domain_key),
                 "definition": (c.definition or "")[:200],
                 "mastery": mastery_for_concept(db, c)["status"] if goal_id is None else _mastery_in_goal(db, c, goal_id),
                 "degree": 0,
@@ -650,7 +660,8 @@ def graph(db: Session, *, domain: str | None = None, goal_id: str | None = None)
         )
 
     # 目标节点：全局 / 领域范围下展示目标与概念的关联（目标 → 概念）
-    goals_query = db.query(LearningGoal).filter(LearningGoal.archived == False)  # noqa: E712
+    # 已归档目标也保留（知识网络是学习记录），节点 status 标记 archived 由前端弱化。
+    goals_query = db.query(LearningGoal)
     if domain:
         goals_query = goals_query.filter(LearningGoal.domain_key == domain)
     goals = goals_query.all() if goal_id is None else ([_goal(db, goal_id)] if goal_id else [])
@@ -736,22 +747,34 @@ def _mastery_in_goal(db: Session, concept: Concept, goal_id: str) -> str:
 
 
 def nav(db: Session) -> dict:
-    """侧边栏导航：领域 ← 用户学习目标动态归纳；不依赖硬编码目录。"""
-    goals = db.query(LearningGoal).filter(LearningGoal.archived == False).order_by(LearningGoal.created_at.asc()).all()  # noqa: E712
+    """侧边栏导航：领域 ← 用户学习目标动态归纳；不依赖硬编码目录。
+
+    已归档目标保留在目录里（知识网络是学习记录，不应随归档消失），
+    由前端弱化展示并标注「已归档」。
+    """
+    goals = db.query(LearningGoal).order_by(LearningGoal.created_at.asc()).all()
     all_concepts = db.query(Concept).filter(Concept.status == "active").all()
     domain_names: dict[str, str] = {}
     domain_goals: dict[str, list[dict]] = {}
     for g in goals:
-        profile = get_profile(g.domain_key)
-        domain_names.setdefault(g.domain_key, profile.display_name)
+        domain_names.setdefault(g.domain_key, _domain_name(g.domain_key))
         domain_goals.setdefault(g.domain_key, []).append(
-            {"id": g.id, "title": g.title, "status": g.status, "concept_count": 0}
+            {
+                "id": g.id,
+                "title": g.title,
+                "status": g.status,
+                "archived": bool(g.archived),
+                "concept_count": 0,
+            }
         )
     for c in all_concepts:
         domains = jload(c.domain_keys, []) or ([c.domain_key] if c.domain_key else [])
         goal_ids = jload(c.goal_ids, [])
         for d in domains:
-            domain_names.setdefault(d, get_profile(d).display_name)
+            # 只登记规范学科目录里的领域；模型早期自造的标签（如 python_csv）不进目录，数据仍保留
+            if d not in PROFILES:
+                continue
+            domain_names.setdefault(d, _domain_name(d))
             domain_goals.setdefault(d, [])
         for gid in goal_ids:
             for items in domain_goals.values():

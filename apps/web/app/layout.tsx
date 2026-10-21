@@ -13,6 +13,8 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     <html lang="zh-CN" className="h-full antialiased">
       <body className="min-h-full">
         <div className="mx-auto flex min-h-screen max-w-[1450px]">
+          {/* Sidebar 依赖 useSearchParams（知识网络子目录高亮），必须包在 Suspense 内：
+              否则静态外壳无法预渲染，且首屏会在客户端挂起。 */}
           <Suspense fallback={<aside className="hidden w-[238px] shrink-0 bg-navy md:block" />}>
             <Sidebar />
           </Suspense>
