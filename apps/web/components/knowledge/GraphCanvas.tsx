@@ -2,10 +2,13 @@
 
 /**
  * 知识网络图谱画布：自研轻量力导向布局（纯 SVG + requestAnimationFrame）。
+ * 不引入第三方图库：只需要力导向 + 平移缩放 + 拖拽选中，数百行即可稳定实现。
  *
- * 不引入第三方图库的理由：当前依赖里没有任何图可视化库；本组件只需要
- * 力导向布局 + 平移缩放 + 节点拖拽 + 点击选中，约 300 行即可稳定实现，
- * 避免为一个模块引入重量级依赖。数据全部来自后端持久化结果。
+ * 可读性策略：
+ * - 标签「语义缩放」：按缩放级别与优先级（选中 > 悬停 > 搜索命中 > 高度数）限量显示；
+ * - 标签屏幕空间字号恒定（12px），白色描边避免被连线压字；
+ * - 连线非缩放描边（缩放后仍清晰），待核实关系虚线；
+ * - 适应画布按钮 + 缩放百分比，全屏下放宽缩放上限。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -42,23 +45,27 @@ export default function GraphCanvas({
   edges,
   selectedId,
   highlight,
+  fullscreen = false,
   onSelect,
 }: {
   nodes: GraphNode[];
   edges: GraphEdge[];
   selectedId: string | null;
-  highlight: string[]; // 搜索命中的节点 id；非空时其余节点弱化
+  highlight: string[];
+  fullscreen?: boolean;
   onSelect: (id: string | null) => void;
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ w: 900, h: 560 });
   const [transform, setTransform] = useState({ x: 0, y: 0, k: 1 });
-  // 仿真数据保存在 ref（只在 effect / 事件中修改），渲染用 positions state
   const [positions, setPositions] = useState<Record<string, { x: number; y: number }>>({});
+  const [hovered, setHovered] = useState<string | null>(null);
   const simRef = useRef<SimNode[]>([]);
   const alphaRef = useRef(1);
   const edgesRef = useRef<GraphEdge[]>(edges);
   const sizeRef = useRef(size);
+  const positionsRef = useRef<Record<string, { x: number; y: number }>>({});
+  const transformRef = useRef(transform);
   const dragRef = useRef<{ kind: "node" | "pan"; id?: string; sx: number; sy: number; ox: number; oy: number } | null>(null);
   const highlightSet = useMemo(() => new Set(highlight), [highlight]);
 
@@ -70,13 +77,21 @@ export default function GraphCanvas({
     sizeRef.current = size;
   }, [size]);
 
+  useEffect(() => {
+    positionsRef.current = positions;
+  }, [positions]);
+
+  useEffect(() => {
+    transformRef.current = transform;
+  }, [transform]);
+
   // 尺寸自适应
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
     const observer = new ResizeObserver((entries) => {
       const rect = entries[0]?.contentRect;
-      if (rect) setSize({ w: Math.max(320, rect.width), h: Math.max(360, rect.height) });
+      if (rect) setSize({ w: Math.max(320, rect.width), h: Math.max(300, rect.height) });
     });
     observer.observe(el);
     return () => observer.disconnect();
@@ -92,8 +107,8 @@ export default function GraphCanvas({
       const angle = (i / Math.max(1, nodes.length)) * Math.PI * 2;
       return {
         ...n,
-        x: old?.x ?? cx + Math.cos(angle) * (120 + (i % 5) * 28),
-        y: old?.y ?? cy + Math.sin(angle) * (120 + (i % 5) * 28),
+        x: old?.x ?? cx + Math.cos(angle) * (110 + (i % 5) * 26),
+        y: old?.y ?? cy + Math.sin(angle) * (110 + (i % 5) * 26),
         vx: 0,
         vy: 0,
         fx: null,
@@ -104,7 +119,7 @@ export default function GraphCanvas({
     setPositions(Object.fromEntries(simRef.current.map((n) => [n.id, { x: n.x, y: n.y }])));
   }, [nodes]);
 
-  // 力导向仿真：常驻 rAF 循环；alpha 衰减到阈值后只做廉价检查，不再重绘
+  // 力导向仿真：常驻 rAF 循环；alpha 衰减后只做廉价检查，不再重绘
   useEffect(() => {
     let raf = 0;
     const step = () => {
@@ -116,7 +131,6 @@ export default function GraphCanvas({
         const byId = new Map(sim.map((n) => [n.id, n]));
         const cx = size.w / 2;
         const cy = size.h / 2;
-        // 斥力（按领域聚簇：同域弱斥力，异域强斥力，形成领域板块）
         for (let i = 0; i < sim.length; i++) {
           const a = sim[i];
           for (let j = i + 1; j < sim.length; j++) {
@@ -140,7 +154,6 @@ export default function GraphCanvas({
             b.vy += fy;
           }
         }
-        // 边弹簧：先修关系用略硬的弹簧，保持先修链可读
         const REP = 110;
         for (const e of curEdges) {
           const a = byId.get(e.source);
@@ -156,7 +169,6 @@ export default function GraphCanvas({
           b.vx -= dx * f;
           b.vy -= dy * f;
         }
-        // 向心 + 阻尼 + 积分
         for (const n of sim) {
           n.vx += (cx - n.x) * 0.003 * alpha * 10;
           n.vy += (cy - n.y) * 0.003 * alpha * 10;
@@ -182,22 +194,67 @@ export default function GraphCanvas({
   }, []);
 
   const restart = useCallback(() => {
-    // 唤醒物理循环（循环常驻，只需抬升 alpha）
     alphaRef.current = Math.max(alphaRef.current, 0.5);
   }, []);
 
+  // ------------------------------------------------------------ fit / zoom
+  const fitView = useCallback(() => {
+    const pos = positionsRef.current;
+    const ids = Object.keys(pos);
+    if (!ids.length) return;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const id of ids) {
+      const p = pos[id];
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x);
+      maxY = Math.max(maxY, p.y);
+    }
+    const w = sizeRef.current.w;
+    const h = sizeRef.current.h;
+    const pad = 64;
+    const k = Math.max(
+      0.35,
+      Math.min(fullscreen ? 4 : 3, (w - pad * 2) / Math.max(1, maxX - minX), (h - pad * 2) / Math.max(1, maxY - minY))
+    );
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    setTransform({ k, x: w / 2 - cx * k, y: h / 2 - cy * k });
+  }, [fullscreen]);
+
+  // 首次有位置、切换全屏时自动适应画布
+  const fittedRef = useRef(false);
+  useEffect(() => {
+    if (!fittedRef.current && Object.keys(positions).length > 0) {
+      fittedRef.current = true;
+      fitView();
+    }
+  }, [positions, fitView]);
+
+  useEffect(() => {
+    if (fittedRef.current) fitView();
+  }, [fullscreen, fitView]);
+
+  const zoomBy = (factor: number) => {
+    setTransform((t) => {
+      const maxK = fullscreen ? 4 : 3;
+      const k = Math.min(maxK, Math.max(0.5, t.k * factor));
+      const cx = sizeRef.current.w / 2;
+      const cy = sizeRef.current.h / 2;
+      return { k, x: cx - ((cx - t.x) * k) / t.k, y: cy - ((cy - t.y) * k) / t.k };
+    });
+  };
+
   // ------------------------------------------------------------ interactions
-  const toGraph = useCallback(
-    (clientX: number, clientY: number) => {
-      const rect = wrapRef.current?.getBoundingClientRect();
-      if (!rect) return { x: 0, y: 0 };
-      return {
-        x: (clientX - rect.left - transform.x) / transform.k,
-        y: (clientY - rect.top - transform.y) / transform.k,
-      };
-    },
-    [transform]
-  );
+  const toGraph = (clientX: number, clientY: number) => {
+    const rect = wrapRef.current?.getBoundingClientRect();
+    if (!rect) return { x: 0, y: 0 };
+    const t = transformRef.current;
+    return { x: (clientX - rect.left - t.x) / t.k, y: (clientY - rect.top - t.y) / t.k };
+  };
 
   const onNodeMouseDown = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
@@ -223,14 +280,11 @@ export default function GraphCanvas({
       } else if (d.id) {
         const rect = wrapRef.current?.getBoundingClientRect();
         if (!rect) return;
-        const p = {
-          x: (e.clientX - rect.left - transform.x) / transform.k,
-          y: (e.clientY - rect.top - transform.y) / transform.k,
-        };
+        const t = transformRef.current;
         const n = simRef.current.find((s) => s.id === d.id);
         if (n) {
-          n.fx = p.x;
-          n.fy = p.y;
+          n.fx = (e.clientX - rect.left - t.x) / t.k;
+          n.fy = (e.clientY - rect.top - t.y) / t.k;
           alphaRef.current = Math.max(alphaRef.current, 0.3);
         }
       }
@@ -240,7 +294,7 @@ export default function GraphCanvas({
       if (d?.kind === "node" && d.id) {
         const n = simRef.current.find((s) => s.id === d.id);
         if (n) {
-          n.fx = null; // 松手后节点自由，与 Obsidian 一致
+          n.fx = null;
           n.fy = null;
         }
         restart();
@@ -262,18 +316,16 @@ export default function GraphCanvas({
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
     setTransform((t) => {
-      const k = Math.min(3, Math.max(0.25, t.k * (e.deltaY < 0 ? 1.12 : 0.89)));
+      const maxK = fullscreen ? 4 : 3;
+      const k = Math.min(maxK, Math.max(0.5, t.k * (e.deltaY < 0 ? 1.12 : 0.89)));
       return { k, x: mx - ((mx - t.x) * k) / t.k, y: my - ((my - t.y) * k) / t.k };
     });
   };
 
-  const resetView = () => setTransform({ x: 0, y: 0, k: 1 });
-
   // ------------------------------------------------------------ rendering
   const radius = (n: GraphNode) =>
-    n.type === "goal" ? 13 : Math.min(16, 7 + Math.sqrt(n.degree) * 2.6);
+    n.type === "goal" ? 13 : Math.max(7, Math.min(17, 7 + Math.sqrt(Math.max(1, n.degree)) * 2.4));
   const posOf = (id: string) => positions[id] ?? { x: size.w / 2, y: size.h / 2 };
-
   const domainKeys = useMemo(
     () => Array.from(new Set(nodes.map((n) => n.domain_key).filter(Boolean))),
     [nodes]
@@ -283,18 +335,43 @@ export default function GraphCanvas({
     return DOMAIN_COLORS[(idx < 0 ? 0 : idx) % DOMAIN_COLORS.length];
   };
 
-  const dimmed = (id: string) => highlightSet.size > 0 && !highlightSet.has(id);
+  // 语义标签：按缩放级别限量 + 优先级排序
+  const labelLimit = transform.k < 0.75 ? 12 : transform.k < 1.2 ? 24 : transform.k < 1.8 ? 40 : 999;
+  const labelTargets = useMemo(() => {
+    const score = (n: GraphNode) =>
+      n.id === selectedId ? 4 : n.id === hovered ? 3 : highlightSet.has(n.id) ? 2 : n.degree >= 3 ? 1 : 0;
+    return nodes
+      .map((n) => ({ id: n.id, s: score(n) }))
+      .filter((x) => x.s > 0)
+      .sort((a, b) => b.s - a.s)
+      .slice(0, labelLimit)
+      .map((x) => x.id);
+  }, [nodes, selectedId, hovered, highlightSet, labelLimit]);
+  const labelSet = useMemo(() => new Set(labelTargets), [labelTargets]);
+
+  const dimmed = (id: string) => highlightSet.size > 0 && !highlightSet.has(id) && id !== selectedId;
   const isSelected = (id: string) => selectedId === id;
+  const k = transform.k;
+  const labelFont = (fullscreen ? 13 : 12) / k;
 
   return (
     <div
       ref={wrapRef}
-      className="relative h-[560px] w-full cursor-grab overflow-hidden rounded-xl border border-line bg-[#f8f9fd] active:cursor-grabbing"
+      className="relative h-full w-full cursor-grab overflow-hidden bg-[#f7f9fd] active:cursor-grabbing"
       onMouseDown={onPaneMouseDown}
       onWheel={onWheel}
-      onDoubleClick={resetView}
+      onDoubleClick={fitView}
+      onMouseLeave={() => setHovered(null)}
     >
-      <svg width={size.w} height={size.h}>
+      {/* 点阵背景（屏幕空间） */}
+      <div
+        className="pointer-events-none absolute inset-0"
+        style={{
+          backgroundImage: "radial-gradient(#e2e8f2 1px, transparent 1px)",
+          backgroundSize: "24px 24px",
+        }}
+      />
+      <svg width={size.w} height={size.h} className="relative">
         <defs>
           {Object.entries(RELATION_TYPE_META).map(([key, meta]) => (
             <marker
@@ -303,26 +380,25 @@ export default function GraphCanvas({
               viewBox="0 -4 8 8"
               refX={7}
               refY={0}
-              markerWidth={6}
-              markerHeight={6}
+              markerWidth={5}
+              markerHeight={5}
               orient="auto"
             >
-              <path d="M0,-4L8,0L0,4" fill={meta.color} opacity={key === "goal_covers" ? 0.45 : 0.85} />
+              <path d="M0,-4L8,0L0,4" fill={meta.color} opacity={key === "goal_covers" ? 0.45 : 0.8} />
             </marker>
           ))}
         </defs>
-        <g transform={`translate(${transform.x},${transform.y}) scale(${transform.k})`}>
+        <g transform={`translate(${transform.x},${transform.y}) scale(${k})`}>
           {edges.map((e) => {
+            if (!positions[e.source] || !positions[e.target]) return null;
             const a = posOf(e.source);
             const b = posOf(e.target);
-            if (!positions[e.source] || !positions[e.target]) return null;
             const sourceNode = nodes.find((n) => n.id === e.source);
             const targetNode = nodes.find((n) => n.id === e.target);
             if (!sourceNode || !targetNode) return null;
             const meta = RELATION_TYPE_META[e.relation_type] ?? RELATION_TYPE_META.related;
             const dim = dimmed(e.source) || dimmed(e.target);
             const active = isSelected(e.source) || isSelected(e.target);
-            // 边不再穿过节点圆心：按半径裁剪端点
             const dx = b.x - a.x;
             const dy = b.y - a.y;
             const dist = Math.max(1, Math.hypot(dx, dy));
@@ -337,9 +413,10 @@ export default function GraphCanvas({
                 x2={b.x - (dx / dist) * r2}
                 y2={b.y - (dy / dist) * r2}
                 stroke={meta.color}
-                strokeWidth={active ? 2.2 : 1.2}
+                strokeWidth={active ? 2.4 : 1.2}
+                vectorEffect="non-scaling-stroke"
                 strokeDasharray={e.status === "proposed" ? "5 4" : undefined}
-                opacity={dim ? 0.08 : e.status === "proposed" ? 0.5 : 0.75}
+                opacity={dim ? 0.06 : e.status === "proposed" ? 0.45 : 0.7}
                 markerEnd={`url(#arrow-${markerKey})`}
               />
             );
@@ -349,6 +426,10 @@ export default function GraphCanvas({
             const dim = dimmed(n.id);
             const fill = n.type === "goal" ? "#39455d" : domainColor(n.domain_key);
             const stroke = n.type === "concept" ? MASTERY_STROKE[n.mastery] ?? "#c9d2e3" : "#1c2940";
+            const r = radius(n);
+            const hit = Math.max(r + 6, 22); // 屏幕空间 ≥44px 命中区
+            const showLabel = labelSet.has(n.id);
+            const title = n.title.length > 11 ? `${n.title.slice(0, 11)}…` : n.title;
             return (
               <g
                 key={n.id}
@@ -356,43 +437,97 @@ export default function GraphCanvas({
                 opacity={dim ? 0.12 : 1}
                 style={{ cursor: "pointer" }}
                 onMouseDown={(e) => onNodeMouseDown(e, n.id)}
+                onMouseEnter={() => setHovered(n.id)}
                 onClick={(e) => {
                   e.stopPropagation();
                   onSelect(isSelected(n.id) ? null : n.id);
                 }}
               >
-                {isSelected(n.id) && <circle r={radius(n) + 5} fill="none" stroke="#6d5dfc" strokeWidth={1.6} />}
+                <title>{n.title}</title>
+                <circle r={hit / k} fill="transparent" />
+                {isSelected(n.id) && (
+                  <circle r={r + 6 / k} fill="none" stroke="#6d5dfc" strokeWidth={1.6 / k} />
+                )}
+                {highlightSet.has(n.id) && !isSelected(n.id) && (
+                  <circle r={r + 5 / k} fill="none" stroke="#c47b12" strokeWidth={1.4 / k} opacity={0.8} />
+                )}
                 <circle
-                  r={radius(n)}
+                  r={r}
                   fill={fill}
                   stroke={stroke}
-                  strokeWidth={n.type === "goal" ? 2.5 : 2.2}
-                  strokeDasharray={n.type === "goal" && n.status === "archived" ? "3 3" : undefined}
-                  fillOpacity={n.type === "goal" ? (n.status === "archived" ? 0.45 : 0.9) : 0.85}
+                  strokeWidth={(n.type === "goal" ? 2.5 : 2.2) / k}
+                  fillOpacity={n.type === "goal" ? 0.92 : 0.86}
                 />
-                <text
-                  y={radius(n) + 13}
-                  textAnchor="middle"
-                  fontSize={11}
-                  fill="#39455d"
-                  style={{ pointerEvents: "none", userSelect: "none" }}
-                >
-                  {n.title.length > 12 ? `${n.title.slice(0, 12)}…` : n.title}
-                </text>
+                {showLabel && (
+                  <text
+                    y={r + 12 / k}
+                    textAnchor="middle"
+                    fontSize={labelFont}
+                    fontWeight={n.id === selectedId ? 600 : 500}
+                    fill="#24324a"
+                    style={{
+                      pointerEvents: "none",
+                      userSelect: "none",
+                      paintOrder: "stroke",
+                      stroke: "#ffffff",
+                      strokeWidth: 3 / k,
+                      strokeLinejoin: "round",
+                    }}
+                  >
+                    {title}
+                  </text>
+                )}
               </g>
             );
           })}
         </g>
       </svg>
-      <button
-        type="button"
-        onClick={resetView}
-        className="absolute bottom-3 right-3 rounded-lg border border-line bg-white/90 px-2.5 py-1.5 text-[11px] font-semibold text-[#39455d] shadow-sm hover:border-[#c9c3ff]"
-      >
-        重置视图
-      </button>
-      <div className="absolute bottom-3 left-3 rounded-lg bg-white/85 px-2.5 py-1 text-[10px] text-muted">
-        拖动节点查看关联 · 滚轮缩放 · 空白处拖动平移 · 双击复位
+
+      {/* 图例 */}
+      <div className="pointer-events-none absolute bottom-3 left-3 flex flex-wrap items-center gap-2 rounded-lg bg-white/85 px-2.5 py-1.5 text-[10px] text-[#5a6a86] shadow-sm">
+        {Object.entries(MASTERY_STROKE).map(([key, color]) => (
+          <span key={key} className="flex items-center gap-1">
+            <span className="inline-block h-2.5 w-2.5 rounded-full border-2" style={{ borderColor: color }} />
+            {key === "mastered" ? "有证据" : key === "practicing" ? "练习中" : "缺证据"}
+          </span>
+        ))}
+        <span className="text-[#9aa7bd]">｜ 拖动节点 · 滚轮缩放 · 双击适应</span>
+      </div>
+
+      {/* 缩放控件 */}
+      <div className="absolute bottom-3 right-3 flex items-center gap-1 rounded-lg border border-line bg-white/95 px-1 py-1 shadow-sm">
+        <button
+          type="button"
+          aria-label="缩小"
+          onClick={() => zoomBy(0.85)}
+          className="grid h-7 w-7 place-items-center rounded-md text-[13px] text-[#39455d] hover:bg-[#f0edff]"
+        >
+          −
+        </button>
+        <button
+          type="button"
+          onClick={() => setTransform({ x: 0, y: 0, k: 1 })}
+          className="min-w-[42px] text-[11px] font-semibold text-[#39455d] hover:text-brand"
+          title="回到 100%"
+        >
+          {Math.round(k * 100)}%
+        </button>
+        <button
+          type="button"
+          aria-label="放大"
+          onClick={() => zoomBy(1.18)}
+          className="grid h-7 w-7 place-items-center rounded-md text-[13px] text-[#39455d] hover:bg-[#f0edff]"
+        >
+          +
+        </button>
+        <span className="mx-0.5 h-4 w-px bg-line" />
+        <button
+          type="button"
+          onClick={fitView}
+          className="rounded-md px-2 py-1 text-[11px] font-semibold text-[#39455d] hover:bg-[#f0edff]"
+        >
+          适应
+        </button>
       </div>
     </div>
   );

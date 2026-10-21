@@ -896,6 +896,53 @@ def list_knowledge(db: Session) -> dict:
 
 
 
+def delete_concept(db: Session, concept_id: str) -> dict:
+    """删除概念及其全部关系；清理引用该概念的待处理提议。不含级联，必须显式删边。"""
+    concept = db.get(Concept, concept_id)
+    if concept is None:
+        raise HTTPException(status_code=404, detail={"code": "concept_not_found", "message": "概念不存在"})
+    relations = (
+        db.query(ConceptRelation)
+        .filter(
+            (ConceptRelation.from_concept_id == concept.id) | (ConceptRelation.to_concept_id == concept.id)
+        )
+        .all()
+    )
+    for relation in relations:
+        db.delete(relation)
+    cleaned = 0
+    title = concept.title
+    for proposal in db.query(KnowledgeProposal).filter(KnowledgeProposal.status == "pending").all():
+        payload = jload(proposal.payload, {})
+        if title in (payload.get("title"), payload.get("from_title"), payload.get("to_title")):
+            db.delete(proposal)
+            cleaned += 1
+    db.delete(concept)
+    db.commit()
+    return {
+        "ok": True,
+        "concept_id": concept_id,
+        "title": title,
+        "deleted_relations": len(relations),
+        "deleted_proposals": cleaned,
+    }
+
+
+def clear_graph(db: Session) -> dict:
+    """清空知识网络：删除全部概念、关系与知识提议；学习目标 / 教程 / 练习不受影响。"""
+    relations = db.query(ConceptRelation).delete(synchronize_session=False)
+    concepts = db.query(Concept).delete(synchronize_session=False)
+    proposals = db.query(KnowledgeProposal).delete(synchronize_session=False)
+    db.commit()
+    return {
+        "ok": True,
+        "deleted_concepts": int(concepts or 0),
+        "deleted_relations": int(relations or 0),
+        "deleted_proposals": int(proposals or 0),
+    }
+
+
+
 def create_concept(db: Session, payload) -> dict:
     concept = find_or_create_concept(
         db,
