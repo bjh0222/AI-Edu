@@ -7,12 +7,34 @@ import { api, ApiError } from "@/lib/api";
 import type { Goal } from "@/lib/types";
 import { PHASE_LABELS } from "@/lib/goal-phases";
 import { Badge, Button, Card, Empty, Field, inputCls } from "@/components/ui";
+import { GoalExamples } from "@/components/goals/GoalExamples";
 
 const STATUS_LABEL = PHASE_LABELS;
 
+// 与后端 services/api/app/learning/disciplines.py 的 SUBJECTS 保持一致
+// （依据《AI-Edu-教程分类体系规范》一级学科目录 S01–S21）
 const DOMAINS = [
-  { key: "computer_cli", label: "计算机 / 命令行 / 编程" },
-  { key: "math_data", label: "数学 / 数据分析" },
+  { key: "math_logic", label: "数学、逻辑与统计" },
+  { key: "cs_it", label: "计算机科学与信息技术" },
+  { key: "physics_astronomy", label: "物理与天文学" },
+  { key: "chemistry_materials", label: "化学与材料" },
+  { key: "biology_life", label: "生物与生命科学" },
+  { key: "earth_environment", label: "地球、环境与气候" },
+  { key: "engineering_manufacturing", label: "工程与制造" },
+  { key: "health_sport", label: "医学、健康与运动" },
+  { key: "agriculture_food", label: "农业、食品与兽医" },
+  { key: "psychology_cognition", label: "心理与认知科学" },
+  { key: "society_politics", label: "社会、政治与人类学" },
+  { key: "economics_business", label: "经济、商业与管理" },
+  { key: "law_policy", label: "法律、政策与治理" },
+  { key: "education_learning", label: "教育与学习科学" },
+  { key: "language_communication", label: "语言、语言学与传播" },
+  { key: "philosophy_ethics", label: "哲学、伦理与宗教研究" },
+  { key: "history_culture", label: "历史、文化与考古" },
+  { key: "arts_creativity", label: "文学、艺术与创意实践" },
+  { key: "design_architecture", label: "设计与建筑环境" },
+  { key: "geography_urban", label: "地理、空间与城市研究" },
+  { key: "interdisciplinary", label: "跨学科与综合研究" },
 ];
 
 export default function GoalsPage() {
@@ -23,11 +45,11 @@ export default function GoalsPage() {
   const [busy, setBusy] = useState(false);
   const [form, setForm] = useState({
     title: "",
-    domain_key: "computer_cli",
+    domain_key: "cs_it",
     motivation: "",
     application_context: "",
     current_level: "",
-    time_budget: "每天 30 分钟",
+    time_budget: "共 10 小时",
   });
 
   const load = async () => {
@@ -111,7 +133,7 @@ export default function GoalsPage() {
                     <Badge tone="active">{STATUS_LABEL[g.status] ?? g.status}</Badge>
                   </div>
                   <div className="mt-1 text-[11px] text-muted">
-                    {g.domain_name} · {g.time_budget || "未设时间预算"}
+                    {g.domain_name} · {g.time_budget || "未填可投入总时间"}
                     {g.application_context ? ` · ${g.application_context}` : ""}
                   </div>
                   <div className="mt-2 flex items-center justify-between">
@@ -183,16 +205,20 @@ export default function GoalsPage() {
               placeholder="你已经会什么、卡在哪里？"
             />
           </Field>
-          <Field label="可投入时间">
+          <Field label="可投入总时间">
             <input
               className={inputCls}
               value={form.time_budget}
               onChange={(e) => setForm({ ...form, time_budget: e.target.value })}
             />
+            <span className="text-[10px] text-muted">
+              填总时长（如「共 10 小时」），不用拆成每天的时间安排
+            </span>
           </Field>
           <Button onClick={create} disabled={busy}>
             {busy ? "创建中…" : "创建目标"}
           </Button>
+          <GoalExamples />
           <p className="mt-3 text-[11px] leading-relaxed text-muted">
             创建后仍需评估价值、学习范围与验收标准；这里不会自动生成教程。
           </p>

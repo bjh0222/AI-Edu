@@ -12,6 +12,11 @@ def _goal_title(goal) -> str:
     return getattr(goal, "title", "当前目标")
 
 
+def _is_cli(discipline: DisciplineProfile) -> bool:
+    """计算机类学科（含新目录 cs_it 与旧 key computer_cli）走命令行示例分支。"""
+    return discipline.key in ("computer_cli", "cs_it")
+
+
 def diagnose(goal, discipline: DisciplineProfile) -> dict:
     title = _goal_title(goal)
     app = getattr(goal, "application_context", "") or "完成一个真实可交付的小任务"
@@ -150,7 +155,7 @@ def section(goal, discipline: DisciplineProfile, item: dict, criteria_by_id: dic
     summary = item.get("summary", "")
     cids = item.get("criteria_ids", [])
     crit_text = "；".join(criteria_by_id.get(cid, {}).get("statement", "（验收标准）") for cid in cids) or "本章目标"
-    is_cli = discipline.key == "computer_cli"
+    is_cli = _is_cli(discipline)
 
     explanation = [
         {
@@ -248,7 +253,7 @@ def feedback(goal, discipline: DisciplineProfile, task, attempt, criteria: list[
 
 def assessment(goal, discipline: DisciplineProfile) -> dict:
     title = _goal_title(goal)
-    is_cli = discipline.key == "computer_cli"
+    is_cli = _is_cli(discipline)
     return {
         "rubric": [
             {"dimension": d, "weight": round(1 / len(discipline.assessment_rubrics), 2), "note": ""}

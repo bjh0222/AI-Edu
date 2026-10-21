@@ -6,6 +6,8 @@ import json
 SYSTEM = (
     "你是 AI Edu 的学习引擎。你帮助用户把学习目标转化为可验收、可实践、可迁移的学习闭环。"
     "要求：只输出 JSON；不编造来源；不确定的内容明确标注；不把推断写成事实。"
+    "不要安排日程：任何生成内容中都不出现「第 X 天 / 第 X 周 / 每天 / 每周投入多少时间」这类按日历分配时间的表述；"
+    "时间只以单个步骤或章节的工作量估计（如「1–2 小时」）出现，具体什么时候学由用户自己决定。"
 )
 
 
@@ -15,7 +17,7 @@ def _goal_ctx(goal) -> dict:
         "motivation": goal.motivation,
         "application_context": goal.application_context,
         "current_level": goal.current_level,
-        "time_budget": goal.time_budget,
+        "time_budget": goal.time_budget,  # 可投入总时间（如「共 10 小时」），不是每日日程
     }
 
 
@@ -51,6 +53,8 @@ def plan(goal, discipline, materials_text: str = "") -> tuple[str, str]:
         f"{_materials_section(materials_text)}\n"
         "输出 JSON：{\"steps\": [{\"title\": str, \"objective\": str, \"estimated_effort\": str}]}。"
         "步骤 4–6 个，按依赖顺序，第一步必须是范围收窄与环境确认。"
+        "time_budget 是可投入总时间；estimated_effort 只表示完成该步骤所需的工作量估计（如「1–2 小时」），"
+        "不要把步骤映射到具体日期或天次，不要出现「第 X 天」「每天」的表述。"
     )
     return SYSTEM, user
 
