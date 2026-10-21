@@ -329,14 +329,25 @@ export interface Reflection {
   candidate_concepts?: { title: string; definition: string }[];
 }
 
+export interface SourceRef {
+  type: string;
+  tutorial_id?: string;
+  section_id?: string;
+  title?: string;
+}
+
 export interface Concept {
   id: string;
   domain_key: string;
+  domain_keys: string[];
   title: string;
   definition: string;
   status: string;
-  source_refs: string[];
+  aliases: string[];
+  goal_ids: string[];
+  source_refs: SourceRef[];
   created_at?: string;
+  updated_at?: string;
 }
 
 export interface Relation {
@@ -346,8 +357,13 @@ export interface Relation {
   relation_type: string;
   status: string;
   rationale: string;
+  source_refs: SourceRef[];
+  evidence_refs: unknown[];
   confidence: number;
+  origin: string;
+  history: { action: string; note?: string; at?: string }[];
   created_at?: string;
+  updated_at?: string;
 }
 
 export interface Proposal {
@@ -365,6 +381,86 @@ export interface Knowledge {
   concepts: Concept[];
   relations: Relation[];
   proposals: Proposal[];
+}
+
+// ---------------- 知识网络图谱（重构版） ----------------
+
+export interface GraphNode {
+  id: string;
+  type: "concept" | "goal";
+  title: string;
+  domain_key: string;
+  domain_name: string;
+  definition: string;
+  mastery: string; // mastered / practicing / no_evidence（goal 节点为空）
+  degree: number;
+  status: string;
+  ref_id: string;
+}
+
+export interface GraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  relation_type: string;
+  status: string;
+  rationale: string;
+  confidence: number;
+}
+
+export interface GraphData {
+  scope: { domain: string; goal_id: string };
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  goal_edges: GraphEdge[];
+  stats: { concepts: number; goals: number; relations: number };
+  relation_types: Record<string, string>;
+}
+
+export interface NavGoal {
+  id: string;
+  title: string;
+  status: string;
+  concept_count: number;
+}
+
+export interface NavDomain {
+  key: string;
+  name: string;
+  concept_count: number;
+  goals: NavGoal[];
+}
+
+export interface NavData {
+  domains: NavDomain[];
+  totals: { concepts: number; goals: number; relations: number };
+}
+
+export interface Mastery {
+  status: string;
+  basis: string;
+}
+
+export interface ConceptAnchor {
+  tutorial_id: string;
+  tutorial_title: string;
+  goal_id: string;
+  goal_title: string;
+  section_id: string;
+  section_title: string;
+}
+
+export interface RelationItem extends Relation {
+  direction: "in" | "out";
+  other_concept_id: string;
+  other_title: string;
+}
+
+export interface ConceptDetail extends Concept {
+  relations: RelationItem[];
+  tutorial_anchors: ConceptAnchor[];
+  goals: { id: string; title: string; status: string }[];
+  mastery: Mastery;
 }
 
 export interface Health {

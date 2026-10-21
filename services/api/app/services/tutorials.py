@@ -14,6 +14,7 @@ from ..learning.engine import check_structure
 from ..llm.service import AIService, AIServiceError
 from ..models import GenerationJob, ModelCallLog, PracticeTask, Tutorial, TutorialVersion
 from . import goals as goals_service
+from . import knowledge as knowledge_service
 from . import materials as materials_service
 from .utils import (
     add_usage,
@@ -163,13 +164,24 @@ def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
         db.flush()
         tutorial.current_version_id = version.id
         set_status_at_least(goal, "learning")
-        job.status = "done"
-        job.progress = 100
-        job.stage = "大纲完成"
-        job.prompt_tokens = usage.get("prompt_tokens", 0)
-        job.completion_tokens = usage.get("completion_tokens", 0)
-        job.total_tokens = usage.get("total_tokens", 0)
-        job.usage_source = usage.get("usage_source", "")
+        # 教程生成即更新知识网络：大纲阶段先写入概念级结构（失败不阻断教程）
+        _update_job(db, job_id=job.id, progress=92, stage="更新知识网络")
+        db.commit()
+        try:
+            knowledge_service.extract_from_tutorial(db, goal, tutorial, version, ai)
+        except Exception as exc:  # noqa: BLE001  知识提取失败只记录，不影响教程交付
+            job = db.get(GenerationJob, job.id)
+            if job is not None:
+                job.stage = f"大纲完成（知识网络更新失败：{str(exc)[:80]}）"
+        job = db.get(GenerationJob, job.id)
+        if job is not None:
+            job.status = "done"
+            job.progress = 100
+            job.stage = "大纲完成，知识网络已更新"
+            job.prompt_tokens = usage.get("prompt_tokens", 0)
+            job.completion_tokens = usage.get("completion_tokens", 0)
+            job.total_tokens = usage.get("total_tokens", 0)
+            job.usage_source = usage.get("usage_source", "")
         db.commit()
         return {"tutorial": tutorial_dict(db, tutorial), "job": job, "demo": ai.is_demo}
     except AIServiceError as exc:
@@ -396,7 +408,21 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
             )
         )
         set_status_at_least(goal, "practice")
-        _update_job(db, job_id, status="done", progress=100, stage="完成")
+        # 全部章节完成：提取概念与关系写入知识网络（失败不阻断教程交付，job.stage 留痕）
+        _update_job(db, job_id, progress=94, stage="更新知识网络")
+        db.commit()
+        extraction_error = ""
+        try:
+            knowledge_service.extract_from_tutorial(db, goal, tutorial, draft, ai)
+        except Exception as exc:  # noqa: BLE001
+            extraction_error = f"{exc.__class__.__name__}: {str(exc)[:120]}"
+        _update_job(
+            db,
+            job_id,
+            status="done",
+            progress=100,
+            stage="完成，知识网络已更新" if not extraction_error else f"完成（知识网络更新失败：{extraction_error[:80]}）",
+        )
         db.commit()
     except AIServiceError as exc:
         _fail_job(db, job_id, "llm_error", str(exc))

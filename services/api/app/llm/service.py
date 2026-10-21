@@ -305,6 +305,19 @@ class AIService:
         system, user = prompts.suggest_proposals(goal, concepts, relations_hint)
         return self._real_json("proposals", system, user, ("proposals",), goal)
 
+    def knowledge_extract(self, goal, tutorial, context: dict, existing: list) -> dict:
+        """教程生成后的结构化知识提取（概念 + 关系）。失败抛 AIServiceError，由调用方兜底。"""
+        if self.is_demo:
+            data = demo.knowledge_extract(goal, tutorial, context, existing)
+            return self._demo("knowledge_extract", data, goal)
+        system, user = prompts.knowledge_extract(goal, tutorial, context, existing)
+        data = self._real_json("knowledge_extract", system, user, ("concepts", "relations"), goal)
+        if not isinstance(data.get("concepts"), list):
+            raise AIServiceError("模型输出缺少概念列表")
+        if not isinstance(data.get("relations"), list):
+            data["relations"] = []
+        return data
+
     def chat(self, goal, question: str, context: dict) -> dict:
         if self.is_demo:
             return self._demo("chat", {"answer": demo.chat(goal, question, context)}, goal)

@@ -507,18 +507,23 @@ class ReflectionOut(BaseModel):
 class ConceptCreate(BaseModel):
     title: str = Field(min_length=1)
     definition: str = ""
-    domain_key: str = "computer_cli"
-    source_refs: list[str] = []
+    domain_key: str = "general"
+    aliases: list[str] = []
+    source_refs: list[Any] = []
 
 
 class ConceptOut(BaseModel):
     id: str
     domain_key: str
+    domain_keys: list[str] = []
     title: str
     definition: str
     status: str
-    source_refs: list[str] = []
+    aliases: list[str] = []
+    goal_ids: list[str] = []
+    source_refs: list[Any] = []
     created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 class RelationCreate(BaseModel):
@@ -531,7 +536,7 @@ class RelationCreate(BaseModel):
 class RelationPatch(BaseModel):
     relation_type: Optional[str] = None
     rationale: Optional[str] = None
-    status: Optional[Literal["proposed", "confirmed", "rejected"]] = None
+    status: Optional[Literal["proposed", "confirmed", "conflict", "rejected", "revoked"]] = None
 
 
 class RelationOut(BaseModel):
@@ -541,8 +546,13 @@ class RelationOut(BaseModel):
     relation_type: str
     status: str
     rationale: str
+    source_refs: list[Any] = []
+    evidence_refs: list[Any] = []
     confidence: float
+    origin: str = "manual"
+    history: list[Any] = []
     created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 class ProposalOut(BaseModel):
@@ -565,6 +575,98 @@ class KnowledgeOut(BaseModel):
     concepts: list[ConceptOut] = []
     relations: list[RelationOut] = []
     proposals: list[ProposalOut] = []
+
+
+class GraphNode(BaseModel):
+    id: str
+    type: str  # concept / goal
+    title: str
+    domain_key: str = ""
+    domain_name: str = ""
+    definition: str = ""
+    mastery: str = ""
+    degree: int = 0
+    status: str = ""
+    ref_id: str = ""
+
+
+class GraphEdge(BaseModel):
+    id: str
+    source: str
+    target: str
+    relation_type: str
+    status: str
+    rationale: str = ""
+    confidence: float = 0.5
+
+
+class GraphOut(BaseModel):
+    scope: dict[str, str] = {}
+    nodes: list[GraphNode] = []
+    edges: list[GraphEdge] = []
+    goal_edges: list[GraphEdge] = []
+    stats: dict[str, int] = {}
+    relation_types: dict[str, str] = {}
+
+
+class NavGoal(BaseModel):
+    id: str
+    title: str
+    status: str
+    concept_count: int = 0
+
+
+class NavDomain(BaseModel):
+    key: str
+    name: str
+    concept_count: int = 0
+    goals: list[NavGoal] = []
+
+
+class NavOut(BaseModel):
+    domains: list[NavDomain] = []
+    totals: dict[str, int] = {}
+
+
+class MasteryOut(BaseModel):
+    status: str
+    basis: str = ""
+
+
+class ConceptAnchor(BaseModel):
+    tutorial_id: str
+    tutorial_title: str = ""
+    goal_id: str = ""
+    goal_title: str = ""
+    section_id: str = ""
+    section_title: str = ""
+
+
+class ConceptDetailOut(BaseModel):
+    id: str
+    domain_key: str
+    domain_keys: list[str] = []
+    title: str
+    definition: str
+    status: str
+    aliases: list[str] = []
+    goal_ids: list[str] = []
+    source_refs: list[Any] = []
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    relations: list[dict[str, Any]] = []
+    tutorial_anchors: list[ConceptAnchor] = []
+    goals: list[dict[str, Any]] = []
+    mastery: MasteryOut
+
+
+class ExtractionResult(BaseModel):
+    concepts: int = 0
+    relations: int = 0
+    tutorial_id: str = ""
+    goal_id: str = ""
+    skipped: str = ""
+    error: str = ""
 
 
 # ---------------------------------------------------------------- chat

@@ -506,6 +506,12 @@ function GoalWorkspace() {
                   >
                     打开教程详情 →
                   </Link>
+                  <Link
+                    href={`/knowledge?goal=${goalId}`}
+                    className="rounded-[10px] border border-line bg-white px-3.5 py-2 text-[12px] font-semibold text-[#39455d] hover:border-[#c9c3ff]"
+                  >
+                    在知识网络中查看本目标 →
+                  </Link>
                   <Button
                     variant="secondary"
                     onClick={startQuickstart}
