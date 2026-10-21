@@ -456,7 +456,8 @@ export default function GraphCanvas({
                   fill={fill}
                   stroke={stroke}
                   strokeWidth={(n.type === "goal" ? 2.5 : 2.2) / k}
-                  fillOpacity={n.type === "goal" ? 0.92 : 0.86}
+                  strokeDasharray={n.type === "goal" && n.status === "archived" ? "3 3" : undefined}
+                  fillOpacity={n.type === "goal" ? (n.status === "archived" ? 0.45 : 0.92) : 0.86}
                 />
                 {showLabel && (
                   <text
