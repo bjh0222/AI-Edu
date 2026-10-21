@@ -1,7 +1,7 @@
 """目标 / 诊断 / 计划 / 验收标准路由。"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from ..db import get_db
@@ -28,8 +28,8 @@ router = APIRouter()
 
 
 @router.get("/goals", response_model=list[GoalOut], tags=["goals"])
-def list_goals(db: Session = Depends(get_db)):
-    return goals_service.list_goals(db)
+def list_goals(include_archived: bool = Query(default=False), db: Session = Depends(get_db)):
+    return goals_service.list_goals(db, include_archived=include_archived)
 
 
 @router.post("/goals", response_model=GoalOut, tags=["goals"])
@@ -48,7 +48,13 @@ def patch_goal(goal_id: str, payload: GoalPatch, db: Session = Depends(get_db)):
 
 
 @router.delete("/goals/{goal_id}", tags=["goals"])
-def archive_goal(goal_id: str, db: Session = Depends(get_db)):
+def archive_goal(
+    goal_id: str,
+    purge: bool = Query(default=False, description="true 时彻底删除目标及其全部数据（不可逆，先写 JSON 备份）"),
+    db: Session = Depends(get_db),
+):
+    if purge:
+        return goals_service.purge_goal(db, goal_id)
     return goals_service.archive_goal(db, goal_id)
 
 

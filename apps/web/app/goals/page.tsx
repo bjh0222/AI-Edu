@@ -40,6 +40,8 @@ const DOMAINS = [
 export default function GoalsPage() {
   const router = useRouter();
   const [goals, setGoals] = useState<Goal[]>([]);
+  const [archivedGoals, setArchivedGoals] = useState<Goal[]>([]);
+  const [showArchived, setShowArchived] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -54,7 +56,12 @@ export default function GoalsPage() {
 
   const load = async () => {
     try {
-      setGoals(await api.get<Goal[]>("/api/goals"));
+      const [active, all] = await Promise.all([
+        api.get<Goal[]>("/api/goals"),
+        api.get<Goal[]>("/api/goals?include_archived=true"),
+      ]);
+      setGoals(active);
+      setArchivedGoals(all.filter((g) => g.archived));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -88,12 +95,31 @@ export default function GoalsPage() {
   };
 
   const archive = async (id: string) => {
-    if (!window.confirm("归档该目标？数据仍保留，可从导出备份中恢复。")) return;
+    if (!window.confirm("归档该目标？归档后不在目标列表显示，可在「已归档目标」中彻底删除。")) return;
     try {
       await api.del(`/api/goals/${id}`);
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const purge = async (goal: Goal) => {
+    if (
+      !window.confirm(
+        `彻底删除「${goal.title}」及其教程、验收标准、实践记录与知识网络数据？\n\n此操作不可撤销；删除前会自动生成一份 JSON 备份到 data/backups/。`
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.del(`/api/goals/${goal.id}?purge=true`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -152,6 +178,44 @@ export default function GoalsPage() {
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+
+          {archivedGoals.length > 0 && (
+            <div className="mt-3 border-t border-line pt-3">
+              <button
+                type="button"
+                onClick={() => setShowArchived((v) => !v)}
+                className="text-[11px] font-semibold text-[#5a6a86] hover:text-brand"
+              >
+                已归档目标（{archivedGoals.length}）{showArchived ? "收起" : "展开"}
+              </button>
+              {showArchived && (
+                <div className="mt-2 grid gap-1.5">
+                  {archivedGoals.map((g) => (
+                    <div
+                      key={g.id}
+                      className="flex items-center gap-2 rounded-lg border border-line px-3 py-2 text-[11px]"
+                    >
+                      <div className="min-w-0 flex-1 truncate text-[#39455d]">
+                        {g.title}
+                        <span className="ml-2 text-[10px] text-muted">{g.domain_name}</span>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => purge(g)}
+                        className="shrink-0 text-[11px] font-semibold text-[#a33] hover:underline disabled:opacity-40"
+                      >
+                        彻底删除
+                      </button>
+                    </div>
+                  ))}
+                  <div className="text-[10px] leading-relaxed text-muted">
+                    彻底删除会移除该目标的教程、实践与知识网络数据（不可撤销，删除前自动写入 JSON 备份）。
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </Card>

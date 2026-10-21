@@ -37,6 +37,8 @@ class Settings:
         self.database_url = os.getenv("DATABASE_URL", "sqlite:///./data/aiedu.db").strip()
         # 用户上传的参考资料 / 例题来源：文件落在 MATERIALS_DIR，元数据落库
         self.materials_dir = os.getenv("MATERIALS_DIR", "data/materials").strip() or "data/materials"
+        # 删除学习目标前的 JSON 备份目录（不可逆操作的兜底）
+        self.backup_dir = os.getenv("BACKUP_DIR", "data/backups").strip() or "data/backups"
         self.material_max_bytes = int(os.getenv("MATERIAL_MAX_BYTES", str(20 * 1024 * 1024)) or 20 * 1024 * 1024)
         self.cors_origins = os.getenv(
             "CORS_ORIGINS",
