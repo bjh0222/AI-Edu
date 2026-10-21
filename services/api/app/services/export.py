@@ -82,7 +82,7 @@ def _backup_path() -> Path:
     return base / f"aiedu-backup-{stamp}.json"
 
 
-def import_data(db: Session, payload: dict) -> dict:
+def import_data(db: Session, payload: dict, force: bool = False) -> dict:
     if payload.get("version") != EXPORT_VERSION:
         raise HTTPException(
             status_code=400,
@@ -100,6 +100,25 @@ def import_data(db: Session, payload: dict) -> dict:
         for row in rows:
             if not isinstance(row, dict) or "id" not in row:
                 raise HTTPException(status_code=400, detail={"code": "bad_payload", "message": f"表 {name} 存在非法记录"})
+
+    # 安全阀：导入会用备份完全覆盖当前数据。若当前有知识节点而备份里没有，
+    # 多半是拿旧备份恢复——必须先明确确认，避免静默清空知识网络。
+    incoming_concepts = data.get("concepts", [])
+    current_concepts = db.query(Concept).count()
+    current_relations = db.query(ConceptRelation).count()
+    incoming_relations = data.get("concept_relations", [])
+    if not force and (current_concepts or current_relations) and not (incoming_concepts or incoming_relations):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "knowledge_would_be_cleared",
+                "message": (
+                    f"该备份不含知识网络数据（0 概念），导入会清空现有的 "
+                    f"{current_concepts} 个概念 / {current_relations} 条关系。"
+                    "如确认要覆盖，请再次确认导入（force=true）。"
+                ),
+            },
+        )
 
     # 先备份当前数据
     backup_file = _backup_path()
