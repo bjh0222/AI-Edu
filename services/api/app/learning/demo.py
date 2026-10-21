@@ -325,3 +325,62 @@ def chat(goal, question: str, context: dict) -> str:
         f"[演示模式] 关于「{question}」：根据{where}「{title}」，建议先定位问题所在（复现/前提条件），"
         "再给出一个最小验证动作，而不是直接重写全部内容。配置真实模型后，这里会基于你的教程上下文给出针对性答疑。"
     )
+
+
+def knowledge_extract(goal, tutorial, context: dict, existing: list) -> dict:
+    """演示版知识提取：从大纲 / 章节结构确定性地派生概念与关系。
+
+    规则（与分级策略一致，只写有结构依据的内容）：
+    - 概念：每个大纲条目一个概念，定义取章节摘要，锚点指向该章节；
+    - 关系：相邻章节构成先修链（第 i 章 先修于 第 i+1 章，教程顺序即依据）；
+    - 跨章关键词关联：标题中共享关键词的章节建立 related（待核实）。
+    """
+    outline = context.get("outline", []) or []
+    concepts = []
+    for item in outline:
+        title = str(item.get("title", "")).strip()
+        if not title:
+            continue
+        concepts.append(
+            {
+                "title": title,
+                "definition": str(item.get("summary", "") or f"「{_goal_title(goal)}」教程中的学习单元。"),
+                "domain_key": getattr(goal, "domain_key", "general"),
+                "section_id": str(item.get("section_id", "") or ""),
+                "section_title": title,
+                "aliases": [],
+            }
+        )
+    relations = []
+    for a, b in zip(outline, outline[1:]):
+        if a.get("title") and b.get("title"):
+            relations.append(
+                {
+                    "from_title": str(a["title"]),
+                    "to_title": str(b["title"]),
+                    "relation_type": "prerequisite_of",
+                    "rationale": "教程章节顺序：前一章是后一章的学习前提（演示模式按大纲结构派生）。",
+                    "section_id": str(a.get("section_id", "") or ""),
+                    "confidence": 0.6,
+                }
+            )
+    # 共享关键词的章节建立「相关联」（无章节锚点 → 待核实，不自动确认）
+    def _keywords(text: str) -> set[str]:
+        text = str(text or "")
+        return {w for w in ("概念", "错误", "排查", "练习", "任务", "复盘", "工具", "环境", "数据", "验证") if w in text}
+
+    for i, a in enumerate(outline):
+        for b in outline[i + 2:]:
+            shared = _keywords(a.get("title", "")) & _keywords(b.get("title", ""))
+            if shared:
+                relations.append(
+                    {
+                        "from_title": str(a.get("title", "")),
+                        "to_title": str(b.get("title", "")),
+                        "relation_type": "related",
+                        "rationale": f"章节主题共享关键词（{'、'.join(sorted(shared))}），推测相关，待核实。",
+                        "section_id": "",
+                        "confidence": 0.35,
+                    }
+                )
+    return {"concepts": concepts, "relations": relations}

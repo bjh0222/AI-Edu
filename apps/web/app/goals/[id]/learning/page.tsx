@@ -174,6 +174,7 @@ export default function LearningPage() {
                     tutorial={tutorial}
                     goalTokens={data.usage?.totals}
                     busy={busy}
+                    knowledgeHref={`/knowledge?goal=${goalId}`}
                     onStartSections={() => startSections(tutorial)}
                     onRegenerate={(sectionId) =>
                       run(
@@ -265,6 +266,7 @@ function TutorialPanel({
   tutorial,
   goalTokens,
   busy,
+  knowledgeHref,
   onStartSections,
   onRegenerate,
   onQuickstart,
@@ -272,6 +274,7 @@ function TutorialPanel({
   tutorial: Tutorial;
   goalTokens?: TokenUsage;
   busy: string;
+  knowledgeHref?: string;
   onStartSections: () => void;
   onRegenerate: (sectionId: string) => void;
   onQuickstart: () => void;
@@ -298,6 +301,14 @@ function TutorialPanel({
         >
           打开教程详情 →
         </Link>
+        {knowledgeHref && (
+          <Link
+            href={knowledgeHref}
+            className="rounded-[10px] border border-line bg-white px-3.5 py-2 text-[12px] font-semibold text-[#39455d] hover:border-[#c9c3ff]"
+          >
+            在知识网络中查看 →
+          </Link>
+        )}
         <Button variant="secondary" onClick={onQuickstart} disabled={busy === "quickstart"}>
           {sections.length > 0 ? "一键补齐流程" : "一键生成全部章节"}
         </Button>

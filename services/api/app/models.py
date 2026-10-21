@@ -184,10 +184,18 @@ class Concept(Base, TimestampMixin):
     __tablename__ = "concepts"
 
     id = Column(String(36), primary_key=True, default=_uuid)
-    domain_key = Column(String(50), default="computer_cli")
+    domain_key = Column(String(50), default="general")
     title = Column(String(200), nullable=False)
+    # 去重键：规范化标题（小写、去空白与标点），同名/别名视为同一概念
+    title_norm = Column(String(240), default="", index=True)
+    # 别名 JSON list：跨学科概念在不同领域可能有不同叫法，检索/去重时合并
+    aliases = Column(Text, default="[]")
+    # 多对多领域：JSON list；domain_key 保留主领域（第一个），兼容旧数据
+    domain_keys = Column(Text, default="[]")
+    # 服务的学习目标 JSON list：一个概念可同时服务于多个目标
+    goal_ids = Column(Text, default="[]")
     definition = Column(Text, default="")
-    status = Column(String(20), default="active")
+    status = Column(String(20), default="active")  # active / archived
     source_refs = Column(Text, default="[]")
     last_reviewed_at = Column(String(40), default="")
 
@@ -198,12 +206,17 @@ class ConceptRelation(Base, TimestampMixin):
     id = Column(String(36), primary_key=True, default=_uuid)
     from_concept_id = Column(String(36), ForeignKey("concepts.id"), index=True)
     to_concept_id = Column(String(36), ForeignKey("concepts.id"), index=True)
-    relation_type = Column(String(30), default="related")  # prerequisite_of / part_of / applied_in / contrasts_with / related
-    status = Column(String(20), default="proposed")  # proposed / confirmed / rejected
+    relation_type = Column(String(30), default="related")
+    # proposed(待核实) / confirmed(已确认) / conflict(存在冲突) / rejected(已驳回) / revoked(已撤销)
+    status = Column(String(20), default="proposed")
     rationale = Column(Text, default="")
     source_refs = Column(Text, default="[]")
     evidence_refs = Column(Text, default="[]")
     confidence = Column(Float, default=0.5)
+    # manual / tutorial / ai_proposal：关系来源，决定默认可信状态
+    origin = Column(String(20), default="manual")
+    # 变更历史 JSON list：[{at, action, note}]，重要修改可追溯
+    history = Column(Text, default="[]")
 
 
 class GoalMaterial(Base, TimestampMixin):

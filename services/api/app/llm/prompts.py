@@ -159,6 +159,27 @@ def suggest_proposals(goal, concepts, relations_hint) -> tuple[str, str]:
     return SYSTEM, user
 
 
+def knowledge_extract(goal, tutorial, context: dict, existing: list) -> tuple[str, str]:
+    user = (
+        f"学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
+        f"教程：{tutorial.title}\n"
+        f"教程结构（outline 与 sections 均含 section_id）：{json.dumps(context, ensure_ascii=False)}\n"
+        f"已有概念（用于去重，勿重复输出）：{json.dumps(existing, ensure_ascii=False)}\n\n"
+        "从教程结构中提取结构化知识。要求：\n"
+        "- concepts：只提取教程结构直接体现的概念 / 学习单元；title 简明稳定；definition 一句话；"
+        "section_id 指向最直接解释该概念的章节；已有概念（按名称）不要重复输出；最多 12 个。\n"
+        "- relations：只写有依据的关系；from_title/to_title 必须能在 concepts 或已有概念中找到；"
+        "relation_type 只能取 prerequisite_of / part_of / explains / applied_in / contrasts_with / related；"
+        "带 section_id 表示教程明确解释（会自动确认），纯推测则留空 section_id 并降低 confidence；"
+        "不为图谱美观添加无依据的边；最多 20 条。\n"
+        "输出 JSON：{\"concepts\": [{\"title\": str, \"definition\": str, \"domain_key\": str, "
+        "\"section_id\": str, \"aliases\": [str]}], "
+        "\"relations\": [{\"from_title\": str, \"to_title\": str, \"relation_type\": str, "
+        "\"rationale\": str, \"section_id\": str, \"confidence\": float}]}。"
+    )
+    return SYSTEM, user
+
+
 def chat(goal, question, context) -> tuple[str, str]:
     user = (
         f"学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
