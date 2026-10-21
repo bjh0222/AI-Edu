@@ -74,7 +74,7 @@ def goal_context_text(goal) -> str:
         ("动机", getattr(goal, "motivation", "")),
         ("应用场景", getattr(goal, "application_context", "")),
         ("当前基础", getattr(goal, "current_level", "")),
-        ("时间预算", getattr(goal, "time_budget", "")),
+        ("可投入总时间", getattr(goal, "time_budget", "")),
     ]
     return "\n".join(f"{name}：{value}" for name, value in fields if value)
 

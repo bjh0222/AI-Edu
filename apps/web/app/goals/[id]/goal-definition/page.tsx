@@ -7,6 +7,7 @@ import type { Goal } from "@/lib/types";
 import { phase } from "@/lib/goal-phases";
 import { Badge, Button, Card, Field, inputCls } from "@/components/ui";
 import { GoalPhaseView } from "@/components/goals/GoalPhaseView";
+import { GoalExamples } from "@/components/goals/GoalExamples";
 import type { WorkspaceSlices } from "@/components/goals/useGoalWorkspace";
 
 const PHASE = phase("goal_definition");
@@ -105,12 +106,15 @@ function GoalForm({
           />
         </Field>
       ))}
-      <Field label="可投入时间">
+      <Field label="可投入总时间">
         <input
           className={inputCls}
           value={form.time_budget}
           onChange={(event) => setForm({ ...form, time_budget: event.target.value })}
         />
+        <span className="text-[10px] text-muted">
+          填总时长（如「共 10 小时」），不用拆成每天的时间安排
+        </span>
       </Field>
       <Field label="自己的补充笔记">
         <textarea
@@ -121,6 +125,7 @@ function GoalForm({
           onChange={(event) => setForm({ ...form, user_notes: event.target.value })}
         />
       </Field>
+      <GoalExamples />
       <div className="flex flex-wrap items-center gap-2">
         <Button onClick={() => void onSave(form)} disabled={busy || !form.title.trim()}>
           {busy ? "保存中…" : "保存目标信息"}
@@ -137,7 +142,7 @@ function Completeness({ goal }: { goal: Goal }) {
     { label: "为什么学", done: goal.motivation.trim().length > 0 },
     { label: "学完要能做什么", done: goal.application_context.trim().length > 0 },
     { label: "当前基础", done: goal.current_level.trim().length > 0 },
-    { label: "可投入时间", done: goal.time_budget.trim().length > 0 },
+    { label: "可投入总时间", done: goal.time_budget.trim().length > 0 },
   ];
   const done = items.filter((item) => item.done).length;
   return (

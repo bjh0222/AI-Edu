@@ -1,7 +1,12 @@
-"""学科配置：跨学科学习引擎的学科差异层（v2.0 §5.4/§5.5）。"""
+"""学科配置：跨学科学习引擎的学科差异层（v2.0 §5.4/§5.5）。
+
+学科目录遵循《AI-Edu-教程分类体系规范》的一级领域划分（S01–S21）。
+每个学科画像决定该学科下诊断 / 计划 / 教程生成的差异提示；
+未单独定制教学差异的学科共用通用画像（GENERIC），仅名称不同。
+"""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 
 @dataclass(frozen=True)
@@ -86,14 +91,86 @@ MATH_DATA = DisciplineProfile(
     ],
 )
 
+GENERIC = DisciplineProfile(
+    key="general",
+    display_name="通用学科",
+    goal_types=["理解一组核心概念", "完成一个真实小任务", "形成可检验的判断"],
+    artifact_types=["summary", "worked_example", "practice_log", "explanation"],
+    practice_templates=[
+        "用自己的话解释核心概念并给出边界示例",
+        "完成一个与目标直接相关的小任务并记录过程与依据",
+        "复现一个典型错误或误解，说明原因与纠正方式",
+        "完成一个未直接演示过的变式任务",
+    ],
+    assessment_rubrics=[
+        "概念解释：能用自己的话说明核心概念与适用边界",
+        "实际应用：能独立完成与目标相关的任务",
+        "错误诊断：能识别并解释典型错误或误解",
+        "独立完成：不依赖逐步提示完成任务",
+        "迁移：能在新情境中正确应用所学",
+    ],
+    common_errors=[
+        "概念混淆", "把特例当通则", "忽略前提条件与适用范围",
+        "只记住结论、不理解依据", "过度概括或过度解读",
+    ],
+    source_requirements=[
+        "关键论断以权威文献或一手资料为准",
+        "区分事实、推论与待验证假设",
+        "注明结论的适用范围与限制",
+    ],
+    tutorial_requirements=[
+        "概念与前提先于应用，不跳步",
+        "示例具体、可验证、可复现",
+        "包含常见误解与边界情况",
+    ],
+)
+
 PROFILES: dict[str, DisciplineProfile] = {
     COMPUTER_CLI.key: COMPUTER_CLI,
     MATH_DATA.key: MATH_DATA,
+    GENERIC.key: GENERIC,
 }
 
 
+def _clone(base: DisciplineProfile, key: str, display_name: str) -> DisciplineProfile:
+    """以某个基础画像为模板派生学科画像（保留教学差异，仅换 key 与名称）。"""
+    return replace(base, key=key, display_name=display_name)
+
+
+# 《AI-Edu-教程分类体系规范》一级学科目录（S01–S21）。
+# S02 计算机类沿用 COMPUTER_CLI，S01 数学类沿用 MATH_DATA，其余共用 GENERIC；
+# 教学差异需要细化时，再为单个学科替换为独立画像。
+SUBJECTS: list[tuple[str, str, DisciplineProfile]] = [
+    ("math_logic", "数学、逻辑与统计", MATH_DATA),
+    ("cs_it", "计算机科学与信息技术", COMPUTER_CLI),
+    ("physics_astronomy", "物理与天文学", GENERIC),
+    ("chemistry_materials", "化学与材料", GENERIC),
+    ("biology_life", "生物与生命科学", GENERIC),
+    ("earth_environment", "地球、环境与气候", GENERIC),
+    ("engineering_manufacturing", "工程与制造", GENERIC),
+    ("health_sport", "医学、健康与运动", GENERIC),
+    ("agriculture_food", "农业、食品与兽医", GENERIC),
+    ("psychology_cognition", "心理与认知科学", GENERIC),
+    ("society_politics", "社会、政治与人类学", GENERIC),
+    ("economics_business", "经济、商业与管理", GENERIC),
+    ("law_policy", "法律、政策与治理", GENERIC),
+    ("education_learning", "教育与学习科学", GENERIC),
+    ("language_communication", "语言、语言学与传播", GENERIC),
+    ("philosophy_ethics", "哲学、伦理与宗教研究", GENERIC),
+    ("history_culture", "历史、文化与考古", GENERIC),
+    ("arts_creativity", "文学、艺术与创意实践", GENERIC),
+    ("design_architecture", "设计与建筑环境", GENERIC),
+    ("geography_urban", "地理、空间与城市研究", GENERIC),
+    ("interdisciplinary", "跨学科与综合研究", GENERIC),
+]
+
+for _key, _name, _base in SUBJECTS:
+    PROFILES[_key] = _clone(_base, _key, _name)
+
+
 def get_profile(key: str | None) -> DisciplineProfile:
-    return PROFILES.get(key or "computer_cli", COMPUTER_CLI)
+    """未知 / 旧 key 一律回退通用画像，避免把未知学科误当成计算机类。"""
+    return PROFILES.get(key or "cs_it", GENERIC)
 
 
 def list_profiles() -> list[dict]:
