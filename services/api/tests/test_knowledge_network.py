@@ -250,6 +250,23 @@ def test_dedupe_endpoint_merges_similar(client):
     ), "不应有任何边继续指向已删除概念"
 
 
+def test_import_guard_prevents_silent_knowledge_wipe(client):
+    """数据安全：不含知识数据的备份导入前必须确认，不能静默清空知识网络。"""
+    client.post("/api/knowledge/concepts", json={"title": "断言：导入保护", "domain_key": "cs_it"})
+    export = client.get("/api/export").json()
+    stripped = {**export, "data": {**export["data"], "concepts": [], "concept_relations": []}}
+
+    blocked = client.post("/api/import", json=stripped)
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["detail"]["code"] == "knowledge_would_be_cleared"
+    # 被拦截时现有知识不能被动过
+    assert len(client.get("/api/knowledge").json()["concepts"]) == 1
+
+    forced = client.post("/api/import?force=true", json=stripped)
+    assert forced.status_code == 200, forced.text
+    assert len(client.get("/api/knowledge").json()["concepts"]) == 0
+
+
 def test_manual_relation_confirmed_and_editable(client):
     """验收 E：手动关系确认为已确认，可编辑 / 驳回 / 撤销。"""
     c1 = client.post("/api/knowledge/concepts", json={"title": "标准输出", "domain_key": "computer_cli"}).json()

@@ -52,11 +52,26 @@ export default function SettingsPage() {
     try {
       const text = await file.text();
       const payload = JSON.parse(text) as { version?: number; data?: Record<string, unknown> };
-      const resp = await api.post<{ ok: boolean; backup: string; counts: Record<string, number> }>(
-        "/api/import",
-        { version: payload.version ?? 1, data: payload.data ?? {} }
-      );
-      setNotice(`导入完成。导入前备份已保存到 ${resp.backup}。`);
+      const body = { version: payload.version ?? 1, data: payload.data ?? {} };
+      try {
+        const resp = await api.post<{ ok: boolean; backup: string; counts: Record<string, number> }>(
+          "/api/import",
+          body
+        );
+        setNotice(`导入完成。导入前备份已保存到 ${resp.backup}。`);
+      } catch (e) {
+        // 安全阀：备份不含知识网络数据时会先拦截，用户明确确认后再强制覆盖
+        if (e instanceof ApiError && e.code === "knowledge_would_be_cleared") {
+          if (!window.confirm(`${e.message}\n\n仍要覆盖导入吗？`)) {
+            setNotice("已取消导入，现有数据未改动。");
+            return;
+          }
+          const resp = await api.post<{ ok: boolean; backup: string }>("/api/import?force=true", body);
+          setNotice(`已按确认覆盖导入。导入前备份已保存到 ${resp.backup}。`);
+          return;
+        }
+        throw e;
+      }
     } catch (e) {
       setError(errMsg(e));
     } finally {
