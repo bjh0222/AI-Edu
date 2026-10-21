@@ -269,3 +269,45 @@ def test_manual_relation_confirmed_and_editable(client):
     assert p.status_code == 200 and p.json()["status"] == "revoked"
     bad = client.patch(f"/api/knowledge/relations/{body['id']}", json={"status": "bogus"})
     assert bad.status_code == 422
+
+
+def test_delete_concept_removes_relations(client):
+    """删除节点：概念与其全部关系一起删除，重复删除返回 404。"""
+    goal = _create_goal(client)
+    _generate_tutorial(client, goal["id"])
+    kb = client.get("/api/knowledge").json()
+    concept = kb["concepts"][0]
+    resp = client.delete(f"/api/knowledge/concepts/{concept['id']}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["deleted_relations"] > 0
+
+    kb2 = client.get("/api/knowledge").json()
+    assert all(c["id"] != concept["id"] for c in kb2["concepts"])
+    assert all(
+        concept["id"] not in (r["from_concept_id"], r["to_concept_id"]) for r in kb2["relations"]
+    ), "删除概念后不应有残留关系"
+    assert client.delete(f"/api/knowledge/concepts/{concept['id']}").status_code == 404
+
+
+def test_clear_graph_keeps_goals_and_tutorials(client):
+    """清空图谱：概念 / 关系 / 提议归零，学习目标与教程保留；重复清空为 0。"""
+    goal = _create_goal(client)
+    tutorial_id = _generate_tutorial(client, goal["id"])
+    assert any(c["goal_ids"] == [goal["id"]] or goal["id"] in c["goal_ids"] for c in client.get("/api/knowledge").json()["concepts"])
+
+    resp = client.delete("/api/knowledge/graph")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["deleted_concepts"] > 0 and body["deleted_relations"] > 0
+
+    kb = client.get("/api/knowledge").json()
+    assert kb["concepts"] == [] and kb["relations"] == []
+    graph = client.get("/api/knowledge/graph").json()
+    assert graph["nodes"] == []
+    assert client.get(f"/api/goals/{goal['id']}").status_code == 200
+    assert client.get(f"/api/tutorials/{tutorial_id}").status_code == 200
+
+    again = client.delete("/api/knowledge/graph").json()
+    assert again["deleted_concepts"] == 0

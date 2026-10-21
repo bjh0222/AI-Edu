@@ -62,6 +62,43 @@ export default function Sidebar() {
       return next;
     });
 
+  const compact = pathname.startsWith("/knowledge");
+
+  if (compact) {
+    // 知识网络页：图谱是绝对核心，侧栏收缩为 72px 图标轨道（其他页面保持完整导航）
+    return (
+      <aside className="hidden w-[72px] shrink-0 flex-col items-center gap-2 bg-navy py-5 text-[#eaf0fa] md:flex">
+        <Link
+          href="/"
+          title="AI Edu · 返回工作台"
+          className="mb-2 grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-[#a89cff] to-[#5c4bf0] text-[15px] font-extrabold"
+        >
+          E
+        </Link>
+        <nav className="grid w-full justify-items-center gap-1.5">
+          {items.map((it) => {
+            const active = isActive(it.href);
+            return (
+              <Link
+                key={it.href}
+                href={it.href}
+                title={it.label}
+                aria-label={it.label}
+                className={`grid h-10 w-10 place-items-center rounded-xl text-[16px] transition-colors ${
+                  active
+                    ? "bg-[#6d5dfc36] text-white shadow-[inset_2px_0_#a99dff]"
+                    : "text-[#8a99b5] hover:bg-white/5 hover:text-white"
+                }`}
+              >
+                {it.icon}
+              </Link>
+            );
+          })}
+        </nav>
+      </aside>
+    );
+  }
+
   return (
     <aside className="hidden w-[238px] shrink-0 flex-col gap-7 bg-navy px-3.5 py-6 text-[#eaf0fa] md:flex">
       <div className="flex items-center gap-2.5 px-2">

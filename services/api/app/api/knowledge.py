@@ -85,6 +85,18 @@ def dedupe(db: Session = Depends(get_db)):
     return knowledge_service.dedupe_concepts(db)
 
 
+@router.delete("/knowledge/concepts/{concept_id}", tags=["knowledge"])
+def delete_concept(concept_id: str, db: Session = Depends(get_db)):
+    """删除单个概念及其全部关系（不可逆）。"""
+    return knowledge_service.delete_concept(db, concept_id)
+
+
+@router.delete("/knowledge/graph", tags=["knowledge"])
+def clear_graph(db: Session = Depends(get_db)):
+    """清空知识网络：删除全部概念、关系与知识提议（不影响学习目标 / 教程 / 练习记录）。"""
+    return knowledge_service.clear_graph(db)
+
+
 @router.post("/knowledge/concepts", response_model=ConceptOut, tags=["knowledge"])
 def create_concept(payload: ConceptCreate, db: Session = Depends(get_db)):
     return knowledge_service.create_concept(db, payload)
