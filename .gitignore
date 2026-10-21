@@ -16,6 +16,7 @@ build/
 *.db
 *.sqlite3
 data/
+services/api/tests/test_materials/
 logs/
 *.log
 

@@ -37,6 +37,7 @@ def _job_out(job: GenerationJob) -> JobOut:
         progress=job.progress,
         stage=job.stage,
         error_code=job.error_code,
+        error_message=job.error_message or "",
         token_usage=TokenUsage(
             prompt_tokens=job.prompt_tokens or 0,
             completion_tokens=job.completion_tokens or 0,

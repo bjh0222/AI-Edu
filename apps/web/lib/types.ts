@@ -196,6 +196,7 @@ export interface GenerationJob {
   progress: number;
   stage: string;
   error_code: string;
+  error_message?: string;
   token_usage?: TokenUsage;
 }
 

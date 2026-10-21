@@ -5,20 +5,10 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { api, ApiError } from "@/lib/api";
 import type { Goal } from "@/lib/types";
+import { PHASE_LABELS } from "@/lib/goal-phases";
 import { Badge, Button, Card, Empty, Field, inputCls } from "@/components/ui";
 
-const STATUS_LABEL: Record<string, string> = {
-  goal_definition: "目标定义",
-  diagnosis: "诊断",
-  planning: "计划",
-  acceptance_design: "验收标准",
-  learning: "教程学习",
-  practice: "实践",
-  feedback: "反馈",
-  assessment: "评估",
-  reflection: "复盘",
-  knowledge_update: "知识记录",
-};
+const STATUS_LABEL = PHASE_LABELS;
 
 const DOMAINS = [
   { key: "computer_cli", label: "计算机 / 命令行 / 编程" },

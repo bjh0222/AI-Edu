@@ -224,3 +224,7 @@ def _cleanup_materials_dir():
             path.unlink() if path.is_file() else path.rmdir()
         except OSError:
             pass
+    try:
+        root.rmdir()
+    except OSError:
+        pass

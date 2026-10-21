@@ -278,6 +278,7 @@ class GenerationJob(Base):
     progress = Column(Integer, default=0)
     stage = Column(String(200), default="")
     error_code = Column(String(50), default="")
+    error_message = Column(Text, default="")
     retry_count = Column(Integer, default=0)
     prompt_tokens = Column(Integer, default=0)
     completion_tokens = Column(Integer, default=0)

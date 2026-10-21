@@ -64,6 +64,22 @@ def parse_usage(data: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _error_detail(resp: httpx.Response) -> str:
+    """从失败的响应里提取可读原因，便于前端直接展示与排查。"""
+    try:
+        body = resp.json()
+    except ValueError:
+        return resp.text[:200]
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            return str(err.get("message") or err)[:200]
+        if err:
+            return str(err)[:200]
+        return str(body.get("message") or body)[:200]
+    return str(body)[:200]
+
+
 class OpenAICompatibleProvider:
     def __init__(self, settings: Settings):
         self.base_url = settings.llm_base_url.rstrip("/")
@@ -71,7 +87,9 @@ class OpenAICompatibleProvider:
         self.model = settings.llm_model
         self.timeout = settings.llm_timeout
 
-    def _post(self, messages: list[dict], json_mode: bool) -> tuple[str, int, dict[str, Any] | None]:
+    def _post(
+        self, messages: list[dict], json_mode: bool
+    ) -> tuple[str, int, dict[str, Any] | None, str]:
         url = f"{self.base_url}/chat/completions"
         payload = {
             "model": self.model,
@@ -89,34 +107,38 @@ class OpenAICompatibleProvider:
                 timeout=self.timeout,
             )
         except httpx.TimeoutException as exc:
-            raise LLMError("模型请求超时") from exc
+            raise LLMError(f"模型请求超时（>{self.timeout}s）") from exc
         except httpx.HTTPError as exc:
             raise LLMError(f"模型请求失败：{exc.__class__.__name__}") from exc
         latency_ms = int((time.monotonic() - started) * 1000)
         if resp.status_code == 401:
-            raise LLMError("模型认证失败（检查 API Key）")
+            raise LLMError(f"模型认证失败（检查 API Key）：{_error_detail(resp)}")
         if resp.status_code == 429:
-            raise LLMError("模型限流（稍后重试）")
-        if resp.status_code >= 500:
-            raise LLMError(f"模型服务错误（{resp.status_code}）")
+            raise LLMError(f"模型限流（稍后重试）：{_error_detail(resp)}")
         if resp.status_code >= 400:
-            raise LLMError(f"模型请求被拒绝（{resp.status_code}）")
+            raise LLMError(f"模型请求被拒绝（HTTP {resp.status_code}）：{_error_detail(resp)}")
         try:
             data = resp.json()
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, json.JSONDecodeError) as exc:
-            raise LLMError("模型响应格式异常") from exc
+            choice = data["choices"][0]
+            content = choice["message"].get("content") or ""
+        except (KeyError, IndexError, json.JSONDecodeError, AttributeError) as exc:
+            raise LLMError(f"模型响应格式异常：{resp.text[:200]}") from exc
+        finish_reason = str(choice.get("finish_reason") or "")
+        if not content.strip():
+            raise LLMError(f"模型返回空内容（finish_reason={finish_reason or 'unknown'}）")
+        if finish_reason == "length":
+            raise LLMError("模型输出被截断（finish_reason=length）：单次输出超出上限，可重试或拆小章节")
         usage = parse_usage(data) if isinstance(data, dict) else None
-        return content, latency_ms, usage
+        return content, latency_ms, usage, finish_reason
 
     def complete_json(self, system: str, user: str) -> tuple[dict, int, dict[str, Any] | None]:
-        content, latency, usage = self._post(
+        content, latency, usage, _finish_reason = self._post(
             [{"role": "system", "content": system}, {"role": "user", "content": user}], json_mode=True
         )
         return extract_json(content), latency, usage
 
     def complete_text(self, system: str, user: str) -> tuple[str, int, dict[str, Any] | None]:
-        content, latency, usage = self._post(
+        content, latency, usage, _finish_reason = self._post(
             [{"role": "system", "content": system}, {"role": "user", "content": user}], json_mode=False
         )
         return content.strip(), latency, usage

@@ -26,6 +26,8 @@ import { fmtTokens, usageSourceLabel } from "@/lib/format";
 import { OutlineList, SectionContent, TokenLine } from "@/components/tutorial";
 import { FeedbackForm } from "@/components/FeedbackForm";
 import { Badge, Button, Card, DemoNotice, Empty, inputCls } from "@/components/ui";
+import { GOAL_PHASES } from "@/lib/goal-phases";
+import { GoalMaterialsCard } from "@/components/goals/GoalMaterialsCard";
 
 const PHASES: { key: string; label: string }[] = [
   { key: "goal_definition", label: "目标定义" },
@@ -158,7 +160,9 @@ function GoalWorkspace() {
         } else if (job.status === "failed") {
           setGen(null);
           setBusy("");
-          setError(`章节生成失败（${job.error_code || "unknown"}），请检查模型配置后重试`);
+          setError(
+            `章节生成失败（${job.error_code || "unknown"}）${job.error_message ? `：${job.error_message}` : "，请检查模型配置后重试"}`
+          );
         } else {
           setTimeout(tick, 2000);
         }
@@ -246,16 +250,18 @@ function GoalWorkspace() {
       {/* 阶段条 */}
       <div className="mb-5 flex flex-wrap gap-1.5">
         {PHASES.map((p, i) => (
-          <div
+          <Link
             key={p.key}
-            className={`rounded-lg border px-2.5 py-1.5 text-[10px] ${
+            href={`/goals/${goalId}/${GOAL_PHASES.find((g) => g.key === p.key)?.slug ?? p.key}`}
+            title={`打开「${p.label}」详情页`}
+            className={`rounded-lg border px-2.5 py-1.5 text-[10px] transition hover:border-[#c9c2ff] hover:text-brand ${
               i <= phaseIdx
                 ? "border-[#c9c2ff] bg-[#f8f7ff] font-bold text-brand"
                 : "border-line bg-white text-muted"
             }`}
           >
             {String(i + 1).padStart(2, "0")} {p.label}
-          </div>
+          </Link>
         ))}
       </div>
 
@@ -618,6 +624,8 @@ function GoalWorkspace() {
 
         {/* 右列 */}
         <div className="grid gap-4">
+          <GoalMaterialsCard goalId={goalId} />
+
           <Card
             title="知识提议"
             desc="AI 只能提议，确认后才入长期知识网络"

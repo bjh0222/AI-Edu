@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 
 from fastapi import HTTPException
@@ -223,16 +224,52 @@ def _update_job(
         job.status = status
 
 
-def _fail_job(db: Session, job_id: str, code: str) -> None:
+def _fail_job(db: Session, job_id: str, code: str, message: str = "") -> None:
     try:
         db.rollback()
         job = db.get(GenerationJob, job_id)
         if job:
             job.status = "failed"
             job.error_code = code
+            job.error_message = (message or "")[:2000]
             db.commit()
     except Exception:  # noqa: BLE001
         db.rollback()
+
+
+SECTION_RETRY_DELAYS = (3, 8)
+
+
+def _section_with_retry(
+    db: Session,
+    job_id: str,
+    ai: AIService,
+    goal,
+    profile,
+    item: dict,
+    criteria: list[dict],
+    prior_titles: list[str],
+    materials_text: str,
+) -> dict:
+    """单节生成带重试。
+
+    模型偶发超时 / 限流 / 输出被截断时自动重试，避免「一键生成」在最后一节整体失败。
+    每次重试前把原因写进 job.stage 与 job.retry_count，失败后仍可从 error_message 看到根因。
+    """
+    attempts = len(SECTION_RETRY_DELAYS) + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return ai.section(goal, profile, item, criteria, prior_titles, materials_text)
+        except AIServiceError as exc:
+            if attempt >= attempts:
+                raise
+            job = db.get(GenerationJob, job_id)
+            if job is not None:
+                job.retry_count = (job.retry_count or 0) + 1
+                job.stage = f"第 {attempt} 次重试（{str(exc)[:60]}）"
+            db.commit()
+            time.sleep(SECTION_RETRY_DELAYS[attempt - 1])
+    raise AIServiceError("章节生成重试次数已用完")
 
 
 def _sections_worker(tutorial_id: str, job_id: str) -> None:
@@ -297,7 +334,9 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
             mapped = [criteria_by_id[cid] for cid in item.get("criteria_ids", []) if cid in criteria_by_id]
             section_id = uuid.uuid4().hex[:8]
             ai.section_id = section_id
-            raw = ai.section(goal, profile, item, mapped or criteria_dicts, prior_titles, materials_text)
+            raw = _section_with_retry(
+                db, job_id, ai, goal, profile, item, mapped or criteria_dicts, prior_titles, materials_text
+            )
             usage = dict(ai.usage_last)
             sections.append(
                 {
@@ -359,10 +398,10 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         set_status_at_least(goal, "practice")
         _update_job(db, job_id, status="done", progress=100, stage="完成")
         db.commit()
-    except AIServiceError:
-        _fail_job(db, job_id, "llm_error")
-    except Exception:  # noqa: BLE001
-        _fail_job(db, job_id, "internal_error")
+    except AIServiceError as exc:
+        _fail_job(db, job_id, "llm_error", str(exc))
+    except Exception as exc:  # noqa: BLE001
+        _fail_job(db, job_id, "internal_error", f"{exc.__class__.__name__}: {exc}")
     finally:
         db.close()
 

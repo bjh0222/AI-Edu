@@ -118,6 +118,13 @@ export function phaseByKey(key: string | undefined | null): GoalPhase | undefine
   return GOAL_PHASES.find((phase) => phase.key === key);
 }
 
+/** 静态取阶段（用于子页模块顶层），key 写错时立即报错，避免拼错的 slug 静默上线。 */
+export function phase(key: string): GoalPhase {
+  const found = GOAL_PHASES.find((item) => item.key === key);
+  if (!found) throw new Error(`未知的学习阶段：${key}`);
+  return found;
+}
+
 export function phaseIndex(key: string | undefined | null): number {
   const index = GOAL_PHASES.findIndex((phase) => phase.key === key);
   return index < 0 ? 0 : index;

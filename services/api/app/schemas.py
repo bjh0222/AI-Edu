@@ -281,6 +281,7 @@ class JobOut(BaseModel):
     progress: int
     stage: str
     error_code: str
+    error_message: str = ""
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
 
 
