@@ -683,8 +683,13 @@ function KnowledgeInner() {
               <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 text-[12px]">
                 {selectedNode.type === "goal" ? (
                   <div className="grid gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-[13px] font-bold">{selectedNode.title}</span>
+                      {selectedNode.status === "archived" && <Badge tone="neutral">已归档</Badge>}
+                    </div>
                     <p className="text-[12px] leading-relaxed text-[#39455d]">
                       该学习目标在知识网络中关联 {selectedNode.degree} 个概念。图谱中的目标节点只表达「目标覆盖」关系，不表达掌握程度。
+                      {selectedNode.status === "archived" && " 该目标已归档，其知识仍保留在学习记录中。"}
                     </p>
                     <Link
                       href={`/goals/${selectedNode.ref_id}`}
