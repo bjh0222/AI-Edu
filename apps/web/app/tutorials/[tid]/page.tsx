@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { api, ApiError, downloadFile } from "@/lib/api";
@@ -39,14 +39,19 @@ function TutorialDetail() {
   const [notice, setNotice] = useState("");
   const [exporting, setExporting] = useState(false);
 
+  const loadSeq = useRef(0);
+
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     const tutorialData = await api.get<Tutorial>(`/api/tutorials/${tutorialId}`);
+    if (seq !== loadSeq.current) return; // 有更新的请求在飞，丢弃这次结果，避免旧数据覆盖新数据
     setTutorial(tutorialData);
     const [goalData, criteriaData, usageData] = await Promise.all([
       api.get<Goal>(`/api/goals/${tutorialData.goal_id}`).catch(() => null),
       api.get<Criterion[]>(`/api/goals/${tutorialData.goal_id}/criteria`).catch(() => []),
       api.get<GoalUsage>(`/api/goals/${tutorialData.goal_id}/usage`).catch(() => null),
     ]);
+    if (seq !== loadSeq.current) return;
     setGoal(goalData);
     setCriteria(criteriaData);
     setUsage(usageData);
@@ -57,6 +62,26 @@ function TutorialDetail() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     load().catch((e) => setError(errMsg(e)));
   }, [load]);
+
+  // 章节还在后台生成时自动刷新：否则从「一键生成」直接跳进来会一直停在「0 节」，
+  // 用户只能手动刷新（状态卡死）。刷新有上限，避免任务失败后无限请求。
+  const outlineCount = tutorial?.current_version?.content?.outline?.length ?? 0;
+  const sectionCount = tutorial?.current_version?.content?.sections?.length ?? 0;
+  const sectionsPending = !!tutorial && outlineCount > sectionCount;
+
+  useEffect(() => {
+    if (!sectionsPending) return;
+    let ticks = 0;
+    const timer = setInterval(() => {
+      ticks += 1;
+      if (ticks > 60) {
+        clearInterval(timer); // 约 4 分钟仍无进展就停手，由用户手动刷新
+        return;
+      }
+      void load().catch(() => {});
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [sectionsPending, sectionCount, load]);
 
   const run = async (key: string, fn: () => Promise<void>, msg = "完成") => {
     setBusy(key);
@@ -259,7 +284,8 @@ function TutorialDetail() {
                         </Link>
                         <button
                           className="text-[10px] font-semibold text-brand hover:underline disabled:opacity-40"
-                          disabled={busy === `regen-${section.id}`}
+                          // 单节重生成会各自落一个新版本：并发点两节会互相覆盖，任一任务在跑时全部禁用
+                          disabled={!!busy}
                           onClick={() =>
                             run(
                               `regen-${section.id}`,
