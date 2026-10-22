@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
+import json
 import re
 
 from fastapi import HTTPException
@@ -433,24 +435,100 @@ def _tutorial_context(tutorial: Tutorial, version: TutorialVersion | None) -> di
 
 
 
+def _stable_context(context: dict) -> dict:
+    """提取上下文的语义快照：剔除每次重新生成都会变化的随机 id。
+
+    大纲重生成时章节 id 是新 uuid，若把 id 纳入哈希，指纹永远不同、去重失效；
+    这里只保留「模型真正看到的语义内容」（标题 / 摘要 / 前提 / 步骤）。
+    """
+    return {
+        "tutorial_title": context.get("tutorial_title", ""),
+        "outline": [
+            {"title": o.get("title", ""), "summary": o.get("summary", "")}
+            for o in context.get("outline", [])
+        ],
+        "sections": [
+            {
+                "title": s.get("title", ""),
+                "prerequisites": s.get("prerequisites", []),
+                "explanation_headings": s.get("explanation_headings", []),
+                "steps": s.get("steps", []),
+            }
+            for s in context.get("sections", [])
+        ],
+    }
+
+
+def context_fingerprint(context: dict) -> str:
+    """大纲内容稳定指纹（sha256 前 32 位）：内容未变就不必再跑一次提取。"""
+    payload = json.dumps(
+        _stable_context(context), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+def _goal_extracted_fingerprints(
+    db: Session, goal_id: str, *, exclude_version_id: str | None, limit: int = 30
+) -> set[str]:
+    """同一目标下最近若干版本已提取过的指纹。
+
+    大纲重生成会创建**新的教程**（版本号从 1 重新开始），因此「同版本打标」不足以去重；
+    这里跨教程按目标回看最近 30 个版本——24 小时内反复重生成大纲就落在这个窗口内。
+    """
+    query = (
+        db.query(TutorialVersion.quality_report)
+        .join(Tutorial, TutorialVersion.tutorial_id == Tutorial.id)
+        .filter(Tutorial.goal_id == goal_id)
+    )
+    if exclude_version_id:
+        query = query.filter(TutorialVersion.id != exclude_version_id)
+    rows = query.order_by(TutorialVersion.created_at.desc()).limit(limit).all()
+    fingerprints: set[str] = set()
+    for (raw,) in rows:
+        report = jload(raw, {})
+        if isinstance(report, dict) and report.get("knowledge_fingerprint"):
+            fingerprints.add(str(report["knowledge_fingerprint"]))
+    return fingerprints
+
+
 def extract_from_tutorial(
     db: Session, goal: LearningGoal, tutorial: Tutorial, version: TutorialVersion | None, ai: AIService,
     force: bool = False,
 ) -> dict:
     """教程生成 / 更新后提取结构化知识并持久化。失败不阻断教程主流程。
 
-    幂等：同一教程版本默认只提取一次（版本 quality_report 打标）；force=True 可
-    强制重提（此时靠概念去重与模糊合并避免重复节点）。"""
+    幂等：
+    - 同一教程版本默认只提取一次（版本 quality_report 打标）；
+    - 大纲内容未变（稳定指纹相同，即使换了教程 / 版本）直接跳过，避免重复烧钱；
+    - force=True 可强制重提（此时靠概念去重与模糊合并避免重复节点）。"""
     context = _tutorial_context(tutorial, version)
     if not context["outline"] and not context["sections"]:
         return {"concepts": 0, "relations": 0, "skipped": "empty_content"}
+    fingerprint = context_fingerprint(context)
     if version is not None and not force:
         report = jload(version.quality_report, {})
-        if report.get("knowledge_extracted"):
+        same_version = report.get("knowledge_fingerprint") == fingerprint
+        legacy_marked = bool(report.get("knowledge_extracted")) and not report.get("knowledge_fingerprint")
+        if same_version or legacy_marked:
             return {
                 "concepts": 0,
                 "relations": 0,
                 "skipped": "already_extracted",
+                "tutorial_id": tutorial.id,
+                "goal_id": goal.id,
+            }
+        if fingerprint in _goal_extracted_fingerprints(
+            db, goal.id, exclude_version_id=version.id
+        ):
+            # 内容与上一次已提取的大纲一致：只补打标，不再调用模型
+            report["knowledge_extracted"] = True
+            report["knowledge_fingerprint"] = fingerprint
+            version.quality_report = jdump(report)
+            db.commit()
+            return {
+                "concepts": 0,
+                "relations": 0,
+                "skipped": "unchanged_content",
                 "tutorial_id": tutorial.id,
                 "goal_id": goal.id,
             }
@@ -538,6 +616,7 @@ def extract_from_tutorial(
     if version is not None:
         report = jload(version.quality_report, {})
         report["knowledge_extracted"] = True
+        report["knowledge_fingerprint"] = fingerprint
         version.quality_report = jdump(report)
     db.commit()
     return {

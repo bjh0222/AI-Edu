@@ -1,25 +1,19 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { api, ApiError, downloadFile } from "@/lib/api";
+import { startJobPolling, jobDoneMessage } from "@/lib/job-poll";
 import type {
-  Assessment,
-  Attempt,
   ChatResponse,
   Criterion,
-  GenerationJob,
   Goal,
   GoalAssessment,
   GoalUsage,
-  Knowledge,
   Plan,
-  Proposal,
   QuickStartResult,
   QuickStartStep,
-  Reflection,
-  Task,
   Tutorial,
 } from "@/lib/types";
 import { fmtTokens, usageSourceLabel } from "@/lib/format";
@@ -35,11 +29,6 @@ const PHASES: { key: string; label: string }[] = [
   { key: "planning", label: "学习计划" },
   { key: "acceptance_design", label: "验收标准" },
   { key: "learning", label: "教程学习" },
-  { key: "practice", label: "实践" },
-  { key: "feedback", label: "反馈" },
-  { key: "assessment", label: "能力评估" },
-  { key: "reflection", label: "复盘" },
-  { key: "knowledge_update", label: "知识记录" },
 ];
 
 const STATUS_LABEL: Record<string, string> = Object.fromEntries(PHASES.map((p) => [p.key, p.label]));
@@ -71,11 +60,6 @@ function GoalWorkspace() {
   const [plan, setPlan] = useState<Plan | null>(null);
   const [criteria, setCriteria] = useState<Criterion[]>([]);
   const [tutorials, setTutorials] = useState<Tutorial[]>([]);
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [attempts, setAttempts] = useState<Record<string, Attempt[]>>({});
-  const [assessments, setAssessments] = useState<Assessment[]>([]);
-  const [reflections, setReflections] = useState<Reflection[]>([]);
-  const [proposals, setProposals] = useState<Proposal[]>([]);
   const [chatLog, setChatLog] = useState<{ q: string; a: string; demo: boolean }[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [decisionReason, setDecisionReason] = useState("");
@@ -90,17 +74,23 @@ function GoalWorkspace() {
   const confirmedCount = criteria.filter((c) => c.status === "confirmed").length;
   const pendingCount = criteria.filter((c) => c.status === "pending").length;
 
+  const pollCancel = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    // 卸载时停掉轮询，避免页面跳走后继续请求 + setState
+    return () => {
+      pollCancel.current?.();
+      pollCancel.current = null;
+    };
+  }, []);
+
   const loadAll = useCallback(async () => {
-    const [g, d, p, c, ts, tk, as, rf, kn, u] = await Promise.all([
+    const [g, d, p, c, ts, u] = await Promise.all([
       api.get<Goal>(`/api/goals/${goalId}`),
       api.get<GoalAssessment | null>(`/api/goals/${goalId}/diagnose`).catch(() => null),
       api.get<Plan | null>(`/api/goals/${goalId}/plan`).catch(() => null),
       api.get<Criterion[]>(`/api/goals/${goalId}/criteria`).catch(() => []),
       api.get<Tutorial[]>(`/api/goals/${goalId}/tutorials`).catch(() => []),
-      api.get<Task[]>(`/api/goals/${goalId}/tasks`).catch(() => []),
-      api.get<Assessment[]>(`/api/goals/${goalId}/assessments`).catch(() => []),
-      api.get<Reflection[]>(`/api/goals/${goalId}/reflections`).catch(() => []),
-      api.get<Knowledge>("/api/knowledge").catch(() => ({ concepts: [], relations: [], proposals: [] })),
       api.get<GoalUsage>(`/api/goals/${goalId}/usage`).catch(() => null),
     ]);
     setGoal(g);
@@ -108,16 +98,7 @@ function GoalWorkspace() {
     setPlan(p);
     setCriteria(c);
     setTutorials(ts);
-    setTasks(tk);
-    setAssessments(as);
-    setReflections(rf);
-    setProposals(kn.proposals.filter((x) => x.status === "pending"));
     setUsage(u);
-
-    const pairs = await Promise.all(
-      tk.map(async (t) => [t.id, await api.get<Attempt[]>(`/api/tasks/${t.id}/attempts`).catch(() => [])] as const)
-    );
-    setAttempts(Object.fromEntries(pairs));
   }, [goalId]);
 
   useEffect(() => {
@@ -142,41 +123,36 @@ function GoalWorkspace() {
   };
 
   const pollJob = (jobId: string) => {
-    const tick = async () => {
-      try {
-        const job = await api.get<GenerationJob>(`/api/generation-jobs/${jobId}`);
+    // 先取消上一次轮询：连点「一键生成」不应产生两路计时器同时刷同一个 job
+    pollCancel.current?.();
+    pollCancel.current = startJobPolling(jobId, {
+      onUpdate: (job) =>
         setGen({
           stage: job.stage,
           progress: job.progress,
           tokens: job.token_usage?.total_tokens ?? 0,
-        });
-        if (job.status === "done") {
-          setGen(null);
-          setBusy("");
-          await loadAll();
-          setNotice(
-            `教程章节已生成，质量检查完成${job.token_usage?.total_tokens ? ` · 本次消耗 ${fmtTokens(job.token_usage.total_tokens)} tokens` : ""}`
-          );
-        } else if (job.status === "failed") {
-          setGen(null);
-          setBusy("");
-          setError(
-            `章节生成失败（${job.error_code || "unknown"}）${job.error_message ? `：${job.error_message}` : "，请检查模型配置后重试"}`
-          );
-        } else {
-          setTimeout(tick, 2000);
-        }
-      } catch (e) {
+        }),
+      onDone: async (job) => {
         setGen(null);
         setBusy("");
-        setError(errMsg(e));
-      }
-    };
-    setTimeout(tick, 1500);
+        await loadAll();
+        setNotice(jobDoneMessage(job));
+      },
+      onFailed: (message) => {
+        setGen(null);
+        setBusy("");
+        setError(message);
+      },
+      onError: (message) => {
+        setGen(null);
+        setBusy("");
+        setError(message);
+      },
+    });
   };
 
   const startSections = async () => {
-    if (!tutorial) return;
+    if (!tutorial || busy) return;
     setBusy("sections");
     setError("");
     setNotice("");
@@ -201,7 +177,8 @@ function GoalWorkspace() {
       setQuickSteps(resp.steps);
       await loadAll();
       if (resp.job_id) {
-        setGen({ stage: "一键生成已提交，正在生成全部章节…", progress: 0, tokens: 0 });
+        // 可能是章节任务，也可能是「只差配套文件」的后台任务，进度文案交给 job.stage
+        setGen({ stage: "任务已提交，等待模型返回…", progress: 0, tokens: 0 });
         pollJob(resp.job_id);
       } else {
         setBusy("");
@@ -543,155 +520,11 @@ function GoalWorkspace() {
               </div>
             )}
           </Card>
-
-          {/* 5 实践任务 */}
-          <Card title="⑤ 实践任务" desc="每个任务都要有产物、验证方式与辅助等级记录">
-            {tasks.length === 0 ? (
-              <Empty>暂无任务。生成教程章节后会自动创建一个实践任务。</Empty>
-            ) : (
-              <div className="grid gap-2.5">
-                {tasks.map((t) => (
-                  <TaskItem
-                    key={t.id}
-                    task={t}
-                    attempts={attempts[t.id] ?? []}
-                    onSubmitted={loadAll}
-                    onError={(m) => setError(m)}
-                  />
-                ))}
-              </div>
-            )}
-          </Card>
-
-          {/* 6 能力评估 */}
-          <Card
-            title="⑥ 能力评估"
-            desc="独立任务 + 变式任务，检查能否不依赖教程完成"
-            actions={
-              <Button
-                variant="secondary"
-                onClick={() =>
-                  run(
-                    "assessment",
-                    async () => { await api.post(`/api/goals/${goalId}/assessments`, { assessment_type: "mixed" }); },
-                    "评估方案已生成"
-                  )
-                }
-                disabled={busy === "assessment"}
-              >
-                {busy === "assessment" ? "生成中…" : "生成评估方案"}
-              </Button>
-            }
-          >
-            {assessments.length === 0 ? (
-              <Empty>尚未生成评估方案。</Empty>
-            ) : (
-              <div className="grid gap-2">
-                {assessments.map((a) => (
-                  <AssessmentItem key={a.id} assessment={a} onSaved={loadAll} onError={(m) => setError(m)} />
-                ))}
-              </div>
-            )}
-          </Card>
-
-          {/* 7 复盘 */}
-          <Card
-            title="⑦ 学习复盘"
-            desc="记录完成了什么、仍依赖 AI 的地方、下一步最值得做的事"
-            actions={
-              <Button
-                variant="secondary"
-                onClick={() => run("reflection", async () => { await api.post(`/api/goals/${goalId}/reflections`, {}); }, "复盘草稿已生成")}
-                disabled={busy === "reflection"}
-              >
-                {busy === "reflection" ? "生成中…" : "生成复盘草稿"}
-              </Button>
-            }
-          >
-            {reflections.length === 0 ? (
-              <Empty>尚无复盘记录。</Empty>
-            ) : (
-              <div className="grid gap-2">
-                {reflections.map((r) => (
-                  <div key={r.id} className="rounded-xl border border-line p-3 text-[12px] leading-relaxed">
-                    <div className="mb-1 text-[10px] text-muted">{r.created_at}</div>
-                    <div>{r.summary}</div>
-                    <div className="mt-1.5 grid gap-1 text-[11px] text-muted">
-                      <div>已形成的能力：{r.learned_capabilities}</div>
-                      <div>待解决：{r.unresolved_gaps}</div>
-                      <div>下一步：{r.next_actions}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </Card>
         </div>
 
         {/* 右列 */}
         <div className="grid gap-4">
           <GoalMaterialsCard goalId={goalId} />
-
-          <Card
-            title="知识提议"
-            desc="AI 只能提议，确认后才入长期知识网络"
-            actions={
-              <Button
-                variant="secondary"
-                onClick={() =>
-                  run(
-                    "proposals",
-                    async () => { await api.post(`/api/goals/${goalId}/knowledge-proposals`); },
-                    "知识提议已生成，请逐条确认"
-                  )
-                }
-                disabled={busy === "proposals"}
-              >
-                {busy === "proposals" ? "生成中…" : "生成知识提议"}
-              </Button>
-            }
-          >
-            {proposals.length === 0 ? (
-              <Empty>暂无待处理提议。</Empty>
-            ) : (
-              <div className="grid gap-2">
-                {proposals.map((p) => (
-                  <div key={p.id} className="rounded-xl border border-line p-3 text-[11px] leading-relaxed">
-                    <div className="mb-1 flex items-center gap-2">
-                      <Badge tone="warn">{p.proposal_type === "relation" ? "关系" : "概念"}</Badge>
-                    </div>
-                    <div className="font-semibold">{proposalText(p)}</div>
-                    {p.rationale && <div className="mt-1 text-muted">依据：{p.rationale}</div>}
-                    <div className="mt-2 flex gap-2">
-                      <Button
-                        variant="secondary"
-                        disabled={busy === `p-${p.id}`}
-                        onClick={() =>
-                          run(`p-${p.id}`, async () => { await api.post(`/api/knowledge/proposals/${p.id}/review`, { action: "confirm" }); }, "已确认该提议")
-                        }
-                      >
-                        确认
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        disabled={busy === `p-${p.id}`}
-                        onClick={() =>
-                          run(`p-${p.id}`, async () => { await api.post(`/api/knowledge/proposals/${p.id}/review`, { action: "reject" }); }, "已拒绝该提议")
-                        }
-                      >
-                        拒绝
-                      </Button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-            <div className="mt-3 border-t border-line pt-3 text-[11px]">
-              <Link href="/knowledge" className="font-semibold text-brand hover:underline">
-                打开完整知识网络 →
-              </Link>
-            </div>
-          </Card>
 
           {/* 答疑 */}
           <Card title="上下文答疑" desc="基于当前目标与教程上下文的提问；优先提示，不直接代做">
@@ -762,17 +595,6 @@ function KV({ k, v }: { k: string; v: string }) {
       <div className="whitespace-pre-wrap text-[12px] text-[#33415c]">{v}</div>
     </div>
   );
-}
-
-function proposalText(p: Proposal): string {
-  const payload = p.payload as Record<string, unknown>;
-  if (payload.title) {
-    return `新概念：${String(payload.title)}`;
-  }
-  if (payload.from_title && payload.to_title) {
-    return `新关系：${String(payload.from_title)} —${String(payload.relation_type ?? "related")}→ ${String(payload.to_title)}`;
-  }
-  return JSON.stringify(payload);
 }
 
 const QUICK_STATUS: Record<string, { label: string; cls: string }> = {
@@ -871,6 +693,55 @@ function TutorialView({
         {exportErr && <span className="text-[11px] text-[#a33]">{exportErr}</span>}
       </div>
 
+      {/* 配套文件：知识速查 + 可选额外练习（与主教程用 Obsidian 双链关联） */}
+      {((version?.content.cheatsheet?.sections?.length ?? 0) > 0 ||
+        (version?.content.extra_exercises?.exercises?.length ?? 0) > 0) && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg bg-[#f7f6ff] px-3 py-2 text-[11px]">
+          <span className="font-bold text-[#5a6a86]">配套文件：</span>
+          {version?.content.cheatsheet?.sections?.length ? (
+            <button
+              className="font-semibold text-brand hover:underline disabled:opacity-40"
+              disabled={exporting}
+              onClick={async () => {
+                setExporting(true);
+                setExportErr("");
+                try {
+                  const name = version.content.cheatsheet!.filename ?? "知识速查";
+                  await downloadFile(`/api/tutorials/${tutorial.id}/export/cheatsheet`, `${name}.md`);
+                } catch (e) {
+                  setExportErr(errMsg(e));
+                } finally {
+                  setExporting(false);
+                }
+              }}
+            >
+              下载知识速查（{version.content.cheatsheet.sections.length} 节）
+            </button>
+          ) : null}
+          {version?.content.extra_exercises?.exercises?.length ? (
+            <button
+              className="font-semibold text-brand hover:underline disabled:opacity-40"
+              disabled={exporting}
+              onClick={async () => {
+                setExporting(true);
+                setExportErr("");
+                try {
+                  const name = version.content.extra_exercises!.filename ?? "额外练习";
+                  await downloadFile(`/api/tutorials/${tutorial.id}/export/exercises`, `${name}.md`);
+                } catch (e) {
+                  setExportErr(errMsg(e));
+                } finally {
+                  setExporting(false);
+                }
+              }}
+            >
+              下载额外练习（{version.content.extra_exercises.exercises.length} 题，含参考答案）
+            </button>
+          ) : null}
+          <span className="text-[10px] text-muted">导出后与主教程放同一文件夹，双链自动生效</span>
+        </div>
+      )}
+
       <div>
         <div className="mb-1.5 text-[11px] font-bold text-[#5a6a86]">
           大纲（{outline.length} 节）· 点击任意一步进入详情
@@ -961,219 +832,6 @@ function TutorialView({
         targetType="tutorial"
         title="这套教程对你有帮助吗？"
       />
-    </div>
-  );
-}
-
-function TaskItem({
-  task,
-  attempts,
-  onSubmitted,
-  onError,
-}: {
-  task: Task;
-  attempts: Attempt[];
-  onSubmitted: () => Promise<void> | void;
-  onError: (m: string) => void;
-}) {
-  const [artifact, setArtifact] = useState("");
-  const [helpLevel, setHelpLevel] = useState("A1");
-  const [errorsText, setErrorsText] = useState("");
-  const [explanation, setExplanation] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [localErr, setLocalErr] = useState("");
-
-  const submit = async () => {
-    if (!artifact.trim()) {
-      setLocalErr("请填写产物（命令输出 / 代码 / 推导 / 证据）");
-      return;
-    }
-    setBusy(true);
-    setLocalErr("");
-    try {
-      await api.post(`/api/tasks/${task.id}/attempts`, {
-        artifact,
-        artifact_type: "text",
-        errors: errorsText,
-        help_level: helpLevel,
-        user_explanation: explanation,
-      });
-      setArtifact("");
-      setErrorsText("");
-      setExplanation("");
-      await onSubmitted();
-    } catch (e) {
-      setLocalErr(errMsg(e));
-      onError(errMsg(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="rounded-xl border border-line p-3">
-      <div className="flex items-center justify-between gap-2">
-        <b className="text-[12px]">{task.title}</b>
-        <Badge tone={task.status === "done" ? "done" : task.status === "doing" ? "active" : "neutral"}>
-          {task.status === "done" ? "已完成" : task.status === "doing" ? "进行中" : "待开始"}
-        </Badge>
-      </div>
-      <div className="mt-1 whitespace-pre-wrap text-[11px] text-muted">{task.instructions}</div>
-      {task.expected_artifact && (
-        <div className="mt-1 text-[11px] text-muted">
-          预期产物：<b>{task.expected_artifact}</b>
-        </div>
-      )}
-      {task.validation_rule && <div className="text-[10px] text-[#99a2b3]">验收：{task.validation_rule}</div>}
-
-      <div className="mt-2 grid gap-2 rounded-xl bg-[#fbfcff] p-3">
-        <textarea
-          className={inputCls}
-          rows={3}
-          placeholder="粘贴产物 / 命令输出 / 推导过程 / 结果…"
-          value={artifact}
-          onChange={(e) => setArtifact(e.target.value)}
-        />
-        <div className="grid gap-2 sm:grid-cols-2">
-          <select className={inputCls} value={helpLevel} onChange={(e) => setHelpLevel(e.target.value)}>
-            <option value="A0">A0 引导（完整步骤）</option>
-            <option value="A1">A1 协作</option>
-            <option value="A2">A2 提示</option>
-            <option value="A3">A3 独立验证</option>
-          </select>
-          <input
-            className={inputCls}
-            placeholder="遇到的错误（可选）"
-            value={errorsText}
-            onChange={(e) => setErrorsText(e.target.value)}
-          />
-        </div>
-        <input
-          className={inputCls}
-          placeholder="你的解释：为什么这样做（可选）"
-          value={explanation}
-          onChange={(e) => setExplanation(e.target.value)}
-        />
-        <div className="flex items-center gap-2">
-          <Button onClick={submit} disabled={busy}>
-            {busy ? "提交中…" : "提交尝试并获取反馈"}
-          </Button>
-          {localErr && <span className="text-[11px] text-[#a33]">{localErr}</span>}
-        </div>
-      </div>
-
-      {attempts.length > 0 && (
-        <div className="mt-2 grid gap-2">
-          {attempts.map((a) => (
-            <div key={a.id} className="rounded-xl border border-[#e7e3ff] bg-[#faf9ff] p-3 text-[11px] leading-relaxed">
-              <div className="flex items-center gap-2">
-                <Badge>尝试 · {a.help_level}</Badge>
-                <span className="text-[10px] text-muted">{a.created_at}</span>
-              </div>
-              <div className="mt-1 whitespace-pre-wrap font-mono text-[11px] text-[#33415c]">{a.artifact}</div>
-              {a.feedback?.summary && <div className="mt-1 text-muted">反馈：{a.feedback.summary}</div>}
-              {a.feedback?.items && a.feedback.items.length > 0 && (
-                <ul className="mt-1 grid gap-1">
-                  {a.feedback.items.map((f, i) => (
-                    <li key={i} className="rounded-lg bg-white p-2">
-                      <div className="flex items-center gap-1.5">
-                        <Badge tone={f.status === "satisfied" ? "done" : f.status === "unclear" ? "warn" : "neutral"}>
-                          {f.status === "satisfied" ? "满足" : f.status === "unsatisfied" ? "未满足" : "待确认"}
-                        </Badge>
-                        <span className="font-semibold">{f.statement || "（标准）"}</span>
-                      </div>
-                      {f.evidence && <div className="mt-0.5 text-muted">证据：{f.evidence}</div>}
-                      {f.reason && <div className="text-muted">判断：{f.reason}</div>}
-                      {f.next_action && <div className="text-[#6255e8]">下一步：{f.next_action}</div>}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function AssessmentItem({
-  assessment,
-  onSaved,
-  onError,
-}: {
-  assessment: Assessment;
-  onSaved: () => Promise<void> | void;
-  onError: (m: string) => void;
-}) {
-  const [result, setResult] = useState(assessment.result ?? "");
-  const [weak, setWeak] = useState(assessment.weak_points ?? "");
-  const [busy, setBusy] = useState(false);
-
-  const save = async () => {
-    setBusy(true);
-    try {
-      await api.patch(`/api/assessments/${assessment.id}`, { result, weak_points: weak });
-      await onSaved();
-    } catch (e) {
-      onError(errMsg(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="rounded-xl border border-line p-3 text-[11px] leading-relaxed">
-      <div className="flex items-center gap-2">
-        <Badge tone="active">{assessment.assessment_type}</Badge>
-        <span className="text-[10px] text-muted">{assessment.created_at}</span>
-      </div>
-      {assessment.rubric.length > 0 && (
-        <div className="mt-1.5 grid gap-0.5">
-          {assessment.rubric.map((r, i) => (
-            <div key={i} className="text-muted">
-              · {r.dimension}（权重 {r.weight}）
-            </div>
-          ))}
-        </div>
-      )}
-      {assessment.independent_task?.title && (
-        <div className="mt-1.5 rounded-lg bg-[#fafbfc] p-2">
-          <b className="text-[#4f45a6]">独立任务：</b>
-          {assessment.independent_task.title}
-          {assessment.independent_task.description && (
-            <div className="text-muted">{assessment.independent_task.description}</div>
-          )}
-        </div>
-      )}
-      {assessment.variant_task?.title && (
-        <div className="mt-1.5 rounded-lg bg-[#fafbfc] p-2">
-          <b className="text-[#4f45a6]">变式任务：</b>
-          {assessment.variant_task.title}
-          {assessment.variant_task.description && (
-            <div className="text-muted">{assessment.variant_task.description}</div>
-          )}
-        </div>
-      )}
-      <div className="mt-2 grid gap-1.5">
-        <input
-          className={inputCls}
-          placeholder="评估结果（如：独立完成 3/4 项，迁移任务未通过）"
-          value={result}
-          onChange={(e) => setResult(e.target.value)}
-        />
-        <input
-          className={inputCls}
-          placeholder="薄弱点"
-          value={weak}
-          onChange={(e) => setWeak(e.target.value)}
-        />
-        <div>
-          <Button variant="secondary" onClick={save} disabled={busy}>
-            {busy ? "保存中…" : "保存评估结果"}
-          </Button>
-        </div>
-      </div>
     </div>
   );
 }

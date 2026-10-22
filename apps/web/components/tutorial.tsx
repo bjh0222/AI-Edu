@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import type { Criterion, OutlineItem, Section, TokenUsage } from "@/lib/types";
+import type { ContentBlock, Criterion, OutlineItem, Section, TokenUsage } from "@/lib/types";
+import { CONTENT_TYPE_LABELS } from "@/lib/types";
 import { fmtTokens, usageSourceLabel } from "@/lib/format";
 
 /** 大纲列表：每一步都可点进详情（有章节 → 章节详情；仅大纲 → 教程详情锚点）。 */
@@ -31,6 +32,11 @@ export function OutlineList({
                 {index + 1}
               </span>
               <span className="font-semibold">{item.title}</span>
+              {item.content_type ? (
+                <span className="shrink-0 rounded bg-[#efeaff] px-1.5 py-0.5 text-[9px] font-semibold text-[#6255e8]">
+                  {CONTENT_TYPE_LABELS[item.content_type] ?? item.content_type}
+                </span>
+              ) : null}
               <span className="ml-auto shrink-0 text-[10px] text-muted">
                 {item.criteria_ids.length} 条标准
                 {section?.token_usage
@@ -46,7 +52,36 @@ export function OutlineList({
   );
 }
 
-/** 单节正文：说明、步骤、练习、变式、常见错误、来源与验收映射。 */
+/** 内容块默认标题（与后端渲染保持一致）。 */
+const BLOCK_HEADINGS: Record<string, string> = {
+  text: "讲解",
+  key_point: "关键结论",
+  formula: "公式与推导",
+  steps: "操作步骤",
+  table: "表格",
+  example: "示例",
+  comparison: "对比分析",
+  method_summary: "方法归纳",
+  diagram: "概念关系图",
+  memory: "记忆材料",
+  note: "注意事项",
+};
+
+/** 内容块：v2 结构按块渲染。 */
+function BlockView({ block }: { block: ContentBlock }) {
+  const heading = block.title?.trim() || BLOCK_HEADINGS[block.type] || "讲解";
+  const isQuote = block.type === "key_point" || block.type === "note";
+  return (
+    <div className="rounded-lg bg-[#fafbfc] p-2.5 text-[11px] leading-relaxed">
+      <b className="text-[#4f45a6]">{heading}</b>
+      <div className={`whitespace-pre-wrap ${isQuote ? "border-l-2 border-[#c9c2ff] pl-2" : ""}`}>
+        {block.body}
+      </div>
+    </div>
+  );
+}
+
+/** 单节正文：v2 内容块结构优先；旧结构（explanation/steps/…）原样兼容渲染。 */
 export function SectionContent({
   section,
   criteria,
@@ -55,70 +90,100 @@ export function SectionContent({
   criteria?: Criterion[];
 }) {
   const critById = new Map((criteria ?? []).map((c) => [c.id, c.statement]));
+  const isV2 = (section.content?.length ?? 0) > 0;
   return (
     <div className="grid gap-2">
-      {section.goal_statement && <div className="text-[11px] text-muted">{section.goal_statement}</div>}
-
-      {section.explanation.length > 0 && (
-        <div className="grid gap-1.5">
-          {section.explanation.map((block, index) => (
-            <div key={index} className="rounded-lg bg-[#fafbfc] p-2.5 text-[11px] leading-relaxed">
-              <b className="text-[#4f45a6]">{block.heading}</b>
-              <div className="whitespace-pre-wrap">{block.body}</div>
+      {isV2 ? (
+        <>
+          {section.purpose && <div className="text-[11px] text-muted">{section.purpose}</div>}
+          {section.content_type && (
+            <div>
+              <span className="rounded bg-[#efeaff] px-1.5 py-0.5 text-[9px] font-semibold text-[#6255e8]">
+                {CONTENT_TYPE_LABELS[section.content_type] ?? section.content_type}
+              </span>
             </div>
+          )}
+          {(section.content ?? []).map((block, index) => (
+            <BlockView key={index} block={block} />
           ))}
-        </div>
+          {(section.key_takeaways?.length ?? 0) > 0 && (
+            <div className="text-[11px]">
+              <div className="mb-1 text-[10px] font-bold text-muted">核心结论</div>
+              <ul className="list-disc pl-4 leading-relaxed text-[#33415c]">
+                {section.key_takeaways!.map((item, index) => (
+                  <li key={index}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {(section.prerequisite_refs?.length ?? 0) > 0 && (
+            <div className="text-[10px] text-muted">
+              前置知识：{section.prerequisite_refs!.join("、")}
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          {section.goal_statement && <div className="text-[11px] text-muted">{section.goal_statement}</div>}
+          {(section.explanation?.length ?? 0) > 0 && (
+            <div className="grid gap-1.5">
+              {section.explanation!.map((block, index) => (
+                <div key={index} className="rounded-lg bg-[#fafbfc] p-2.5 text-[11px] leading-relaxed">
+                  <b className="text-[#4f45a6]">{block.heading}</b>
+                  <div className="whitespace-pre-wrap">{block.body}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {(section.steps?.length ?? 0) > 0 && (
+            <div>
+              <div className="mb-1 text-[10px] font-bold text-muted">操作步骤</div>
+              <ol className="grid gap-1.5">
+                {section.steps!.map((step, index) => (
+                  <li key={index} className="rounded-lg border border-line p-2.5 text-[11px] leading-relaxed">
+                    <div className="font-semibold">{step.text}</div>
+                    <div className="mt-0.5 text-muted">预期结果：{step.expected_result}</div>
+                    <div className="text-muted">验证方式：{step.verification}</div>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
+          {(section.examples?.length ?? 0) > 0 && (
+            <div className="text-[11px]">
+              <div className="mb-1 text-[10px] font-bold text-muted">示例</div>
+              <ul className="list-disc pl-4 leading-relaxed text-[#33415c]">
+                {section.examples!.map((item, index) => (
+                  <li key={index}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {section.variation_task && (
+            <div className="rounded-lg border border-[#e7e3ff] bg-[#f7f6ff] p-2.5 text-[11px] leading-relaxed">
+              <b className="text-[#6255e8]">变式任务：</b>
+              {section.variation_task}
+            </div>
+          )}
+        </>
       )}
 
-      {section.exercises.length > 0 && (
+      {(section.exercises?.length ?? 0) > 0 && (
         <div className="text-[11px]">
           <div className="mb-1 text-[10px] font-bold text-muted">练习</div>
           <ul className="list-disc pl-4 leading-relaxed text-[#33415c]">
-            {section.exercises.map((item, index) => (
+            {section.exercises!.map((item, index) => (
               <li key={index}>{item}</li>
             ))}
           </ul>
         </div>
       )}
 
-      {section.steps.length > 0 && (
-        <div>
-          <div className="mb-1 text-[10px] font-bold text-muted">操作步骤</div>
-          <ol className="grid gap-1.5">
-            {section.steps.map((step, index) => (
-              <li key={index} className="rounded-lg border border-line p-2.5 text-[11px] leading-relaxed">
-                <div className="font-semibold">{step.text}</div>
-                <div className="mt-0.5 text-muted">预期结果：{step.expected_result}</div>
-                <div className="text-muted">验证方式：{step.verification}</div>
-              </li>
-            ))}
-          </ol>
-        </div>
-      )}
-
-      {section.examples.length > 0 && (
-        <div className="text-[11px]">
-          <div className="mb-1 text-[10px] font-bold text-muted">示例</div>
-          <ul className="list-disc pl-4 leading-relaxed text-[#33415c]">
-            {section.examples.map((item, index) => (
-              <li key={index}>{item}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {section.variation_task && (
-        <div className="rounded-lg border border-[#e7e3ff] bg-[#f7f6ff] p-2.5 text-[11px] leading-relaxed">
-          <b className="text-[#6255e8]">变式任务：</b>
-          {section.variation_task}
-        </div>
-      )}
-
-      {section.common_errors.length > 0 && (
+      {(section.common_errors?.length ?? 0) > 0 && (
         <div className="text-[11px]">
           <div className="mb-1 text-[10px] font-bold text-muted">常见错误</div>
           <ul className="grid gap-1">
-            {section.common_errors.map((item, index) => (
+            {section.common_errors!.map((item, index) => (
               <li key={index} className="text-muted">
                 <b className="text-[#a33]">{item.error}</b> · {item.cause} · 排查：{item.diagnose}
               </li>
@@ -127,7 +192,7 @@ export function SectionContent({
         </div>
       )}
 
-      {section.mapping_criteria.length > 0 && (
+      {(section.mapping_criteria?.length ?? 0) > 0 && (
         <div className="text-[10px] text-muted">
           对应验收标准：
           {section.mapping_criteria.map((cid) => (
@@ -136,10 +201,10 @@ export function SectionContent({
         </div>
       )}
 
-      {section.sources.length > 0 && (
+      {(section.sources?.length ?? 0) > 0 && (
         <div className="text-[10px] text-muted">
           来源：
-          {section.sources.map((source, index) => (
+          {section.sources!.map((source, index) => (
             <span key={index} className="mr-2">
               {source.title}
               {source.note ? `（${source.note}）` : ""}

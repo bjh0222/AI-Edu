@@ -91,7 +91,8 @@ def plan(goal, discipline: DisciplineProfile) -> dict:
 
 def criteria(goal, discipline: DisciplineProfile) -> list[dict]:
     title = _goal_title(goal)
-    return [
+    level = str(getattr(goal, "capability_level", "") or "L2").upper()
+    base = [
         {
             "statement": f"能够用自己的话解释「{title}」涉及的核心概念及其适用边界",
             "conditions": "不照读教程原文；能举出一个边界情况或反例",
@@ -121,6 +122,18 @@ def criteria(goal, discipline: DisciplineProfile) -> list[dict]:
             "rationale": "迁移是真正理解的标志",
         },
     ]
+    if level == "L1":
+        # L1 不要求迁移；保留概念解释、最小任务与错误识别，并显式放宽范围
+        kept = base[:3]
+        kept[0]["rationale"] += "（L1：以解释与识别为主）"
+        kept[1]["conditions"] = "允许对照教程步骤完成；关键输出需自验"
+        return kept
+    if level == "L3":
+        base[3]["conditions"] = "换一个教程未覆盖的情境；不允许提示；需解释关键决策依据"
+        base[3]["pass_rule"] = "变式任务成功完成，能解释依据的规律，并说明方法的适用条件与局限"
+        base[3]["rationale"] += "（L3：以迁移与决策论证为主）"
+        return base
+    return base
 
 
 def outline(goal, discipline: DisciplineProfile, criterion_ids: list[str]) -> list[dict]:
@@ -129,21 +142,29 @@ def outline(goal, discipline: DisciplineProfile, criterion_ids: list[str]) -> li
     return [
         {
             "title": "准备与核心概念",
+            "purpose": f"明确「{title}」的范围，建立必要概念与工具环境。",
+            "content_type": "concept",
             "summary": f"明确「{title}」的范围，建立必要概念与工具环境。",
             "criteria_ids": [x for x in [c[0]] if x],
         },
         {
             "title": "最小可运行任务（分步）",
+            "purpose": "通过完成第一个真实任务掌握核心操作。",
+            "content_type": "tool",
             "summary": "按步骤完成第一个真实任务，每一步都有预期结果与验证方式。",
             "criteria_ids": [x for x in [c[1]] if x],
         },
         {
             "title": "常见错误与排查",
+            "purpose": "建立错误诊断能力，理解方法适用条件。",
+            "content_type": "method",
             "summary": "复现典型错误、定位原因并验证修复。",
             "criteria_ids": [x for x in [c[2]] if x],
         },
         {
             "title": "练习、变式任务与复盘",
+            "purpose": "巩固所学，检验迁移能力并整理方法总结。",
+            "content_type": "application",
             "summary": "完成练习与变式任务，检查迁移能力并复盘。",
             "criteria_ids": [x for x in [c[3], c[1]] if x],
         },
@@ -151,83 +172,164 @@ def outline(goal, discipline: DisciplineProfile, criterion_ids: list[str]) -> li
 
 
 def section(goal, discipline: DisciplineProfile, item: dict, criteria_by_id: dict) -> dict:
+    """演示版章节：与 v2 提示词输出结构一致（content 内容块）。"""
     title = item.get("title", "")
     summary = item.get("summary", "")
     cids = item.get("criteria_ids", [])
     crit_text = "；".join(criteria_by_id.get(cid, {}).get("statement", "（验收标准）") for cid in cids) or "本章目标"
     is_cli = _is_cli(discipline)
 
-    explanation = [
+    concept_body = (
+        (
+            "以命令行为例：一个命令由「程序名 + 参数 + 输入/输出」组成。它要解决的问题是："
+            "把重复的手工操作交给可复现、可验证的指令。理解每一步的输入与输出，比记住具体写法更重要。"
+        )
+        if is_cli
+        else (
+            "以数据分析为例：一个方法由「定义 + 前提假设 + 计算过程 + 结论解释」组成。"
+            "它要解决的问题是：在不满足理想条件的数据上做出可靠判断。"
+            "使用前先检查假设是否满足，结论要说明适用范围，避免把相关当因果。"
+        )
+    )
+    content = [
         {
-            "heading": "这一节在解决什么问题",
-            "body": f"{summary}\n本章对应的验收标准：{crit_text}。",
+            "type": "text",
+            "title": "这一节在解决什么问题",
+            "body": f"{summary}\n本章对应的验收标准：{crit_text}。{concept_body}",
         },
         {
-            "heading": "核心概念与边界",
+            "type": "key_point",
+            "title": "核心结论",
             "body": (
-                ("以命令行为例：一个命令由「程序名 + 参数 + 输入/输出」组成；理解每一步的输入与输出，"
-                 "比记住具体写法更重要。注意区分「演示环境」与「你的环境」的差异（版本、权限、路径）。")
-                if is_cli else
-                ("以数据分析为例：一个方法由「定义 + 前提假设 + 计算过程 + 结论解释」组成；"
-                 "使用前先检查假设是否满足，结论要说明适用范围，避免把相关当因果。")
+                "先理解机制，再记忆写法：每一步操作都应能回答「输入是什么、输出是什么、如何验证结果正确」。"
+            ),
+        },
+        {
+            "type": "steps",
+            "title": "操作步骤",
+            "body": (
+                "1. 确认前提条件（环境/数据/基础）——预期：能看到与教程一致的版本信息或环境状态；"
+                "验证：运行版本检查命令（或核对数据字段）并与教程描述比对。\n"
+                "2. 执行本章核心操作的最小示例——预期：得到与预期一致的输出/结果；"
+                "验证：按教程给出的验证方式逐项检查，把实际输出与预期输出对照。\n"
+                "3. 把示例改造成你自己的任务版本——预期：产物可运行/可复算，且与示例有明确差异；"
+                "验证：重新执行验证；记录差异点与原因。"
+            ),
+        },
+        {
+            "type": "example",
+            "title": "示例",
+            "body": (
+                f"{summary}（演示模式生成的示例框架；配置真实模型后内容会针对「{_goal_title(goal)}」细化）"
+            ),
+        },
+        {
+            "type": "note",
+            "title": "注意事项",
+            "body": (
+                "注意区分「演示环境」与「你的环境」的差异（版本、权限、路径）；"
+                "示例中的关键事实与命令需人工核验。"
             ),
         },
     ]
 
-    steps = [
-        {
-            "text": "第 1 步：确认前提条件（环境/数据/基础）。",
-            "expected_result": "能看到与教程一致的版本信息或环境状态。",
-            "verification": "运行版本检查命令（或核对数据字段），与教程描述比对。",
-        },
-        {
-            "text": "第 2 步：执行本章核心操作的最小示例。",
-            "expected_result": "得到与预期一致的输出/结果。",
-            "verification": "按教程给出的验证方式逐项检查；把实际输出与预期输出对照。",
-        },
-        {
-            "text": "第 3 步：把示例改造成你自己的任务版本。",
-            "expected_result": "产物可运行/可复算，且与示例有明确差异。",
-            "verification": "重新执行验证；记录差异点与原因。",
-        },
-    ]
-
-    examples = [
-        f"示例：{summary}（演示模式生成的示例框架；配置真实模型后内容会针对「{_goal_title(goal)}」细化）",
-    ]
     exercises = [
         "练习 1：按本章步骤复现最小示例，并把实际输出与预期对照。",
         "练习 2：故意制造一个错误，按排查方法定位并修复。",
         f"练习 3：把本章方法应用到你自己的场景：{getattr(goal, 'application_context', '你的真实任务')}。",
     ]
-    variation = (
-        "变式任务：在不看本章步骤的情况下，完成一个结构相似但内容不同的任务（例如换一个目录/数据集），"
-        "完成后解释你依据了哪条规律。"
-    )
     common_errors = [
         {"error": e, "cause": "常见原因见学科清单", "diagnose": "按「复现 → 定位 → 最小验证」三步排查"}
         for e in discipline.common_errors[:3]
     ]
-    sources = [
-        {
-            "title": "演示模式生成内容",
-            "url": "",
-            "note": "本教程由演示生成器产生，关键事实与命令需人工核验；配置真实模型后可获得针对性内容与来源。",
-        }
-    ]
 
     return {
         "title": title,
-        "goal_statement": f"完成本章后，你应能：{crit_text}",
-        "prerequisites": ["完成上一章内容", "工具/环境可用"],
-        "explanation": explanation,
-        "steps": steps,
-        "examples": examples,
-        "exercises": exercises,
-        "variation_task": variation,
+        "purpose": str(item.get("purpose", "") or summary),
+        "content_type": str(item.get("content_type", "") or "mixed"),
+        "content": content,
+        "key_takeaways": [
+            "每一步操作都要能回答：输入是什么、输出是什么、如何验证。",
+            "遇到错误先复现，再定位，最后最小验证修复。",
+        ],
         "common_errors": common_errors,
-        "sources": sources,
+        "prerequisite_refs": ["完成上一章内容", "工具/环境可用"],
+        "exercises": exercises,
+        "sources": [
+            {
+                "title": "演示模式生成内容",
+                "url": "",
+                "note": "本教程由演示生成器产生，关键事实与命令需人工核验；配置真实模型后可获得针对性内容与来源。",
+            }
+        ],
         "mapping_criteria": cids,
+    }
+
+
+def cheatsheet(goal, discipline: DisciplineProfile, outline_items: list[dict]) -> dict:
+    """演示版知识速查：从大纲确定性派生集中查阅材料。"""
+    title = _goal_title(goal)
+    is_cli = _is_cli(discipline)
+    rows = (
+        "| 功能/命令 | 入口/写法 | 用途 | 结果检查 |\n| --- | --- | --- | --- |\n"
+        "| 环境确认 | `--version` / 帮助命令 | 确认工具可用与版本 | 输出版本号与教程一致 |\n"
+        "| 最小示例 | 教程第 2 节命令 | 完成一次核心操作 | 输出与预期一致 |\n"
+        "| 排错入口 | 报错信息 + 复现命令 | 定位失败原因 | 能指出哪一步偏离预期 |"
+        if is_cli
+        else "| 方法/概念 | 定义出处 | 用途 | 结果检查 |\n| --- | --- | --- | --- |\n"
+        "| 核心方法 | 教程第 2 节 | 完成一次典型分析 | 结论可复算且适用条件满足 |\n"
+        "| 前提假设 | 教程第 1 节 | 判断方法是否适用 | 使用前已逐项核对 |\n"
+        "| 常见混淆 | 教程第 3 节 | 区分易混概念 | 能各举一个正反例 |"
+    )
+    return {
+        "title": f"{title} · 知识速查",
+        "sections": [
+            {"heading": "核心速查表", "body": rows},
+            {
+                "heading": "使用说明",
+                "body": (
+                    f"本速查文件是「{title}」教程的配套材料，只用于快速查阅，不能替代正文讲解。"
+                    "演示模式下内容为结构框架，配置真实模型后按教程正文细化。"
+                ),
+            },
+        ],
+    }
+
+
+def extra_exercises(goal, discipline: DisciplineProfile, outline_items: list[dict]) -> dict:
+    """演示版额外练习：与教程正文例题区分，答案集中放在文件后部。"""
+    title = _goal_title(goal)
+    app = getattr(goal, "application_context", "") or "你的真实任务"
+    return {
+        "title": f"{title} · 额外练习",
+        "intro": (
+            f"本文件是「{title}」教程的独立练习集，用于强化、巩固、检验和迁移。"
+            "题目与教程正文中的必要练习不重复；参考答案集中在本文件末尾，建议先完成再看。"
+        ),
+        "exercises": [
+            {
+                "number": 1,
+                "task": "在不看教程步骤的情况下，复现教程第 2 节的最小任务（换一组数据或目录）。",
+                "requirements": "只允许查阅速查文件；记录每一步的实际输出。",
+                "hint": "按「前提 → 操作 → 验证」的顺序执行；卡住时先确认输入是否符合预期。",
+                "solution": "输出与预期一致、且能解释每步输入输出即为通过。",
+            },
+            {
+                "number": 2,
+                "task": "构造一个会触发常见错误的场景，复现、定位并修复它。",
+                "requirements": "记录错误信息、原因判断与修复后的验证结果。",
+                "hint": f"可从常见错误清单中选择：{('路径/权限/参数拼写' if _is_cli(discipline) else '概念混淆/假设不满足/计算错误')}。",
+                "solution": "错误可复现、原因解释正确、修复后验证通过即为通过。",
+            },
+            {
+                "number": 3,
+                "task": f"把教程方法应用到一个教程未覆盖的情境：{app}。",
+                "requirements": "完成后解释你依据了哪条规律，哪些地方需要调整。",
+                "hint": "先识别情境与教程示例的相同点与不同点，再决定沿用或调整哪些步骤。",
+                "solution": "任务完成且能说明关键决策依据即为通过；说不清依据说明迁移尚未形成。",
+            },
+        ],
+        "answers_note": "参考答案与自检标准如上各题 solution 所示；先独立完成，再逐条对照。",
     }
 
 

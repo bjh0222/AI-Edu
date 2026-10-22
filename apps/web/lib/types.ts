@@ -1,3 +1,17 @@
+export type CapabilityLevel = "L1" | "L2" | "L3";
+
+export interface CapabilityLevelInfo {
+  key: CapabilityLevel;
+  name: string;
+  description: string;
+}
+
+export const CAPABILITY_LEVELS: CapabilityLevelInfo[] = [
+  { key: "L1", name: "基础理解", description: "快速建立知识基础，理解核心概念；能解释概念、识别术语与功能、看懂简单示例。" },
+  { key: "L2", name: "独立应用", description: "能独立完成典型任务；会识别常见错误、理解方法适用条件并按情境选择方法。" },
+  { key: "L3", name: "深入掌握与迁移", description: "深入理解原理与概念关系；能比较方法、处理变式任务并解释关键决策依据。" },
+];
+
 export interface Goal {
   id: string;
   title: string;
@@ -7,6 +21,8 @@ export interface Goal {
   application_context: string;
   current_level: string;
   time_budget: string;
+  capability_level: CapabilityLevel;
+  generate_extra_exercises: boolean;
   status: string;
   user_notes: string;
   archived: boolean;
@@ -65,8 +81,19 @@ export interface OutlineItem {
   id: string;
   title: string;
   summary: string;
+  purpose?: string;
+  content_type?: string;
   criteria_ids: string[];
 }
+
+export const CONTENT_TYPE_LABELS: Record<string, string> = {
+  concept: "概念原理",
+  method: "方法技巧",
+  tool: "工具操作",
+  fact: "事实记忆",
+  application: "综合应用",
+  mixed: "混合",
+};
 
 export interface TokenUsage {
   prompt_tokens: number;
@@ -82,20 +109,66 @@ export interface StepBlock {
   verification: string;
 }
 
+export interface ContentBlock {
+  type: string; // text / key_point / formula / steps / table / example / comparison / method_summary / diagram / memory / note
+  title: string;
+  body: string;
+}
+
+export interface CommonErrorItem {
+  error: string;
+  cause: string;
+  diagnose: string;
+}
+
 export interface Section {
   id: string;
   title: string;
-  goal_statement: string;
-  prerequisites: string[];
-  explanation: { heading: string; body: string }[];
-  steps: StepBlock[];
-  examples: string[];
-  exercises: string[];
-  variation_task: string;
-  common_errors: { error: string; cause: string; diagnose: string }[];
-  sources: { title: string; url: string; note: string }[];
+  // ---- v2 结构
+  purpose?: string;
+  content_type?: string;
+  content?: ContentBlock[];
+  key_takeaways?: string[];
+  prerequisite_refs?: string[];
+  common_errors?: CommonErrorItem[];
+  exercises?: string[];
+  sources?: { title: string; url: string; note: string }[];
   mapping_criteria: string[];
+  // ---- v1 结构（旧版本数据兼容）
+  goal_statement?: string;
+  prerequisites?: string[];
+  explanation?: { heading: string; body: string }[];
+  steps?: StepBlock[];
+  examples?: string[];
+  variation_task?: string;
   token_usage?: TokenUsage;
+}
+
+export interface CheatsheetSection {
+  heading: string;
+  body: string;
+}
+
+export interface Cheatsheet {
+  filename?: string;
+  title: string;
+  sections: CheatsheetSection[];
+}
+
+export interface ExtraExerciseItem {
+  number: number;
+  task: string;
+  requirements?: string;
+  hint?: string;
+  solution?: string;
+}
+
+export interface ExtraExercises {
+  filename?: string;
+  title: string;
+  intro?: string;
+  exercises: ExtraExerciseItem[];
+  answers_note?: string;
 }
 
 export interface SectionDetail extends Section {
@@ -127,7 +200,12 @@ export interface TutorialVersion {
   id: string;
   tutorial_id: string;
   version: number;
-  content: { outline: OutlineItem[]; sections: Section[] };
+  content: {
+    outline: OutlineItem[];
+    sections: Section[];
+    cheatsheet?: Cheatsheet | null;
+    extra_exercises?: ExtraExercises | null;
+  };
   prompt_version: string;
   model_provider: string;
   model_name: string;

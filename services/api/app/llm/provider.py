@@ -15,22 +15,152 @@ class LLMError(Exception):
     """模型调用失败（网络 / 认证 / 解析）。"""
 
 
+def _escape_control_chars_in_strings(text: str) -> str:
+    """把 JSON 字符串内部的裸控制字符（换行/制表符）转义。
+
+    模型经常把 Markdown 代码块、Mermaid 图等多行内容以字面换行写进 JSON 字符串，
+    这是非法 JSON；转义后即可解析，内容语义不变。
+    """
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                out.append(ch)
+                escaped = False
+            elif ch == "\\":
+                out.append(ch)
+                escaped = True
+            elif ch == '"':
+                out.append(ch)
+                in_string = False
+            elif ch == "\n":
+                out.append("\\n")
+            elif ch == "\r":
+                out.append("\\r")
+            elif ch == "\t":
+                out.append("\\t")
+            elif ch == "\b":
+                out.append("\\b")
+            elif ch == "\f":
+                out.append("\\f")
+            else:
+                out.append(ch)
+        else:
+            if ch == '"':
+                in_string = True
+            out.append(ch)
+    return "".join(out)
+
+
+def _strip_trailing_commas(text: str) -> str:
+    """去掉对象/数组末尾的多余逗号（模型常见的小毛病）。"""
+    previous = None
+    current = text
+    while previous != current:
+        previous = current
+        current = re.sub(r",(\s*[}\]])", r"\1", current)
+    return current
+
+
+def _tolerant_loads(text: str) -> Any:
+    """容错解析：把「字符串内部的未转义引号 / 裸换行」按内容处理后再解析。
+
+    判定规则：字符串中的 `"` 只有在其后紧跟 `, : } ]`（允许空白）或文本结束时
+    才视为字符串结束，否则视为内容引号并转义。该规则对 Markdown 代码块、
+    Mermaid 节点标签里的引号很有效。
+    """
+    out: list[str] = []
+    idx = 0
+    total = len(text)
+    in_string = False
+    while idx < total:
+        ch = text[idx]
+        if in_string:
+            if ch == "\\":
+                if idx + 1 < total:
+                    out.append(ch)
+                    out.append(text[idx + 1])
+                    idx += 2
+                    continue
+                out.append("\\\\")
+                idx += 1
+                continue
+            if ch == '"':
+                nxt = idx + 1
+                while nxt < total and text[nxt] in " \t\r\n":
+                    nxt += 1
+                if nxt >= total or text[nxt] in ",:}]":
+                    out.append('"')
+                    in_string = False
+                else:
+                    out.append('\\"')
+                idx += 1
+                continue
+            if ch == "\n":
+                out.append("\\n")
+            elif ch == "\r":
+                out.append("\\r")
+            elif ch == "\t":
+                out.append("\\t")
+            else:
+                out.append(ch)
+            idx += 1
+        else:
+            out.append(ch)
+            if ch == '"':
+                in_string = True
+            idx += 1
+    return json.loads("".join(out))
+
+
 def extract_json(text: str) -> dict:
-    """从模型输出中提取 JSON（容忍 ```json 围栏与前后缀）。"""
-    text = text.strip()
-    fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
+    """从模型输出中提取 JSON（容忍围栏、前后缀、裸换行与未转义引号）。
+
+    注意：不能先用 ``` 正则剥围栏——教程正文本身可能包含 ```mermaid / ```python
+    代码块，剥围栏会把合法 JSON 剪碎。因此先按原文解析（含首尾大括号截取），
+    只有原文确实无法解析时，才尝试把整体包裹在 ```json 围栏里的情况。
+
+    解析策略（逐级放宽）：
+    1. 原文直接解析；
+    2. 截取首个 { 到末个 } 再解析；
+    3. 转义字符串内部的裸换行/制表符（Markdown / Mermaid 场景最常见）；
+    4. 同时清理对象/数组末尾的多余逗号；
+    5. 最后用容错扫描器处理未转义引号；
+    6. 仍失败时，尝试剥离整体 ```json 围栏后重试以上步骤。
+    """
+    raw = text.strip()
+    candidates = [raw]
+    start, end = raw.find("{"), raw.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(raw[start : end + 1])
+    # 整体被 ``` 围栏包裹（且围栏内只有一个对象）时的候选
+    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", raw, re.S)
     if fence:
-        text = fence.group(1).strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        start, end = text.find("{"), text.rfind("}")
-        if start >= 0 and end > start:
+        inner = fence.group(1).strip()
+        candidates.append(inner)
+        inner_start, inner_end = inner.find("{"), inner.rfind("}")
+        if inner_start >= 0 and inner_end > inner_start:
+            candidates.append(inner[inner_start : inner_end + 1])
+
+    for candidate in candidates:
+        attempts = [
+            candidate,
+            _escape_control_chars_in_strings(candidate),
+            _strip_trailing_commas(candidate),
+            _strip_trailing_commas(_escape_control_chars_in_strings(candidate)),
+        ]
+        for attempt in attempts:
             try:
-                return json.loads(text[start : end + 1])
+                return json.loads(attempt)
             except json.JSONDecodeError:
-                pass
-    raise LLMError(f"模型输出无法解析为 JSON：{text[:200]}")
+                continue
+        try:
+            return _tolerant_loads(_strip_trailing_commas(candidate))
+        except json.JSONDecodeError:
+            continue
+    raise LLMError(f"模型输出无法解析为 JSON：{raw[:200]}")
 
 
 def parse_usage(data: dict[str, Any]) -> dict[str, Any] | None:

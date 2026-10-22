@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { api } from "@/lib/api";
 import type { Goal } from "@/lib/types";
+import { CAPABILITY_LEVELS } from "@/lib/types";
 import { phase } from "@/lib/goal-phases";
 import { Badge, Button, Card, Field, inputCls } from "@/components/ui";
 import { GoalPhaseView } from "@/components/goals/GoalPhaseView";
@@ -75,7 +76,7 @@ function GoalForm({
 }: {
   goal: Goal;
   busy: boolean;
-  onSave: (payload: Record<string, string>) => Promise<void>;
+  onSave: (payload: Record<string, unknown>) => Promise<void>;
 }) {
   const [form, setForm] = useState({
     title: goal.title,
@@ -84,6 +85,8 @@ function GoalForm({
     current_level: goal.current_level,
     time_budget: goal.time_budget,
     user_notes: goal.user_notes,
+    capability_level: (goal.capability_level || "L2") as Goal["capability_level"],
+    generate_extra_exercises: !!goal.generate_extra_exercises,
   });
 
   return (
@@ -114,6 +117,38 @@ function GoalForm({
         />
         <span className="text-[10px] text-muted">
           填总时长（如「共 10 小时」），不用拆成每天的时间安排
+        </span>
+      </Field>
+      <Field label="能力层级">
+        <select
+          className={inputCls}
+          value={form.capability_level}
+          onChange={(event) =>
+            setForm({ ...form, capability_level: event.target.value as Goal["capability_level"] })
+          }
+        >
+          {CAPABILITY_LEVELS.map((lv) => (
+            <option key={lv.key} value={lv.key}>
+              {lv.key} · {lv.name}
+            </option>
+          ))}
+        </select>
+        <span className="text-[10px] leading-relaxed text-muted">
+          {CAPABILITY_LEVELS.find((lv) => lv.key === form.capability_level)?.description}
+          层级决定教程深度、练习设计与验收难度；修改后重新生成教程才会生效。
+        </span>
+      </Field>
+      <Field label="额外练习文件">
+        <label className="flex cursor-pointer items-center gap-2 text-[12px]">
+          <input
+            type="checkbox"
+            checked={form.generate_extra_exercises}
+            onChange={(event) => setForm({ ...form, generate_extra_exercises: event.target.checked })}
+          />
+          生成独立的额外练习文件（含参考答案，与教程内必要练习分开）
+        </label>
+        <span className="text-[10px] text-muted">
+          开启后重新生成教程时会附带一份 Markdown 练习集，并在教程中建立 Obsidian 双链
         </span>
       </Field>
       <Field label="自己的补充笔记">

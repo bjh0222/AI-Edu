@@ -1,11 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, downloadFile } from "@/lib/api";
+import { jobDoneMessage, startJobPolling } from "@/lib/job-poll";
 import type {
   ChatResponse,
-  GenerationJob,
   QuickStartResult,
   QuickStartStep,
   TokenUsage,
@@ -32,6 +32,15 @@ export default function LearningPage() {
   // 局部状态放在页面组件里（而不是渲染回调内），避免在 render prop 里调用 Hook
   const [steps, setSteps] = useState<QuickStartStep[]>([]);
   const [gen, setGen] = useState<{ stage: string; progress: number; tokens: number } | null>(null);
+  // 轮询取消函数放在页面组件里，渲染回调只负责使用（Hook 不能写在 render prop 内）
+  const pollCancel = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    return () => {
+      pollCancel.current?.();
+      pollCancel.current = null;
+    };
+  }, []);
 
   return (
     <GoalPhaseView phase={PHASE} slices={SLICES}>
@@ -40,37 +49,31 @@ export default function LearningPage() {
         const confirmedCount = data.criteria.filter((item) => item.status === "confirmed").length;
 
         const pollJob = (jobId: string) => {
-          const tick = async () => {
-            try {
-              const job = await api.get<GenerationJob>(`/api/generation-jobs/${jobId}`);
-              setGen({ stage: job.stage, progress: job.progress, tokens: job.token_usage?.total_tokens ?? 0 });
-              if (job.status === "done") {
-                setGen(null);
-                setBusy("");
-                await reload();
-                setNotice(
-                  `教程章节已生成，质量检查完成${
-                    job.token_usage?.total_tokens
-                      ? ` · 本次消耗 ${fmtTokens(job.token_usage.total_tokens)} tokens`
-                      : ""
-                  }`
-                );
-              } else if (job.status === "failed") {
-                setGen(null);
-                setBusy("");
-                setError(
-                  `章节生成失败（${job.error_code || "unknown"}）${job.error_message ? `：${job.error_message}` : "，请检查模型配置后重试"}`
-                );
-              } else {
-                setTimeout(tick, 2000);
-              }
-            } catch (e) {
+          pollCancel.current?.();  // 连点/重复提交时只保留一路轮询
+          pollCancel.current = startJobPolling(jobId, {
+            onUpdate: (job) =>
+              setGen({
+                stage: job.stage,
+                progress: job.progress,
+                tokens: job.token_usage?.total_tokens ?? 0,
+              }),
+            onDone: async (job) => {
               setGen(null);
               setBusy("");
-              setError(errMsg(e));
-            }
-          };
-          setTimeout(tick, 1500);
+              await reload();
+              setNotice(jobDoneMessage(job));
+            },
+            onFailed: (message) => {
+              setGen(null);
+              setBusy("");
+              setError(message);
+            },
+            onError: (message) => {
+              setGen(null);
+              setBusy("");
+              setError(message);
+            },
+          });
         };
 
         const startQuickstart = async () => {
@@ -158,7 +161,7 @@ export default function LearningPage() {
                             "教程大纲已生成"
                           )
                         }
-                        disabled={busy === "outline" || confirmedCount === 0}
+                        disabled={!!busy || !!gen || confirmedCount === 0}
                       >
                         {busy === "outline" ? "生成中…" : "只生成大纲"}
                       </Button>

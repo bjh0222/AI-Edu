@@ -102,6 +102,22 @@ def export_tutorial(tutorial_id: str, db: Session = Depends(get_db)):
     return Response(content=markdown, media_type="text/markdown; charset=utf-8", headers=headers)
 
 
+@router.get("/tutorials/{tutorial_id}/export/cheatsheet", tags=["tutorials"])
+def export_cheatsheet(tutorial_id: str, db: Session = Depends(get_db)):
+    """导出配套知识速查文件（Obsidian Markdown；文件名与教程内双链一致）。"""
+    filename, markdown = tutorials_service.export_cheatsheet(db, tutorial_id)
+    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"}
+    return Response(content=markdown, media_type="text/markdown; charset=utf-8", headers=headers)
+
+
+@router.get("/tutorials/{tutorial_id}/export/exercises", tags=["tutorials"])
+def export_extra_exercises(tutorial_id: str, db: Session = Depends(get_db)):
+    """导出独立额外练习文件（用户开启选项后生成；含集中放置的参考答案）。"""
+    filename, markdown = tutorials_service.export_extra_exercises(db, tutorial_id)
+    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"}
+    return Response(content=markdown, media_type="text/markdown; charset=utf-8", headers=headers)
+
+
 @router.get("/goals/{goal_id}/usage", response_model=GoalUsageOut, tags=["tutorials"])
 def goal_usage(goal_id: str, db: Session = Depends(get_db)):
     """目标维度的 token 消耗：总用量、按功能、按教程。"""

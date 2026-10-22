@@ -4,6 +4,7 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -11,8 +12,9 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..learning.disciplines import get_profile
 from ..learning.engine import check_structure
+from ..learning.levels import normalize_level
 from ..llm.service import AIService, AIServiceError
-from ..models import GenerationJob, ModelCallLog, PracticeTask, Tutorial, TutorialVersion
+from ..models import GenerationJob, ModelCallLog, Tutorial, TutorialVersion
 from . import goals as goals_service
 from . import knowledge as knowledge_service
 from . import materials as materials_service
@@ -26,7 +28,98 @@ from .utils import (
     tutorial_version_dict,
 )
 
-MAX_SECTIONS_HINT = 8
+MAX_SECTIONS_HINT = 8  # 安全上限：防止异常输出撑爆成本；正常章节数由目标范围决定
+# 章节并发生成上限：3 路是「模型限流 / SQLite 写锁 / 墙钟收益」的折中（8 节串行约 8 次往返）
+MAX_SECTION_WORKERS = 3
+
+VALID_CONTENT_TYPES = {"concept", "method", "tool", "fact", "application", "mixed"}
+
+
+def _normalize_content_type(value) -> str:
+    """模型返回的非法教学类型归一化为 mixed（不因非法枚举判定生成失败）。"""
+    text = str(value or "").strip().lower()
+    return text if text in VALID_CONTENT_TYPES else "mixed"
+
+
+def _normalize_outline_items(raw_sections: list) -> list[dict]:
+    """大纲条目归一化：补 purpose / content_type，非法枚举回退 mixed；非对象条目跳过。"""
+    items = []
+    for raw in raw_sections:
+        if not isinstance(raw, dict):
+            continue
+        items.append({
+            "id": uuid.uuid4().hex[:8],
+            "title": str(raw.get("title", "未命名章节"))[:120],
+            "purpose": str(raw.get("purpose", "") or raw.get("summary", "")),
+            "content_type": _normalize_content_type(raw.get("content_type")),
+            "summary": str(raw.get("summary", "")),
+            "criteria_ids": _as_str_list(raw.get("criteria_ids")),
+        })
+    return items
+
+
+def _as_str_list(value) -> list[str]:
+    """把模型输出安全转成字符串列表：非列表（如字符串）整体丢弃，不按字符展开。"""
+    if not isinstance(value, list):
+        return []
+    return [str(x).strip() for x in value if str(x).strip()]
+
+
+def _normalize_section_raw(raw: dict) -> dict:
+    """章节输出归一化：非法内容块类型回退 text；空 body 块丢弃；缺失可选字段置空。"""
+    raw_blocks = raw.get("content")
+    content_blocks = []
+    for block in raw_blocks if isinstance(raw_blocks, list) else []:
+        if not isinstance(block, dict):
+            continue
+        body = str(block.get("body", "") or "").strip()
+        if not body:
+            continue
+        btype = str(block.get("type", "text") or "text").strip().lower()
+        if btype not in {
+            "text", "key_point", "formula", "steps", "table", "example",
+            "comparison", "method_summary", "diagram", "memory", "note",
+        }:
+            btype = "text"
+        content_blocks.append({"type": btype, "title": str(block.get("title", "") or ""), "body": body})
+    raw_errors = raw.get("common_errors")
+    common_errors = []
+    for e in raw_errors if isinstance(raw_errors, list) else []:
+        if not isinstance(e, dict):
+            continue
+        error = str(e.get("error", "") or "").strip()
+        if not error:
+            continue
+        common_errors.append({
+            "error": error,
+            "cause": str(e.get("cause", "") or ""),
+            "diagnose": str(e.get("diagnose", "") or ""),
+        })
+    raw_sources = raw.get("sources")
+    sources = []
+    for s in raw_sources if isinstance(raw_sources, list) else []:
+        if not isinstance(s, dict):
+            continue
+        title = str(s.get("title", "") or "").strip()
+        if not title:
+            continue
+        sources.append({
+            "title": title,
+            "url": str(s.get("url", "") or ""),
+            "note": str(s.get("note", "") or ""),
+        })
+    return {
+        "title": str(raw.get("title", "") or "")[:120],
+        "purpose": str(raw.get("purpose", "") or ""),
+        "content_type": _normalize_content_type(raw.get("content_type")),
+        "content": content_blocks,
+        "key_takeaways": _as_str_list(raw.get("key_takeaways")),
+        "common_errors": common_errors,
+        "prerequisite_refs": _as_str_list(raw.get("prerequisite_refs")),
+        "exercises": _as_str_list(raw.get("exercises")),
+        "sources": sources,
+        "mapping_criteria": [str(x) for x in raw.get("mapping_criteria", [])] if isinstance(raw.get("mapping_criteria"), list) else [],
+    }
 
 
 def _get_tutorial(db: Session, tutorial_id: str) -> Tutorial:
@@ -134,15 +227,12 @@ def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
         data = ai.outline(
             goal, profile, [{"id": c["id"], "statement": c["statement"]} for c in criteria], materials_text
         )
-        raw_sections = data.get("sections", [])[:MAX_SECTIONS_HINT]
-        outline = []
-        for raw in raw_sections:
-            outline.append({
-                "id": uuid.uuid4().hex[:8],
-                "title": str(raw.get("title", "未命名章节"))[:120],
-                "summary": str(raw.get("summary", "")),
-                "criteria_ids": [str(x) for x in raw.get("criteria_ids", []) if str(x)],
-            })
+        raw_sections = data.get("sections")
+        if not isinstance(raw_sections, list):
+            raise AIServiceError("模型输出的章节大纲不是列表，请重试")
+        outline = _normalize_outline_items(raw_sections[:MAX_SECTIONS_HINT])
+        if not outline:
+            raise AIServiceError("模型输出缺少有效章节大纲，请重试")
         content = {"outline": outline, "sections": []}
         usage = dict(ai.usage_last)
 
@@ -222,6 +312,265 @@ def start_sections(db: Session, tutorial_id: str, ai: AIService) -> dict:
     return {"tutorial": tutorial_dict(db, tutorial), "job": job, "demo": ai.is_demo}
 
 
+def _companions_missing(content: dict, goal) -> dict:
+    """配套文件缺口：知识速查总是需要；额外练习只在目标开启时需要。"""
+    return {
+        "cheatsheet": not content.get("cheatsheet"),
+        "extra_exercises": bool(goal.generate_extra_exercises) and not content.get("extra_exercises"),
+    }
+
+
+def companions_missing(db: Session, tutorial_id: str) -> dict:
+    """只读检查（不调模型）：供「一键生成」判断要不要提交后台配套任务。"""
+    tutorial = _get_tutorial(db, tutorial_id)
+    goal = _goal_for(db, tutorial.goal_id)
+    version = _current_version(db, tutorial)
+    content = jload(version.content_json, {}) if version is not None else {}
+    if not (content.get("sections") or []):
+        return {"cheatsheet": False, "extra_exercises": False}
+    return _companions_missing(content, goal)
+
+
+_COMPANION_LABELS = {"cheatsheet": "知识速查", "extra_exercises": "额外练习"}
+
+
+def _companion_task(
+    kind: str,
+    *,
+    tutorial_id: str,
+    goal_id: str,
+    job_id: str,
+    outline: list,
+    materials_text: str,
+) -> tuple[str, dict, dict]:
+    """单个配套文件的生成任务：独立 Session + 独立 AIService（并发安全）。"""
+    from ..db import SessionLocal
+
+    from ..models import LearningGoal
+
+    db = SessionLocal()
+    try:
+        goal = db.get(LearningGoal, goal_id)
+        if goal is None:
+            raise AIServiceError("学习目标不存在")
+        profile = get_profile(goal.domain_key)
+        ai = AIService(db, goal_id=goal_id, tutorial_id=tutorial_id, job_id=job_id)
+        if kind == "cheatsheet":
+            payload = ai.cheatsheet(goal, profile, outline, materials_text)
+        else:
+            payload = ai.extra_exercises(goal, profile, outline, materials_text)
+        usage = dict(ai.usage_last)
+        db.commit()  # 短事务：调用日志 / 训练样本尽快落库并释放写锁
+        return kind, payload, usage
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def _generate_companions(
+    *,
+    tutorial_id: str,
+    goal_id: str,
+    goal_title: str,
+    job_id: str,
+    outline: list,
+    materials_text: str,
+    want_cheatsheet: bool,
+    want_extra: bool,
+) -> dict:
+    """知识速查与额外练习互不依赖 → 并行生成；单个失败只留痕，不拖垮另一个。"""
+    wanted = [kind for kind, flag in (("cheatsheet", want_cheatsheet), ("extra_exercises", want_extra)) if flag]
+    result: dict = {
+        "cheatsheet": None,
+        "extra_exercises": None,
+        "usage": token_usage_dict(),
+        "errors": [],
+    }
+    if not wanted:
+        return result
+
+    payloads: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=len(wanted), thread_name_prefix="companion") as pool:
+        futures = {
+            pool.submit(
+                _companion_task,
+                kind,
+                tutorial_id=tutorial_id,
+                goal_id=goal_id,
+                job_id=job_id,
+                outline=outline,
+                materials_text=materials_text,
+            ): kind
+            for kind in wanted
+        }
+        for future in as_completed(futures):
+            kind = futures[future]
+            try:
+                _, payload, usage = future.result()
+            except Exception as exc:  # noqa: BLE001  单文件失败不影响另一个
+                result["errors"].append(f"{_COMPANION_LABELS[kind]}生成失败：{str(exc)[:80]}")
+                continue
+            payloads[kind] = payload
+            add_usage(
+                result["usage"],
+                usage.get("prompt_tokens"),
+                usage.get("completion_tokens"),
+                usage.get("total_tokens"),
+            )
+            if usage.get("usage_source") == "provider":
+                result["usage"]["usage_source"] = "provider"
+            elif usage.get("usage_source") == "estimated" and result["usage"]["usage_source"] != "provider":
+                result["usage"]["usage_source"] = "estimated"
+
+    if "cheatsheet" in payloads:
+        result["cheatsheet"] = {
+            "filename": f"{_safe_filename(goal_title)}-知识速查",
+            **payloads["cheatsheet"],
+        }
+    if "extra_exercises" in payloads:
+        result["extra_exercises"] = {
+            "filename": f"{_safe_filename(goal_title)}-额外练习",
+            **payloads["extra_exercises"],
+        }
+    return result
+
+
+def ensure_companions(db: Session, tutorial_id: str, ai: AIService, *, strict: bool = True) -> dict:
+    """为已有章节的教程补齐配套文件：知识速查（总是）+ 独立额外练习（用户开启时）。
+
+    用于「先有教程、后开启选项」或旧版本缺配套的场景；不重复生成已存在的文件。
+    生成成功会落一个新版本（内容 = 原内容 + 配套文件）。
+    strict=True 时任一文件失败抛 AIServiceError（同步调用方）；strict=False 只回传 errors。
+    """
+    tutorial = _get_tutorial(db, tutorial_id)
+    goal = _goal_for(db, tutorial.goal_id)
+    version = _current_version(db, tutorial)
+    if version is None:
+        raise HTTPException(status_code=409, detail={"code": "no_content", "message": "教程尚无内容"})
+    content = jload(version.content_json, {})
+    sections = content.get("sections") or []
+    if not sections:
+        return {
+            "changed": False,
+            "cheatsheet": False,
+            "extra_exercises": False,
+            "errors": [],
+            "tutorial": tutorial_dict(db, tutorial),
+        }
+
+    outline = content.get("outline", [])
+    missing = _companions_missing(content, goal)
+    if not any(missing.values()):
+        return {
+            "changed": False,
+            "cheatsheet": False,
+            "extra_exercises": False,
+            "errors": [],
+            "tutorial": tutorial_dict(db, tutorial),
+        }
+
+    materials_text = materials_service.materials_context(db, goal.id)
+    ai.tutorial_id = tutorial.id
+    result = _generate_companions(
+        tutorial_id=tutorial.id,
+        goal_id=goal.id,
+        goal_title=goal.title,
+        job_id=ai.job_id or "",
+        outline=outline,
+        materials_text=materials_text,
+        want_cheatsheet=missing["cheatsheet"],
+        want_extra=missing["extra_exercises"],
+    )
+    if strict and result["errors"]:
+        raise AIServiceError("；".join(result["errors"]))
+
+    changed = {
+        "cheatsheet": result["cheatsheet"] is not None,
+        "extra_exercises": result["extra_exercises"] is not None,
+    }
+    if not any(changed.values()):
+        return {
+            "changed": False,
+            "cheatsheet": False,
+            "extra_exercises": False,
+            "errors": result["errors"],
+            "tutorial": tutorial_dict(db, tutorial),
+        }
+    if result["cheatsheet"] is not None:
+        content["cheatsheet"] = result["cheatsheet"]
+    if result["extra_exercises"] is not None:
+        content["extra_exercises"] = result["extra_exercises"]
+
+    usage = result["usage"]
+    new_version = TutorialVersion(
+        tutorial_id=tutorial.id,
+        version=version.version + 1,
+        content_json=jdump(content),
+        prompt_version="v1",
+        model_provider="demo" if ai.is_demo else "openai-compatible",
+        model_name="demo" if ai.is_demo else "configured",
+        quality_report=version.quality_report,
+        source_refs=version.source_refs,
+        prompt_tokens=usage["prompt_tokens"],
+        completion_tokens=usage["completion_tokens"],
+        total_tokens=usage["total_tokens"],
+        usage_source=usage.get("usage_source", "") or ("estimated" if usage["total_tokens"] else ""),
+    )
+    db.add(new_version)
+    db.flush()
+    tutorial.current_version_id = new_version.id
+    db.commit()
+    return {
+        "changed": True,
+        "cheatsheet": changed["cheatsheet"],
+        "extra_exercises": changed["extra_exercises"],
+        "errors": result["errors"],
+        "tutorial": tutorial_dict(db, tutorial),
+    }
+
+
+def start_companions(db: Session, tutorial_id: str, ai: AIService) -> dict:
+    """后台补齐配套文件并立即返回 job（前端轮询 /generation-jobs/{id}）。
+
+    「一键生成」在章节已存在时补齐配套文件，此前同步调用会让请求卡 1-2 分钟；
+    这里改成与章节生成同构的后台任务，接口响应结构不变（仍返回 job_id）。
+    """
+    tutorial = _get_tutorial(db, tutorial_id)
+    goal = _goal_for(db, tutorial.goal_id)
+    version = _current_version(db, tutorial)
+    if version is None:
+        raise HTTPException(status_code=409, detail={"code": "no_content", "message": "教程尚无内容"})
+    content = jload(version.content_json, {})
+    if not (content.get("sections") or []):
+        raise HTTPException(status_code=409, detail={"code": "no_content", "message": "教程尚无章节内容"})
+
+    active = (
+        db.query(GenerationJob)
+        .filter(
+            GenerationJob.goal_id == goal.id,
+            GenerationJob.job_type == "tutorial_companions",
+            GenerationJob.status.in_(("queued", "running")),
+        )
+        .order_by(GenerationJob.created_at.desc())
+        .first()
+    )
+    if active is not None:
+        # 幂等：已有后台任务在跑就复用，避免连点产生重复生成与重复计费
+        return {"tutorial": tutorial_dict(db, tutorial), "job": active, "demo": ai.is_demo, "reused": True}
+
+    job = GenerationJob(
+        goal_id=goal.id, job_type="tutorial_companions", status="queued", progress=0, stage="排队"
+    )
+    db.add(job)
+    db.commit()  # 释放写锁后再启动后台线程
+
+    thread = threading.Thread(target=_companions_worker, args=(tutorial.id, job.id), daemon=True)
+    thread.start()
+    return {"tutorial": tutorial_dict(db, tutorial), "job": job, "demo": ai.is_demo, "reused": False}
+
+
 def _update_job(
     db: Session, job_id: str, *, progress: int | None = None, stage: str | None = None, status: str | None = None
 ) -> None:
@@ -284,8 +633,84 @@ def _section_with_retry(
     raise AIServiceError("章节生成重试次数已用完")
 
 
+def _merge_section_usage(results: dict[int, dict]) -> dict:
+    """按大纲顺序汇总各节 usage（真实 provider usage 优先于估算）。"""
+    usage = token_usage_dict()
+    source = ""
+    for idx in sorted(results):
+        last = results[idx]["usage"]
+        add_usage(
+            usage,
+            last.get("prompt_tokens"),
+            last.get("completion_tokens"),
+            last.get("total_tokens"),
+        )
+        if last.get("usage_source") == "provider":
+            source = "provider"
+        elif last.get("usage_source") == "estimated" and source != "provider":
+            source = "estimated"
+    usage["usage_source"] = source
+    return usage
+
+
+def _generate_section_task(
+    *,
+    tutorial_id: str,
+    goal_id: str,
+    job_id: str,
+    index: int,
+    item: dict,
+    criteria_dicts: list[dict],
+    prior_titles: list[str],
+    materials_text: str,
+) -> dict:
+    """并发生成的单节任务：独立 Session + 独立 AIService。
+
+    SQLite 只允许单写者：每次调用只在「读上下文 → 写日志」这两处开短事务，
+    等模型返回的整段时间不持有写锁。
+    """
+    from ..db import SessionLocal
+    from ..models import LearningGoal
+
+    db = SessionLocal()
+    try:
+        goal = db.get(LearningGoal, goal_id)
+        if goal is None:
+            raise AIServiceError("学习目标不存在")
+        profile = get_profile(goal.domain_key)
+        ai = AIService(db, goal_id=goal_id, tutorial_id=tutorial_id, job_id=job_id)
+        section_id = uuid.uuid4().hex[:8]
+        ai.section_id = section_id
+        criteria_by_id = {c["id"]: c for c in criteria_dicts}
+        mapped = [criteria_by_id[cid] for cid in item.get("criteria_ids", []) if cid in criteria_by_id]
+        raw = _section_with_retry(
+            db, job_id, ai, goal, profile, item, mapped or criteria_dicts, prior_titles, materials_text
+        )
+        usage = dict(ai.usage_last)
+        db.commit()  # 短事务：调用日志 / 训练样本立即落库，尽快释放写锁
+        section_data = _normalize_section_raw(raw)
+        section_data["title"] = section_data["title"] or item.get("title", "")
+        section_data.update(
+            {
+                "id": section_id,
+                "mapping_criteria": list(item.get("criteria_ids", [])),
+                "token_usage": usage,
+            }
+        )
+        return {"index": index, "section": section_data, "usage": usage}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 def _sections_worker(tutorial_id: str, job_id: str) -> None:
-    """后台线程：独立会话逐节生成；每节完成即提交，失败时保留已完成内容。"""
+    """后台线程：最多 3 路并发生成章节，结果按大纲顺序合并。
+
+    每节使用独立 Session / AIService（互不共享 ORM 与 usage_last），完成一节即按大纲
+    顺序提交草稿；任一节最终失败仍使整个 job 失败，但已完成内容已落库不丢。
+    """
     from ..db import SessionLocal
     from ..models import LearningGoal
 
@@ -299,10 +724,8 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         if goal is None:
             _fail_job(db, job_id, "goal_not_found")
             return
-        profile = get_profile(goal.domain_key)
         materials_text = materials_service.materials_context(db, goal.id)
         criteria_dicts = goals_service.confirmed_criteria(db, goal.id)
-        criteria_by_id = {c["id"]: c for c in criteria_dicts}
         version = db.get(TutorialVersion, tutorial.current_version_id) if tutorial.current_version_id else None
         content = jload(version.content_json, {"outline": [], "sections": []}) if version else {}
         outline = content.get("outline", [])
@@ -328,90 +751,114 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         db.add(draft)
         db.commit()
 
-        sections: list[dict] = list(content.get("sections", []))
-        prior_titles = [s.get("title", "") for s in sections]
-        ai = AIService(db, goal_id=goal.id, tutorial_id=tutorial.id, job_id=job_id)
-        draft_usage_source = ""
+        outline_titles = [str(o.get("title", "")) for o in outline]
+        total = len(outline)
+        results: dict[int, dict] = {}
+        failures: list[tuple[int, Exception]] = []
+        _update_job(
+            db,
+            job_id,
+            progress=5,
+            stage=f"并发生成 {total} 节（最多 {MAX_SECTION_WORKERS} 路）",
+            status="running",
+        )
+        db.commit()
 
-        for idx, item in enumerate(outline):
-            title = item.get("title", "")
-            _update_job(
-                db,
-                job_id,
-                progress=min(85, 5 + idx * 15),
-                stage=f"生成第 {idx + 1}/{len(outline)} 节：{title}",
-                status="running",
+        done = 0
+        with ThreadPoolExecutor(
+            max_workers=min(MAX_SECTION_WORKERS, total), thread_name_prefix="section"
+        ) as pool:
+            futures = {
+                pool.submit(
+                    _generate_section_task,
+                    tutorial_id=tutorial.id,
+                    goal_id=goal.id,
+                    job_id=job_id,
+                    index=idx,
+                    item=item,
+                    criteria_dicts=criteria_dicts,
+                    # 并发下「前置章节标题」取大纲静态切片，避免依赖完成顺序
+                    prior_titles=outline_titles[:idx],
+                    materials_text=materials_text,
+                ): idx
+                for idx, item in enumerate(outline)
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    results[idx] = future.result()
+                except Exception as exc:  # noqa: BLE001  先收齐其余节再统一判定失败
+                    failures.append((idx, exc))
+                done += 1
+                # 每完成一节：按大纲顺序合并 + 短事务提交（中断也不丢已完成内容）
+                sections = [results[i]["section"] for i in sorted(results)]
+                usage = _merge_section_usage(results)
+                draft.prompt_tokens = usage["prompt_tokens"]
+                draft.completion_tokens = usage["completion_tokens"]
+                draft.total_tokens = usage["total_tokens"]
+                draft.usage_source = usage["usage_source"]
+                draft.content_json = jdump({"outline": outline, "sections": sections})
+                job = db.get(GenerationJob, job_id)
+                if job is not None:
+                    job.progress = min(85, 5 + int(80 * done / total))
+                    job.prompt_tokens = usage["prompt_tokens"]
+                    job.completion_tokens = usage["completion_tokens"]
+                    job.total_tokens = usage["total_tokens"]
+                    job.usage_source = usage["usage_source"]
+                    if results:
+                        last_title = results[max(results)]["section"].get("title", "")
+                        job.stage = f"已完成 {len(results)}/{total} 节：{last_title}"[:200]
+                db.commit()
+
+        if failures:
+            db.commit()  # 保住已完成草稿，再判定整体失败
+            idx, exc = failures[0]
+            message = (
+                f"第 {idx + 1}/{total} 节生成失败（已完成 {len(results)}/{total} 节，"
+                f"已完成内容已保留）：{str(exc)[:160]}"
             )
-            db.commit()
-            mapped = [criteria_by_id[cid] for cid in item.get("criteria_ids", []) if cid in criteria_by_id]
-            section_id = uuid.uuid4().hex[:8]
-            ai.section_id = section_id
-            raw = _section_with_retry(
-                db, job_id, ai, goal, profile, item, mapped or criteria_dicts, prior_titles, materials_text
-            )
-            usage = dict(ai.usage_last)
-            sections.append(
-                {
-                    "id": section_id,
-                    "title": title,
-                    "goal_statement": str(raw.get("goal_statement", "")),
-                    "prerequisites": [str(x) for x in raw.get("prerequisites", [])],
-                    "explanation": raw.get("explanation", []),
-                    "steps": raw.get("steps", []),
-                    "examples": [str(x) for x in raw.get("examples", [])],
-                    "exercises": [str(x) for x in raw.get("exercises", [])],
-                    "variation_task": str(raw.get("variation_task", "")),
-                    "common_errors": raw.get("common_errors", []),
-                    "sources": raw.get("sources", []),
-                    "mapping_criteria": [cid for cid in item.get("criteria_ids", [])],
-                    "token_usage": usage,
-                }
-            )
-            prior_titles.append(title)
-            # 版本 / 任务级 token 累计（真实 usage 优先，缺失时为估算值）
-            draft.prompt_tokens = (draft.prompt_tokens or 0) + int(usage.get("prompt_tokens") or 0)
-            draft.completion_tokens = (draft.completion_tokens or 0) + int(usage.get("completion_tokens") or 0)
-            draft.total_tokens = (draft.total_tokens or 0) + int(usage.get("total_tokens") or 0)
-            if usage.get("usage_source") == "provider":
-                draft_usage_source = "provider"
-            elif usage.get("usage_source") == "estimated" and draft_usage_source != "provider":
-                draft_usage_source = "estimated"
-            draft.usage_source = draft_usage_source
-            job = db.get(GenerationJob, job_id)
-            if job is not None:
-                job.prompt_tokens = (job.prompt_tokens or 0) + int(usage.get("prompt_tokens") or 0)
-                job.completion_tokens = (job.completion_tokens or 0) + int(usage.get("completion_tokens") or 0)
-                job.total_tokens = (job.total_tokens or 0) + int(usage.get("total_tokens") or 0)
-                job.usage_source = draft_usage_source
-            draft.content_json = jdump({"outline": outline, "sections": sections})
-            db.commit()
+            if isinstance(exc, AIServiceError):
+                raise AIServiceError(message)
+            raise RuntimeError(message)
 
         _update_job(db, job_id, progress=90, stage="质量检查")
         db.commit()
+        sections = [results[i]["section"] for i in sorted(results)]
         new_content = {"outline": outline, "sections": sections}
         quality = check_structure(new_content, criteria_dicts)
         draft.quality_report = jdump(quality)
+        tutorial.status = "drafted" if quality.get("passed") else "drafted_with_issues"
+
+        # 配套文件：知识速查与额外练习互不依赖 → 并行生成；失败只留痕，不阻断正文交付
+        _update_job(db, job_id, progress=92, stage="并行生成配套文件（知识速查 / 额外练习）")
+        db.commit()
+        companions = _generate_companions(
+            tutorial_id=tutorial.id,
+            goal_id=goal.id,
+            goal_title=goal.title,
+            job_id=job_id,
+            outline=outline,
+            materials_text=materials_text,
+            want_cheatsheet=True,
+            want_extra=bool(goal.generate_extra_exercises),
+        )
+        new_content["cheatsheet"] = companions["cheatsheet"]
+        if bool(goal.generate_extra_exercises):
+            new_content["extra_exercises"] = companions["extra_exercises"]
+        if companions["errors"]:
+            _update_job(db, job_id, stage="；".join(companions["errors"])[:200])
+            db.commit()
         draft.content_json = jdump(new_content)
         tutorial.current_version_id = draft.id
-        tutorial.status = "drafted" if quality.get("passed") else "drafted_with_issues"
-        last = sections[-1] if sections else {}
-        exercises = last.get("exercises", [])
-        db.add(
-            PracticeTask(
-                goal_id=goal.id,
-                tutorial_id=tutorial.id,
-                title=f"实践：完成「{goal.title}」的最小真实任务",
-                instructions="\n".join(str(x) for x in exercises) or "按教程完成最小可运行任务。",
-                task_type="practice",
-                expected_artifact=last.get("variation_task") or "产物 + 你的解释",
-                validation_rule="；".join(c["pass_rule"] for c in criteria_dicts if c.get("pass_rule")),
-            )
-        )
-        set_status_at_least(goal, "practice")
+
+        # 实践任务与「实践」环节已移除：教程内的必要练习即练习载体
+        # （配套文件已在上面写入 new_content）
         # 全部章节完成：提取概念与关系写入知识网络（失败不阻断教程交付，job.stage 留痕）
         _update_job(db, job_id, progress=94, stage="更新知识网络")
         db.commit()
         extraction_error = ""
+        # 提取阶段已退出线程池，回到单线程：用一个绑定主会话的 AIService 记账即可
+        ai = AIService(db, goal_id=goal.id, tutorial_id=tutorial.id, job_id=job_id)
         try:
             knowledge_service.extract_from_tutorial(db, goal, tutorial, draft, ai)
         except Exception as exc:  # noqa: BLE001
@@ -422,6 +869,45 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
             status="done",
             progress=100,
             stage="完成，知识网络已更新" if not extraction_error else f"完成（知识网络更新失败：{extraction_error[:80]}）",
+        )
+        db.commit()
+    except AIServiceError as exc:
+        _fail_job(db, job_id, "llm_error", str(exc))
+    except Exception as exc:  # noqa: BLE001
+        _fail_job(db, job_id, "internal_error", f"{exc.__class__.__name__}: {exc}")
+    finally:
+        db.close()
+
+
+def _companions_worker(tutorial_id: str, job_id: str) -> None:
+    """后台线程：为已有章节的教程补齐配套文件（独立会话，失败只影响本 job）。"""
+    from ..db import SessionLocal
+    from ..models import LearningGoal
+
+    db = SessionLocal()
+    try:
+        tutorial = db.get(Tutorial, tutorial_id)
+        if tutorial is None:
+            _fail_job(db, job_id, "tutorial_not_found")
+            return
+        goal = db.get(LearningGoal, tutorial.goal_id)
+        if goal is None:
+            _fail_job(db, job_id, "goal_not_found")
+            return
+        _update_job(db, job_id, status="running", progress=15, stage="生成配套文件（知识速查 / 额外练习）")
+        db.commit()
+        ai = AIService(db, goal_id=goal.id, tutorial_id=tutorial.id, job_id=job_id)
+        result = ensure_companions(db, tutorial.id, ai, strict=False)
+        errors = result.get("errors") or []
+        if not result.get("changed") and errors:
+            _fail_job(db, job_id, "llm_error", "；".join(errors))
+            return
+        _update_job(
+            db,
+            job_id,
+            status="done",
+            progress=100,
+            stage="配套文件已生成" if not errors else f"配套文件已生成（部分失败：{errors[0][:80]}）",
         )
         db.commit()
     except AIServiceError as exc:
@@ -459,22 +945,17 @@ def regenerate_section(db: Session, tutorial_id: str, section_id: str, ai: AISer
     except AIServiceError as exc:
         raise HTTPException(status_code=502, detail={"code": "llm_error", "message": str(exc)}) from exc
     usage = dict(ai.usage_last)
-    sections[target_idx] = {
-        "id": section_id,
-        "title": item.get("title", sections[target_idx].get("title", "")),
-        "goal_statement": str(raw.get("goal_statement", "")),
-        "prerequisites": [str(x) for x in raw.get("prerequisites", [])],
-        "explanation": raw.get("explanation", []),
-        "steps": raw.get("steps", []),
-        "examples": [str(x) for x in raw.get("examples", [])],
-        "exercises": [str(x) for x in raw.get("exercises", [])],
-        "variation_task": str(raw.get("variation_task", "")),
-        "common_errors": raw.get("common_errors", []),
-        "sources": raw.get("sources", []),
-        "mapping_criteria": list(item.get("criteria_ids", [])),
-        "token_usage": usage,
-    }
-    new_content = {"outline": outline, "sections": sections}
+    section_data = _normalize_section_raw(raw)
+    section_data.update(
+        {
+            "id": section_id,
+            "title": section_data["title"] or item.get("title", sections[target_idx].get("title", "")),
+            "mapping_criteria": list(item.get("criteria_ids", [])),
+            "token_usage": usage,
+        }
+    )
+    sections[target_idx] = section_data
+    new_content = {**content, "outline": outline, "sections": sections}
     quality = check_structure(new_content, criteria_dicts)
     new_version = TutorialVersion(
         tutorial_id=tutorial.id,
@@ -542,8 +1023,173 @@ def restore_version(db: Session, tutorial_id: str, version_number: int) -> dict:
 def _safe_filename(name: str) -> str:
     import re
 
-    cleaned = re.sub(r'[\\/:*?"<>|\r\n]+', " ", name).strip()
+    # 含 Obsidian 不允许/易冲突的字符（# ^ [ ] |）一并清理，保证双链文件名可用
+    cleaned = re.sub(r'[\\/:*?"<>|#^\[\]\r\n]+', " ", name).strip()
     return cleaned or "tutorial"
+
+
+# 内容块类型的默认标题（模型未给 title 时使用）
+_BLOCK_HEADINGS = {
+    "text": "讲解",
+    "key_point": "关键结论",
+    "formula": "公式与推导",
+    "steps": "操作步骤",
+    "table": "表格",
+    "example": "示例",
+    "comparison": "对比分析",
+    "method_summary": "方法归纳",
+    "diagram": "概念关系图",
+    "memory": "记忆材料",
+    "note": "注意事项",
+}
+
+_LEVEL_LABELS = {"L1": "基础理解", "L2": "独立应用", "L3": "深入掌握与迁移"}
+
+
+def _render_block(block: dict, lines: list[str]) -> None:
+    btype = str(block.get("type", "text") or "text")
+    title = str(block.get("title", "") or "").strip()
+    heading = title or _BLOCK_HEADINGS.get(btype, "讲解")
+    body = str(block.get("body", "") or "").strip()
+    if btype == "key_point":
+        lines.append(f"### {heading}")
+        lines.append("")
+        lines.append(f"> {body}")
+        lines.append("")
+        return
+    if btype == "note":
+        lines.append(f"### {heading}")
+        lines.append("")
+        lines.append(f"> ⚠️ {body}")
+        lines.append("")
+        return
+    lines.append(f"### {heading}")
+    lines.append("")
+    lines.append(body)
+    lines.append("")
+
+
+def _render_section_v2(s: dict, crit_by_id: dict, lines: list[str]) -> None:
+    if s.get("purpose"):
+        lines.append(f"> {s['purpose']}")
+        lines.append("")
+    for block in s.get("content", []):
+        if isinstance(block, dict):
+            _render_block(block, lines)
+    if s.get("key_takeaways"):
+        lines.append("### 核心结论")
+        lines.append("")
+        for item in s["key_takeaways"]:
+            lines.append(f"- {item}")
+        lines.append("")
+    if s.get("common_errors"):
+        lines.append("### 常见错误")
+        lines.append("")
+        for e in s["common_errors"]:
+            lines.append(f"- **{e.get('error', '')}** — 原因：{e.get('cause', '')}；排查：{e.get('diagnose', '')}")
+        lines.append("")
+    if s.get("prerequisite_refs"):
+        lines.append("### 前置知识")
+        lines.append("")
+        for p in s["prerequisite_refs"]:
+            lines.append(f"- {p}")
+        lines.append("")
+    if s.get("exercises"):
+        lines.append("### 必要练习")
+        lines.append("")
+        for e in s["exercises"]:
+            lines.append(f"- [ ] {e}")
+        lines.append("")
+    mapped = s.get("mapping_criteria", [])
+    if mapped:
+        lines.append("### 对应验收标准")
+        lines.append("")
+        for cid in mapped:
+            stmt = crit_by_id.get(cid, {}).get("statement", cid)
+            lines.append(f"- {stmt}")
+        lines.append("")
+    sources = s.get("sources", [])
+    if sources:
+        lines.append("### 来源")
+        lines.append("")
+        for src in sources:
+            url = f"（{src.get('url', '')}）" if src.get("url") else ""
+            note = f" — {src.get('note', '')}" if src.get("note") else ""
+            lines.append(f"- {src.get('title', '')}{url}{note}")
+        lines.append("")
+
+
+def _render_section_v1(s: dict, crit_by_id: dict, lines: list[str]) -> None:
+    """旧结构（explanation/steps/examples/...）渲染，保持历史版本可导出。"""
+    if s.get("goal_statement"):
+        lines.append(f"> {s['goal_statement']}")
+        lines.append("")
+    if s.get("prerequisites"):
+        lines.append("**前置要求**")
+        lines.append("")
+        for p in s["prerequisites"]:
+            lines.append(f"- {p}")
+        lines.append("")
+    for block in s.get("explanation", []):
+        lines.append(f"### {block.get('heading', '')}")
+        lines.append("")
+        lines.append(str(block.get("body", "")))
+        lines.append("")
+    steps = s.get("steps", [])
+    if steps:
+        lines.append("### 操作步骤")
+        lines.append("")
+        for si, st in enumerate(steps, 1):
+            lines.append(f"{si}. {st.get('text', '')}")
+            if st.get("expected_result"):
+                lines.append(f"   - 预期结果：{st['expected_result']}")
+            if st.get("verification"):
+                lines.append(f"   - 验证方式：{st['verification']}")
+        lines.append("")
+    if s.get("examples"):
+        lines.append("### 示例")
+        lines.append("")
+        for e in s["examples"]:
+            lines.append(f"- {e}")
+        lines.append("")
+    if s.get("exercises"):
+        lines.append("### 练习")
+        lines.append("")
+        for e in s["exercises"]:
+            lines.append(f"- [ ] {e}")
+        lines.append("")
+    if s.get("variation_task"):
+        lines.append("### 变式任务（检查迁移）")
+        lines.append("")
+        lines.append(f"- {s['variation_task']}")
+        lines.append("")
+    if s.get("common_errors"):
+        lines.append("### 常见错误")
+        lines.append("")
+        for e in s["common_errors"]:
+            lines.append(f"- **{e.get('error', '')}** — 原因：{e.get('cause', '')}；排查：{e.get('diagnose', '')}")
+        lines.append("")
+    mapped = s.get("mapping_criteria", [])
+    if mapped:
+        lines.append("### 对应验收标准")
+        lines.append("")
+        for cid in mapped:
+            stmt = crit_by_id.get(cid, {}).get("statement", cid)
+            lines.append(f"- {stmt}")
+        lines.append("")
+    sources = s.get("sources", [])
+    if sources:
+        lines.append("### 来源与可信度")
+        lines.append("")
+        for src in sources:
+            url = f"（{src['url']}）" if src.get("url") else ""
+            note = f" — {src['note']}" if src.get("note") else ""
+            lines.append(f"- {src.get('title', '')}{url}{note}")
+        lines.append("")
+
+
+def _tutorial_base_name(goal) -> str:
+    return f"{_safe_filename(goal.title)}-教程"
 
 
 def export_markdown(db: Session, tutorial_id: str) -> tuple[str, str]:
@@ -558,12 +1204,16 @@ def export_markdown(db: Session, tutorial_id: str) -> tuple[str, str]:
     profile = get_profile(goal.domain_key)
     criteria = goals_service.list_criteria(db, goal.id)
     crit_by_id = {c["id"]: c for c in criteria}
+    level = _LEVEL_LABELS.get(normalize_level(goal.capability_level), "独立应用")
+    cheatsheet = content.get("cheatsheet") or {}
+    exercises_file = content.get("extra_exercises") or {}
 
     lines: list[str] = []
     lines.append(f"# {tutorial.title}")
     lines.append("")
     lines.append(f"- 学习目标：{goal.title}")
     lines.append(f"- 学科：{profile.display_name}")
+    lines.append(f"- 能力层级：{level}（{normalize_level(goal.capability_level)}）")
     if goal.application_context:
         lines.append(f"- 应用场景：{goal.application_context}")
     if goal.current_level:
@@ -591,6 +1241,21 @@ def export_markdown(db: Session, tutorial_id: str) -> tuple[str, str]:
         lines.append("（无验收标准）")
     lines.append("")
 
+    # 配套文件（Obsidian 双链：链接名 = 导出文件名去掉 .md，保证可解析）
+    companion = []
+    if cheatsheet.get("sections"):
+        companion.append(f"[[{cheatsheet.get('filename') or _safe_filename(goal.title) + '-知识速查'}]]（知识速查）")
+    if exercises_file.get("exercises"):
+        companion.append(
+            f"[[{exercises_file.get('filename') or _safe_filename(goal.title) + '-额外练习'}]]（额外练习，含参考答案）"
+        )
+    if companion:
+        lines.append("## 配套文件")
+        lines.append("")
+        for c in companion:
+            lines.append(f"- {c}")
+        lines.append("")
+
     outline = content.get("outline", [])
     sections = content.get("sections", [])
     if outline:
@@ -603,71 +1268,10 @@ def export_markdown(db: Session, tutorial_id: str) -> tuple[str, str]:
     for idx, s in enumerate(sections, 1):
         lines.append(f"## 第 {idx} 节：{s.get('title', '')}")
         lines.append("")
-        if s.get("goal_statement"):
-            lines.append(f"> {s['goal_statement']}")
-            lines.append("")
-        if s.get("prerequisites"):
-            lines.append("**前置要求**")
-            lines.append("")
-            for p in s["prerequisites"]:
-                lines.append(f"- {p}")
-            lines.append("")
-        for block in s.get("explanation", []):
-            lines.append(f"### {block.get('heading', '')}")
-            lines.append("")
-            lines.append(str(block.get("body", "")))
-            lines.append("")
-        steps = s.get("steps", [])
-        if steps:
-            lines.append("### 操作步骤")
-            lines.append("")
-            for si, st in enumerate(steps, 1):
-                lines.append(f"{si}. {st.get('text', '')}")
-                if st.get("expected_result"):
-                    lines.append(f"   - 预期结果：{st['expected_result']}")
-                if st.get("verification"):
-                    lines.append(f"   - 验证方式：{st['verification']}")
-            lines.append("")
-        if s.get("examples"):
-            lines.append("### 示例")
-            lines.append("")
-            for e in s["examples"]:
-                lines.append(f"- {e}")
-            lines.append("")
-        if s.get("exercises"):
-            lines.append("### 练习")
-            lines.append("")
-            for e in s["exercises"]:
-                lines.append(f"- [ ] {e}")
-            lines.append("")
-        if s.get("variation_task"):
-            lines.append("### 变式任务（检查迁移）")
-            lines.append("")
-            lines.append(f"- {s['variation_task']}")
-            lines.append("")
-        if s.get("common_errors"):
-            lines.append("### 常见错误")
-            lines.append("")
-            for e in s["common_errors"]:
-                lines.append(f"- **{e.get('error', '')}** — 原因：{e.get('cause', '')}；排查：{e.get('diagnose', '')}")
-            lines.append("")
-        mapped = s.get("mapping_criteria", [])
-        if mapped:
-            lines.append("### 对应验收标准")
-            lines.append("")
-            for cid in mapped:
-                stmt = crit_by_id.get(cid, {}).get("statement", cid)
-                lines.append(f"- {stmt}")
-            lines.append("")
-        sources = s.get("sources", [])
-        if sources:
-            lines.append("### 来源与可信度")
-            lines.append("")
-            for src in sources:
-                url = f"（{src['url']}）" if src.get("url") else ""
-                note = f" — {src['note']}" if src.get("note") else ""
-                lines.append(f"- {src.get('title', '')}{url}{note}")
-            lines.append("")
+        if s.get("content"):
+            _render_section_v2(s, crit_by_id, lines)
+        else:
+            _render_section_v1(s, crit_by_id, lines)
 
     checks = quality.get("checks", [])
     if checks:
@@ -689,5 +1293,101 @@ def export_markdown(db: Session, tutorial_id: str) -> tuple[str, str]:
     lines.append("> 由 AI Edu 生成。教程内容需结合实践核验；证据比感觉更可靠。")
     lines.append("")
 
-    filename = f"{_safe_filename(goal.title)}-教程-v{version.version}.md"
+    filename = f"{_tutorial_base_name(goal)}.md"
+    return filename, "\n".join(lines)
+
+
+def export_cheatsheet(db: Session, tutorial_id: str) -> tuple[str, str]:
+    """导出配套知识速查文件。未生成时 404。"""
+    tutorial = _get_tutorial(db, tutorial_id)
+    goal = _goal_for(db, tutorial.goal_id)
+    version = _current_version(db, tutorial)
+    if version is None:
+        raise HTTPException(status_code=409, detail={"code": "no_content", "message": "教程尚无内容"})
+    content = jload(version.content_json, {})
+    cheatsheet = content.get("cheatsheet") or {}
+    sections = cheatsheet.get("sections") or []
+    if not sections:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "cheatsheet_not_found", "message": "该教程没有可导出的知识速查文件"},
+        )
+
+    lines: list[str] = []
+    lines.append(f"# {cheatsheet.get('title') or f'{goal.title} · 知识速查'}")
+    lines.append("")
+    lines.append(f"> 配套教程：[[{_tutorial_base_name(goal)}]]")
+    lines.append(">")
+    lines.append("> 本文件只用于快速查阅，不能替代教程正文讲解；核心概念以教程正文的解释为准。")
+    lines.append("")
+    for sec in sections:
+        lines.append(f"## {sec.get('heading', '')}")
+        lines.append("")
+        lines.append(str(sec.get("body", "")))
+        lines.append("")
+
+    filename = f"{cheatsheet.get('filename') or _safe_filename(goal.title) + '-知识速查'}.md"
+    return filename, "\n".join(lines)
+
+
+def export_extra_exercises(db: Session, tutorial_id: str) -> tuple[str, str]:
+    """导出独立额外练习文件（用户开启选项时生成）。未生成时 404。"""
+    tutorial = _get_tutorial(db, tutorial_id)
+    goal = _goal_for(db, tutorial.goal_id)
+    version = _current_version(db, tutorial)
+    if version is None:
+        raise HTTPException(status_code=409, detail={"code": "no_content", "message": "教程尚无内容"})
+    content = jload(version.content_json, {})
+    extra = content.get("extra_exercises") or {}
+    exercises = extra.get("exercises") or []
+    if not exercises:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "exercises_not_found", "message": "该教程没有额外练习文件（可在学习目标中开启后重新生成）"},
+        )
+
+    lines: list[str] = []
+    lines.append(f"# {extra.get('title') or f'{goal.title} · 额外练习'}")
+    lines.append("")
+    lines.append(f"> 配套教程：[[{_tutorial_base_name(goal)}]]")
+    lines.append(">")
+    if extra.get("intro"):
+        for row in str(extra["intro"]).splitlines():
+            lines.append(f"> {row}")
+        lines.append(">")
+    lines.append("> 参考答案集中在本文件末尾，建议先独立完成再对照。")
+    lines.append("")
+
+    level = _LEVEL_LABELS.get(normalize_level(goal.capability_level), "独立应用")
+    lines.append(f"难度基准：{level}（{normalize_level(goal.capability_level)}）")
+    lines.append("")
+    lines.append("## 题目")
+    lines.append("")
+    for ex in exercises:
+        num = ex.get("number") or ""
+        lines.append(f"### 练习 {num}")
+        lines.append("")
+        lines.append(str(ex.get("task", "")))
+        lines.append("")
+        if ex.get("requirements"):
+            lines.append(f"- 要求：{ex['requirements']}")
+        if ex.get("hint"):
+            lines.append(f"- 提示：{ex['hint']}")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("")
+    lines.append("## 参考答案与自检标准")
+    lines.append("")
+    for ex in exercises:
+        num = ex.get("number") or ""
+        lines.append(f"### 练习 {num} 参考")
+        lines.append("")
+        lines.append(str(ex.get("solution", "")))
+        lines.append("")
+    if extra.get("answers_note"):
+        lines.append(f"> {extra['answers_note']}")
+        lines.append("")
+
+    filename = f"{extra.get('filename') or _safe_filename(goal.title) + '-额外练习'}.md"
     return filename, "\n".join(lines)
