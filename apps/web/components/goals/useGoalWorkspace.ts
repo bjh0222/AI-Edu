@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import type {
   Assessment,
@@ -96,9 +96,15 @@ export function useGoalWorkspace(goalId: string, slices: WorkspaceSlices): GoalW
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
+  const loadSeq = useRef(0);
+
   const load = useCallback(async () => {
     if (!goalId) return;
+    // 竞态保护：run() 后的 reload 与轮询触发的 reload 可能同时在飞，
+    // 只允许最新一次请求写入状态，否则旧响应会覆盖新数据（章节数/进度回退）。
+    const seq = ++loadSeq.current;
     const goalData = await api.get<Goal>(`/api/goals/${goalId}`);
+    if (seq !== loadSeq.current) return;
 
     const [
       diagnosis,
@@ -159,6 +165,7 @@ export function useGoalWorkspace(goalId: string, slices: WorkspaceSlices): GoalW
       Object.assign(attempts, Object.fromEntries(pairs));
     }
 
+    if (seq !== loadSeq.current) return; // 期间又发起了新请求：本次结果已过期
     setData({
       goal: goalData,
       diagnosis,
