@@ -6,7 +6,8 @@ from sqlalchemy.orm import Session
 
 from ..learning.disciplines import get_profile
 from ..learning.engine import PHASES
-from ..llm.service import AIService
+from ..learning.levels import normalize_level
+from ..llm.service import AIService, AIServiceError
 from ..models import AcceptanceCriterion, GoalAssessment, LearningGoal, LearningPlan, PlanStep
 from . import materials as materials_service
 from .utils import criterion_dict, goal_dict, jdump, jload, set_status_at_least, step_dict
@@ -27,6 +28,8 @@ def create_goal(db: Session, payload) -> dict:
         application_context=payload.application_context,
         current_level=payload.current_level,
         time_budget=payload.time_budget,
+        capability_level=normalize_level(getattr(payload, "capability_level", None)),
+        generate_extra_exercises=bool(getattr(payload, "generate_extra_exercises", False)),
     )
     db.add(goal)
     db.commit()
@@ -256,6 +259,12 @@ def patch_goal(db: Session, goal_id: str, payload) -> dict:
         value = getattr(payload, field, None)
         if value is not None:
             setattr(goal, field, value)
+    level = getattr(payload, "capability_level", None)
+    if level is not None:
+        goal.capability_level = normalize_level(level)
+    extra = getattr(payload, "generate_extra_exercises", None)
+    if extra is not None:
+        goal.generate_extra_exercises = bool(extra)
     db.commit()
     return goal_dict(goal)
 
@@ -377,6 +386,9 @@ def generate_plan(db: Session, goal_id: str, ai: AIService) -> dict:
     profile = get_profile(goal.domain_key)
     materials_text = materials_service.materials_context(db, goal.id)
     data = ai.plan(goal, profile, materials_text)
+    raw_steps = data.get("steps")
+    if not isinstance(raw_steps, list):
+        raise AIServiceError("模型输出的学习计划不是步骤列表，请重试")
 
     last = (
         db.query(LearningPlan)
@@ -389,7 +401,9 @@ def generate_plan(db: Session, goal_id: str, ai: AIService) -> dict:
     db.add(plan)
     db.flush()
     steps = []
-    for idx, raw in enumerate(data.get("steps", [])):
+    for idx, raw in enumerate(raw_steps):
+        if not isinstance(raw, dict):
+            continue
         step = PlanStep(
             plan_id=plan.id,
             order_index=idx,
@@ -444,8 +458,13 @@ def generate_criteria(db: Session, goal_id: str, ai: AIService) -> list[dict]:
     goal = _get_goal(db, goal_id)
     profile = get_profile(goal.domain_key)
     data = ai.criteria(goal, profile)
+    raw_criteria = data.get("criteria")
+    if not isinstance(raw_criteria, list):
+        raise AIServiceError("模型输出的验收标准不是列表，请重试")
     created = []
-    for raw in data.get("criteria", []):
+    for raw in raw_criteria:
+        if not isinstance(raw, dict):
+            continue
         statement = str(raw.get("statement", "")).strip()
         if not statement:
             continue

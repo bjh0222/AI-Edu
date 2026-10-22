@@ -112,12 +112,35 @@ def quickstart(db: Session, goal_id: str, ai: AIService) -> dict:
         outline_note = f"{len(tutorial['current_version']['content']['outline'])} 节大纲"
         steps.append(_step("outline", "教程大纲", "reused", outline_note))
 
-    # ⑥ 全部章节
+    # ⑥ 全部章节 + 配套文件
     content = (tutorial.get("current_version") or {}).get("content") or {}
     sections = content.get("sections") or []
     job_id: str | None = None
     if sections:
         steps.append(_step("sections", "全部章节", "reused", f"已生成 {len(sections)} 节"))
+        # 章节已存在但缺配套文件（旧版本 / 后开启选项）时补齐：改为后台任务立即返回，
+        # 同步生成会让「一键生成」白等 1-2 分钟（两个文件各一次模型往返）。
+        missing = tutorials_service.companions_missing(db, tutorial["id"])
+        if any(missing.values()):
+            started = tutorials_service.start_companions(db, tutorial["id"], ai)
+            job_id = started["job"].id
+            labels = "、".join(
+                label
+                for key, label in (("cheatsheet", "知识速查"), ("extra_exercises", "额外练习"))
+                if missing[key]
+            )
+            reused = bool(started.get("reused"))
+            steps.append(
+                _step(
+                    "companions",
+                    "配套文件",
+                    "running" if reused else "created",
+                    f"{'沿用进行中的后台任务' if reused else '已提交后台生成'}：{labels}",
+                )
+            )
+        else:
+            steps.append(_step("companions", "配套文件", "reused", "知识速查与额外练习已齐备"))
+        tutorial = tutorials_service.get_tutorial(db, tutorial["id"])
     else:
         active = _active_sections_job(db, goal.id)
         if active is not None:
@@ -126,7 +149,7 @@ def quickstart(db: Session, goal_id: str, ai: AIService) -> dict:
         else:
             started = tutorials_service.start_sections(db, tutorial["id"], ai)
             job_id = started["job"].id
-            steps.append(_step("sections", "全部章节", "created", "已提交后台生成任务"))
+            steps.append(_step("sections", "全部章节", "created", "已提交后台生成任务（含知识速查与额外练习）"))
 
     tutorial = tutorials_service.get_tutorial(db, tutorial["id"])
     return {

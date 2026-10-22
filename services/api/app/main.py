@@ -1,9 +1,12 @@
 """FastAPI 应用入口。"""
 from __future__ import annotations
 
+import logging
+import traceback
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -11,6 +14,23 @@ from .api.router import api_router
 from .config import settings
 from .db import init_db
 from .llm.service import AIServiceError
+
+logger = logging.getLogger("aiedu")
+
+
+def _log_unhandled(exc: BaseException) -> None:
+    """把未捕获异常写入 data/errors.log，便于事后定位 500 根因。"""
+    try:
+        log_dir = Path(getattr(settings, "backup_dir", "data/backups")).parent
+        log_dir.mkdir(parents=True, exist_ok=True)
+        path = log_dir / "errors.log"
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write("=" * 60 + "\n")
+            fh.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+            fh.write("\n")
+    except OSError:
+        pass
+    logger.exception("未捕获异常", exc_info=exc)
 
 
 def _sweep_stale_jobs() -> None:
@@ -59,3 +79,18 @@ app.include_router(api_router)
 @app.exception_handler(AIServiceError)
 async def ai_error_handler(_, exc: AIServiceError):
     return JSONResponse(status_code=502, content={"code": "llm_error", "message": str(exc)})
+
+
+@app.exception_handler(Exception)
+async def unhandled_error_handler(_: Request, exc: Exception):
+    """未捕获异常：写完整堆栈到 data/errors.log，并返回可读错误（前端不再只显示 500）。"""
+    _log_unhandled(exc)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": {
+                "code": "internal_error",
+                "message": f"服务内部错误：{exc.__class__.__name__}: {str(exc)[:300]}",
+            }
+        },
+    )

@@ -8,6 +8,9 @@ from sqlalchemy import Boolean, Column, Float, ForeignKey, Integer, String, Text
 
 from .db import Base
 
+# 能力层级默认值（learning.levels.DEFAULT_LEVEL），直接用字符串避免循环导入
+CAPABILITY_DEFAULT = "L2"
+
 
 def _uuid() -> str:
     return uuid.uuid4().hex
@@ -32,6 +35,10 @@ class LearningGoal(Base, TimestampMixin):
     application_context = Column(Text, default="")
     current_level = Column(Text, default="")
     time_budget = Column(String(100), default="")
+    # 能力层级：L1 基础理解 / L2 独立应用 / L3 深入掌握与迁移（旧数据回退 L2）
+    capability_level = Column(String(10), default=CAPABILITY_DEFAULT)
+    # 是否生成独立的额外练习文件（默认关闭；教程内的必要练习不受此开关影响）
+    generate_extra_exercises = Column(Boolean, default=False)
     status = Column(String(30), default="goal_definition")
     user_notes = Column(Text, default="")
     archived = Column(Boolean, default=False)

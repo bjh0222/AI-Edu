@@ -98,6 +98,8 @@ function TutorialDetail() {
   const content = version?.content;
   const outline = content?.outline ?? [];
   const sections = content?.sections ?? [];
+  const cheatsheet = content?.cheatsheet ?? null;
+  const extraExercises = content?.extra_exercises ?? null;
   const report = version?.quality_report ?? {};
   const isDemo = version?.model_provider === "demo";
 
@@ -151,6 +153,50 @@ function TutorialDetail() {
             desc="每一节都有独立详情页：可单独打开、重新生成，也可回到学习目标继续闭环"
             actions={
               <div className="flex flex-wrap items-center gap-2">
+                {cheatsheet?.sections?.length ? (
+                  <Button
+                    variant="secondary"
+                    disabled={exporting}
+                    onClick={async () => {
+                      setExporting(true);
+                      setError("");
+                      try {
+                        await downloadFile(
+                          `/api/tutorials/${tutorial.id}/export/cheatsheet`,
+                          `${cheatsheet.filename ?? "知识速查"}.md`
+                        );
+                      } catch (e) {
+                        setError(errMsg(e));
+                      } finally {
+                        setExporting(false);
+                      }
+                    }}
+                  >
+                    下载知识速查
+                  </Button>
+                ) : null}
+                {extraExercises?.exercises?.length ? (
+                  <Button
+                    variant="secondary"
+                    disabled={exporting}
+                    onClick={async () => {
+                      setExporting(true);
+                      setError("");
+                      try {
+                        await downloadFile(
+                          `/api/tutorials/${tutorial.id}/export/exercises`,
+                          `${extraExercises.filename ?? "额外练习"}.md`
+                        );
+                      } catch (e) {
+                        setError(errMsg(e));
+                      } finally {
+                        setExporting(false);
+                      }
+                    }}
+                  >
+                    下载额外练习
+                  </Button>
+                ) : null}
                 <Button
                   variant="secondary"
                   disabled={exporting || !version}
@@ -268,6 +314,28 @@ function TutorialDetail() {
               </div>
             )}
           </Card>
+
+          {(cheatsheet?.sections?.length || extraExercises?.exercises?.length) && (
+            <Card
+              title="配套文件"
+              desc="导出后与主教程放在同一文件夹，Obsidian 双链会自动生效"
+            >
+              <ul className="grid gap-1.5 text-[11px]">
+                {cheatsheet?.sections?.length ? (
+                  <li>
+                    [[{cheatsheet.filename ?? "知识速查"}]] — 知识速查（{cheatsheet.sections.length} 个小节，
+                    公式 / 命令 / 方法适用条件的集中查阅）
+                  </li>
+                ) : null}
+                {extraExercises?.exercises?.length ? (
+                  <li>
+                    [[{extraExercises.filename ?? "额外练习"}]] — 额外练习（{extraExercises.exercises.length} 题，
+                    参考答案集中放文件末尾）
+                  </li>
+                ) : null}
+              </ul>
+            </Card>
+          )}
 
           {version && (
             <Card

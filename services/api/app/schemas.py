@@ -33,6 +33,10 @@ class GoalCreate(BaseModel):
     application_context: str = ""
     current_level: str = ""
     time_budget: str = ""
+    # 能力层级：L1 基础理解 / L2 独立应用 / L3 深入掌握与迁移
+    capability_level: Literal["L1", "L2", "L3"] = "L2"
+    # 是否生成独立的额外练习文件（教程内的必要练习不受此开关影响）
+    generate_extra_exercises: bool = False
 
 
 class GoalPatch(BaseModel):
@@ -41,6 +45,8 @@ class GoalPatch(BaseModel):
     application_context: Optional[str] = None
     current_level: Optional[str] = None
     time_budget: Optional[str] = None
+    capability_level: Optional[Literal["L1", "L2", "L3"]] = None
+    generate_extra_exercises: Optional[bool] = None
     status: Optional[str] = None
     user_notes: Optional[str] = None
 
@@ -54,6 +60,8 @@ class GoalOut(BaseModel):
     application_context: str
     current_level: str
     time_budget: str
+    capability_level: str = "L2"
+    generate_extra_exercises: bool = False
     status: str
     user_notes: str
     archived: bool
@@ -173,6 +181,8 @@ class OutlineItem(BaseModel):
     id: str = ""
     title: str
     summary: str = ""
+    purpose: str = ""
+    content_type: str = ""
     criteria_ids: list[str] = []
 
 
@@ -199,25 +209,101 @@ class SourceRef(BaseModel):
     note: str = ""
 
 
+# 章节正文内容块类型（合法枚举；非法值在保存前被归一化为 text）
+CONTENT_BLOCK_TYPES = {
+    "text",  # 普通解释
+    "key_point",  # 关键结论
+    "formula",  # 公式与推导
+    "steps",  # 操作步骤
+    "table",  # 表格
+    "example",  # 示例
+    "comparison",  # 对比分析
+    "method_summary",  # 方法归纳
+    "diagram",  # 概念关系图（Mermaid 等）
+    "memory",  # 记忆材料
+    "note",  # 注意事项
+}
+# 章节主要教学类型（content_type 枚举；非法值归一化为 mixed）
+SECTION_CONTENT_TYPES = {
+    "concept",  # 概念原理
+    "method",  # 方法技巧
+    "tool",  # 工具操作
+    "fact",  # 事实记忆
+    "application",  # 综合应用
+    "mixed",  # 组合
+}
+
+
+class ContentBlock(BaseModel):
+    """章节正文内容块：type 决定渲染方式，body 为 Markdown 文本。
+
+    - steps：body 用有序 Markdown 列表（每步一行，可含预期结果与验证）；
+    - table / comparison：body 用 Markdown 表格；
+    - diagram：body 为 Mermaid 代码块；
+    - 其余：body 为正文 Markdown（可含公式、代码块、双链）。
+    """
+
+    type: str = "text"
+    title: str = ""
+    body: str = ""
+
+
 class SectionOut(BaseModel):
     id: str = ""
     title: str
+    # ---- v2 结构（提示词重构后）：教学组织随知识性质变化，固定栏目允许为空
+    purpose: str = ""
+    content_type: str = "mixed"
+    content: list[ContentBlock] = []
+    key_takeaways: list[str] = []
+    prerequisite_refs: list[str] = []
+    common_errors: list[CommonError] = []
+    exercises: list[str] = []
+    sources: list[SourceRef] = []
+    mapping_criteria: list[str] = []
+    # ---- v1 结构（兼容旧版本数据）
     goal_statement: str = ""
     prerequisites: list[str] = []
     explanation: list[ExplanationBlock] = []
     steps: list[StepBlock] = []
     examples: list[str] = []
-    exercises: list[str] = []
     variation_task: str = ""
-    common_errors: list[CommonError] = []
-    sources: list[SourceRef] = []
-    mapping_criteria: list[str] = []
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
+
+
+class CheatsheetSection(BaseModel):
+    heading: str
+    body: str
+
+
+class CheatsheetOut(BaseModel):
+    filename: str = ""  # 配套文件名（不含 .md），与主教程中的 Obsidian 双链一致
+    title: str = ""
+    sections: list[CheatsheetSection] = []
+
+
+class ExtraExerciseItem(BaseModel):
+    number: int = 0
+    task: str
+    requirements: str = ""
+    hint: str = ""
+    solution: str = ""
+
+
+class ExtraExercisesOut(BaseModel):
+    filename: str = ""  # 配套文件名（不含 .md），与主教程中的 Obsidian 双链一致
+    title: str = ""
+    intro: str = ""
+    exercises: list[ExtraExerciseItem] = []
+    answers_note: str = ""
 
 
 class TutorialContent(BaseModel):
     outline: list[OutlineItem] = []
     sections: list[SectionOut] = []
+    # 配套文件（可能为 None：速查未生成 / 用户未开启额外练习）
+    cheatsheet: Optional[CheatsheetOut] = None
+    extra_exercises: Optional[ExtraExercisesOut] = None
 
 
 class QualityReport(BaseModel):

@@ -1,5 +1,5 @@
 /**
- * 学习目标十项流程的单一事实来源。
+ * 学习目标流程的单一事实来源（教程生成为终点：目标 → 诊断 → 计划 → 验收标准 → 教程学习）。
  *
  * 后端 `app/learning/engine.py` 的 PHASES 顺序即学习闭环顺序，前端据此生成
  * 子路由 slug、阶段条、总览卡片与「上一步/下一步」导航；新增/调整阶段只改这里。
@@ -60,51 +60,17 @@ export const GOAL_PHASES: GoalPhase[] = [
     desc: "按验收标准生成教程大纲与章节，可逐节打开详情、重新生成。",
     output: "教程大纲与章节",
   },
-  {
-    key: "practice",
-    slug: "practice",
-    label: "实践",
-    title: "实践任务",
-    desc: "每个任务都要有产物、验证方式与辅助等级记录；提交后获得逐条反馈。",
-    output: "产物 + 尝试记录",
-  },
-  {
-    key: "feedback",
-    slug: "feedback",
-    label: "反馈",
-    title: "反馈",
-    desc: "对照验收标准查看证据反馈，并把「哪里不清楚 / 哪里最有帮助」沉淀下来。",
-    output: "逐条反馈与用户评价",
-  },
-  {
-    key: "assessment",
-    slug: "assessment",
-    label: "能力评估",
-    title: "能力评估",
-    desc: "独立任务 + 变式任务，检查能否不依赖教程完成。",
-    output: "评估方案与结果",
-  },
-  {
-    key: "reflection",
-    slug: "reflection",
-    label: "复盘",
-    title: "学习复盘",
-    desc: "记录完成了什么、仍依赖 AI 的地方、下一步最值得做的事。",
-    output: "复盘记录",
-  },
-  {
-    key: "knowledge_update",
-    slug: "knowledge-update",
-    label: "知识记录",
-    title: "知识记录",
-    desc: "AI 只能提议概念与关系，确认后才进入长期知识网络。",
-    output: "待确认的知识提议",
-  },
 ];
 
-export const PHASE_LABELS: Record<string, string> = Object.fromEntries(
-  GOAL_PHASES.map((phase) => [phase.key, phase.label])
-);
+// 旧版本数据可能停留在已删除的阶段（practice 等），列表页徽章仍能显示中文
+export const PHASE_LABELS: Record<string, string> = {
+  ...Object.fromEntries(GOAL_PHASES.map((phase) => [phase.key, phase.label])),
+  practice: "实践",
+  feedback: "反馈",
+  assessment: "能力评估",
+  reflection: "复盘",
+  knowledge_update: "知识记录",
+};
 
 export const PHASE_SLUGS: string[] = GOAL_PHASES.map((phase) => phase.slug);
 

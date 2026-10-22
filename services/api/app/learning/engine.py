@@ -9,11 +9,6 @@ PHASES = [
     "planning",
     "acceptance_design",
     "learning",
-    "practice",
-    "feedback",
-    "assessment",
-    "reflection",
-    "knowledge_update",
 ]
 
 PHASE_LABELS = {
@@ -22,11 +17,6 @@ PHASE_LABELS = {
     "planning": "学习计划",
     "acceptance_design": "验收标准",
     "learning": "教程学习",
-    "practice": "实践",
-    "feedback": "反馈",
-    "assessment": "能力评估",
-    "reflection": "复盘",
-    "knowledge_update": "知识记录",
 }
 
 HELP_LEVELS = {"A0": "引导", "A1": "协作", "A2": "提示", "A3": "独立验证"}
@@ -40,8 +30,20 @@ def next_phase(current: str) -> str:
     return PHASES[min(idx + 1, len(PHASES) - 1)]
 
 
+VALID_BLOCK_TYPES = {
+    "text", "key_point", "formula", "steps", "table", "example",
+    "comparison", "method_summary", "diagram", "memory", "note",
+}
+
+
 def check_structure(content: dict[str, Any], criteria: list[dict[str, Any]]) -> dict[str, Any]:
-    """L1 结构检查：必需字段、预期结果、验收映射、双向覆盖、练习与变式。"""
+    """L1 结构检查：必需字段、正文齐备、验收映射、双向覆盖。
+
+    兼容两种章节结构：
+    - v1（旧）：explanation / steps / examples / variation_task / sources 等固定栏目；
+    - v2（提示词重构后）：content 内容块 + key_takeaways / common_errors 等。
+    练习、变式与来源为可选项，不再作为硬性失败条件（例题与练习按教学需要取舍）。
+    """
     issues: list[str] = []
     checks: list[dict[str, Any]] = []
 
@@ -78,41 +80,46 @@ def check_structure(content: dict[str, Any], criteria: list[dict[str, Any]]) -> 
     if uncovered:
         issues.append(f"{len(uncovered)} 条验收标准未被任何章节覆盖")
 
-    # 4. 每个操作步骤有预期结果与验证方式
+    # 4. 章节正文非空（v1: explanation；v2: content 内容块）
+    empty_sections = [
+        s.get("title", "?")
+        for s in sections
+        if not (s.get("content") or s.get("explanation"))
+    ]
+    checks.append({
+        "name": "章节正文非空",
+        "passed": not empty_sections,
+        "detail": ("空章节: " + ", ".join(empty_sections)) if empty_sections else "全部章节均有正文",
+    })
+    if empty_sections:
+        issues.append(f"{len(empty_sections)} 个章节没有正文内容")
+
+    # 5. 内容块与操作步骤可验证
+    bad_blocks = 0
     bad_steps = 0
     total_steps = 0
     for s in sections:
-        for step in s.get("steps", []):
+        for block in s.get("content", []):
+            if not isinstance(block, dict) or not str(block.get("body", "")).strip():
+                bad_blocks += 1
+            elif block.get("type") not in VALID_BLOCK_TYPES:
+                bad_blocks += 1
+        for step in s.get("steps", []):  # v1 结构
             total_steps += 1
             if not (step.get("expected_result") and step.get("verification")):
                 bad_steps += 1
+    step_ok = bad_blocks == 0 and bad_steps == 0
     checks.append({
-        "name": "步骤含预期结果与验证",
-        "passed": bad_steps == 0 and total_steps > 0,
-        "detail": f"{total_steps} 个步骤中 {bad_steps} 个缺预期结果/验证",
+        "name": "内容块与步骤规范",
+        "passed": step_ok and (total_steps > 0 or any(s.get("content") for s in sections)),
+        "detail": (
+            f"非法内容块 {bad_blocks} 个；v1 步骤 {total_steps} 个中 {bad_steps} 个缺预期结果/验证"
+        ),
     })
+    if bad_blocks:
+        issues.append(f"{bad_blocks} 个内容块类型非法或正文为空")
     if bad_steps:
         issues.append(f"{bad_steps} 个步骤缺少预期结果或验证方式")
-
-    # 5. 练习与变式任务
-    practice_ok = all(bool(s.get("exercises")) and bool(s.get("variation_task")) for s in sections)
-    checks.append({
-        "name": "练习与变式任务齐备",
-        "passed": practice_ok,
-        "detail": "每个章节须含练习与变式任务",
-    })
-    if not practice_ok:
-        issues.append("部分章节缺少练习或变式任务")
-
-    # 6. 来源与不确定性说明
-    source_ok = all(bool(s.get("sources")) for s in sections)
-    checks.append({
-        "name": "关键内容有来源或不确定性标注",
-        "passed": source_ok,
-        "detail": "每个章节须列出至少一条来源或标注不确定性",
-    })
-    if not source_ok:
-        issues.append("部分章节缺少来源或不确定性说明")
 
     passed = all(c["passed"] for c in checks)
     return {

@@ -105,40 +105,9 @@ def test_closed_loop_demo(client):
     tut2 = resp.json()
     assert tut2["current_version"]["version"] == tut["current_version"]["version"] + 1
 
-    # 自动生成实践任务
+    # 实践 / 反馈 / 评估 / 复盘环节已删除：教程即终点，不再自动创建实践任务
     tasks = client.get(f"/api/goals/{goal_id}/tasks").json()
-    assert len(tasks) >= 1
-    task_id = tasks[0]["id"]
-
-    # 提交尝试 → 逐项反馈
-    resp = client.post(
-        f"/api/tasks/{task_id}/attempts",
-        json={
-            "artifact": "cat access.log | grep 500 | wc -l  → 42",
-            "artifact_type": "command_session",
-            "result": "统计出错请求数量成功",
-            "errors": "第一次路径写错，报 No such file",
-            "help_level": "A2",
-            "user_explanation": "先确认日志路径，再逐段验证管道每一步输出",
-        },
-    )
-    assert resp.status_code == 200, resp.text
-    attempt = resp.json()
-    assert attempt["demo"] is True
-    assert len(attempt["feedback"]["items"]) == len(criteria)
-
-    # 能力评估
-    resp = client.post(f"/api/goals/{goal_id}/assessments", json={"assessment_type": "mixed"})
-    assert resp.status_code == 200, resp.text
-    assessment = resp.json()
-    assert assessment["rubric"]
-    assert assessment["independent_task"]
-
-    # 复盘
-    resp = client.post(f"/api/goals/{goal_id}/reflections", json={})
-    assert resp.status_code == 200, resp.text
-    reflection = resp.json()
-    assert reflection["summary"]
+    assert tasks == []
 
     # 知识提议 → 确认
     resp = client.post(f"/api/goals/{goal_id}/knowledge-proposals")
@@ -150,9 +119,9 @@ def test_closed_loop_demo(client):
     )
     assert confirm.status_code == 200, confirm.text
 
-    # 目标阶段推进到最后
+    # 目标阶段推进到教程学习（闭环终点）
     goal_after = client.get(f"/api/goals/{goal_id}").json()
-    assert goal_after["status"] == "reflection"
+    assert goal_after["status"] == "learning"
 
     # 刷新（重新请求）后数据仍在
     goals = client.get("/api/goals").json()

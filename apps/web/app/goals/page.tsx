@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { api, ApiError } from "@/lib/api";
 import type { Goal } from "@/lib/types";
+import { CAPABILITY_LEVELS } from "@/lib/types";
 import { PHASE_LABELS } from "@/lib/goal-phases";
 import { Badge, Button, Card, Empty, Field, inputCls } from "@/components/ui";
 import { GoalExamples } from "@/components/goals/GoalExamples";
@@ -52,6 +53,8 @@ export default function GoalsPage() {
     application_context: "",
     current_level: "",
     time_budget: "共 10 小时",
+    capability_level: "L2" as Goal["capability_level"],
+    generate_extra_exercises: false,
   });
 
   const load = async () => {
@@ -84,7 +87,14 @@ export default function GoalsPage() {
     setError("");
     try {
       const goal = await api.post<Goal>("/api/goals", form);
-      setForm({ ...form, title: "", motivation: "", application_context: "", current_level: "" });
+      setForm({
+        ...form,
+        title: "",
+        motivation: "",
+        application_context: "",
+        current_level: "",
+        generate_extra_exercises: false,
+      });
       await load();
       router.push(`/goals/${goal.id}`);
     } catch (e) {
@@ -159,7 +169,8 @@ export default function GoalsPage() {
                     <Badge tone="active">{STATUS_LABEL[g.status] ?? g.status}</Badge>
                   </div>
                   <div className="mt-1 text-[11px] text-muted">
-                    {g.domain_name} · {g.time_budget || "未填可投入总时间"}
+                    {g.domain_name} · 层级 {g.capability_level || "L2"} ·{" "}
+                    {g.time_budget || "未填可投入总时间"}
                     {g.application_context ? ` · ${g.application_context}` : ""}
                   </div>
                   <div className="mt-2 flex items-center justify-between">
@@ -277,6 +288,37 @@ export default function GoalsPage() {
             />
             <span className="text-[10px] text-muted">
               填总时长（如「共 10 小时」），不用拆成每天的时间安排
+            </span>
+          </Field>
+          <Field label="能力层级">
+            <select
+              className={inputCls}
+              value={form.capability_level}
+              onChange={(e) =>
+                setForm({ ...form, capability_level: e.target.value as Goal["capability_level"] })
+              }
+            >
+              {CAPABILITY_LEVELS.map((lv) => (
+                <option key={lv.key} value={lv.key}>
+                  {lv.key} · {lv.name}
+                </option>
+              ))}
+            </select>
+            <span className="text-[10px] leading-relaxed text-muted">
+              {CAPABILITY_LEVELS.find((lv) => lv.key === form.capability_level)?.description}
+            </span>
+          </Field>
+          <Field label="额外练习文件">
+            <label className="flex cursor-pointer items-center gap-2 text-[12px]">
+              <input
+                type="checkbox"
+                checked={form.generate_extra_exercises}
+                onChange={(e) => setForm({ ...form, generate_extra_exercises: e.target.checked })}
+              />
+              生成独立的额外练习文件（含参考答案，与教程内必要练习分开）
+            </label>
+            <span className="text-[10px] text-muted">
+              开启后会随教程生成一份 Markdown 练习集并在教程中建立双链；教程内的必要练习不受影响
             </span>
           </Field>
           <Button onClick={create} disabled={busy}>

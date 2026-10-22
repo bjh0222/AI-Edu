@@ -12,6 +12,7 @@ const STATUS_LABEL: Record<string, string> = {
   planning: "计划",
   acceptance_design: "验收标准",
   learning: "教程学习",
+  // 旧数据可能停留在已删除的阶段，保留中文标签
   practice: "实践",
   feedback: "反馈",
   assessment: "评估",
@@ -25,11 +26,6 @@ const PHASE_ORDER = [
   "planning",
   "acceptance_design",
   "learning",
-  "practice",
-  "feedback",
-  "assessment",
-  "reflection",
-  "knowledge_update",
 ];
 
 export default function Home() {
@@ -59,7 +55,7 @@ export default function Home() {
   }, []);
 
   const inProgress = goals.filter((g) => PHASE_ORDER.indexOf(g.status) > 0).length;
-  const done = goals.filter((g) => g.status === "reflection" || g.status === "knowledge_update").length;
+  const done = goals.filter((g) => g.status === "learning").length;
 
   return (
     <div className="mx-auto max-w-[1450px] px-6 py-8 md:px-10">
@@ -107,9 +103,9 @@ export default function Home() {
           <div className="mt-1 text-[11px] text-muted">已进入学习闭环</div>
         </div>
         <div className="rounded-2xl border border-line bg-panel px-4 py-3.5 shadow-[0_8px_28px_#1925420b]">
-          <div className="text-[12px] text-muted">完成复盘</div>
+          <div className="text-[12px] text-muted">已出教程</div>
           <div className="mt-2 text-[26px] font-bold tracking-tight">{done}</div>
-          <div className="mt-1 text-[11px] text-muted">证据驱动的学习</div>
+          <div className="mt-1 text-[11px] text-muted">教程已生成，可放入 Obsidian 学习</div>
         </div>
         <div className="rounded-2xl border border-line bg-panel px-4 py-3.5 shadow-[0_8px_28px_#1925420b]">
           <div className="text-[12px] text-muted">知识网络</div>
@@ -157,7 +153,7 @@ export default function Home() {
                   {g.application_context ? ` · ${g.application_context}` : ""}
                 </div>
                 <div className="mt-2 flex flex-wrap gap-1">
-                  {PHASE_ORDER.slice(0, 10).map((p, i) => (
+                  {PHASE_ORDER.map((p, i) => (
                     <span
                       key={p}
                       title={STATUS_LABEL[p]}

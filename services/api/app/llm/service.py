@@ -191,6 +191,9 @@ class AIService:
         except LLMError as exc:
             self._log_error(feature, exc)
             raise AIServiceError(str(exc)) from exc
+        if not isinstance(data, dict):
+            self._log_error(feature, LLMError("模型输出不是 JSON 对象"))
+            raise AIServiceError(f"模型输出不是 JSON 对象（实际为 {type(data).__name__}）")
         if usage is None:
             usage = estimate_usage(f"{system}\n{user}", json.dumps(data, ensure_ascii=False))
         self._record(
@@ -268,9 +271,56 @@ class AIService:
         )
         data = self._real_json(
             "section", system, user,
-            ("title", "explanation", "steps", "exercises", "variation_task", "sources", "mapping_criteria"),
+            ("title", "content", "mapping_criteria"),
             goal,
         )
+        # 可选内容块允许缺失/非法：归一化，不因没有例题或易错点而判定生成失败
+        if not isinstance(data.get("content"), list):
+            data["content"] = []
+        if not isinstance(data.get("key_takeaways"), list):
+            data["key_takeaways"] = []
+        if not isinstance(data.get("common_errors"), list):
+            data["common_errors"] = []
+        if not isinstance(data.get("prerequisite_refs"), list):
+            data["prerequisite_refs"] = []
+        if not isinstance(data.get("exercises"), list):
+            data["exercises"] = []
+        if not isinstance(data.get("sources"), list):
+            data["sources"] = []
+        if not isinstance(data.get("mapping_criteria"), list):
+            data["mapping_criteria"] = []
+        return data
+
+    def cheatsheet(self, goal, discipline, outline_items, materials_text: str = "") -> dict:
+        """知识速查文件（教程配套，总是生成）。失败抛 AIServiceError，由调用方兜底。"""
+        if self.is_demo:
+            return self._demo("cheatsheet", demo.cheatsheet(goal, discipline, outline_items), goal)
+        system, user = prompts.cheatsheet(goal, discipline, outline_items, materials_text)
+        data = self._real_json("cheatsheet", system, user, ("sections",), goal)
+        data["sections"] = [
+            {"heading": str(s.get("heading", "") or ""), "body": str(s.get("body", "") or "")}
+            for s in data.get("sections", []) or []
+            if isinstance(s, dict) and str(s.get("body", "")).strip()
+        ]
+        return data
+
+    def extra_exercises(self, goal, discipline, outline_items, materials_text: str = "") -> dict:
+        """独立额外练习文件（仅在用户开启选项时生成）。失败抛 AIServiceError，由调用方兜底。"""
+        if self.is_demo:
+            return self._demo("extra_exercises", demo.extra_exercises(goal, discipline, outline_items), goal)
+        system, user = prompts.extra_exercises(goal, discipline, outline_items, materials_text)
+        data = self._real_json("extra_exercises", system, user, ("exercises",), goal)
+        data["exercises"] = [
+            {
+                "number": int(e.get("number") or idx + 1),
+                "task": str(e.get("task", "") or ""),
+                "requirements": str(e.get("requirements", "") or ""),
+                "hint": str(e.get("hint", "") or ""),
+                "solution": str(e.get("solution", "") or ""),
+            }
+            for idx, e in enumerate(data.get("exercises", []) or [])
+            if isinstance(e, dict) and str(e.get("task", "")).strip()
+        ]
         return data
 
     def feedback(self, goal, criteria_list, task, attempt) -> dict:

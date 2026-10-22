@@ -56,7 +56,8 @@ def test_purge_goal_cascades_and_backs_up(client):
     assert body["deleted"]["tutorial_versions"] >= 1
     assert body["deleted"]["concepts"] > 0
     assert body["deleted"]["criteria"] > 0
-    assert body["deleted"]["practice_tasks"] >= 1
+    # 实践环节已删除：不再产生实践任务
+    assert body["deleted"]["practice_tasks"] == 0
 
     backup = Path(body["backup_path"])
     assert backup.exists(), "删除前必须写 JSON 备份"

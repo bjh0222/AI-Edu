@@ -6,6 +6,7 @@ from typing import Any
 
 from ..learning.disciplines import get_profile
 from ..learning.engine import PHASES
+from ..learning.levels import normalize_level
 
 
 def jload(text: str | None, default: Any = None) -> Any:
@@ -22,10 +23,13 @@ def jdump(obj: Any) -> str:
 
 
 def set_status_at_least(goal, phase: str) -> None:
+    # 已删除的阶段（practice/feedback/…）直接忽略，旧数据状态保持原值
+    if phase not in PHASES:
+        return
     try:
         cur = PHASES.index(goal.status)
     except ValueError:
-        cur = -1
+        cur = -1  # 旧数据可能停留在已删除的阶段，视为最前
     new = PHASES.index(phase)
     if new > cur:
         goal.status = phase
@@ -42,6 +46,9 @@ def goal_dict(goal) -> dict:
         "application_context": goal.application_context or "",
         "current_level": goal.current_level or "",
         "time_budget": goal.time_budget or "",
+        # 旧数据该字段为 NULL → 归一化默认层级
+        "capability_level": normalize_level(getattr(goal, "capability_level", None)),
+        "generate_extra_exercises": bool(getattr(goal, "generate_extra_exercises", False)),
         "status": goal.status,
         "user_notes": goal.user_notes or "",
         "archived": bool(goal.archived),
