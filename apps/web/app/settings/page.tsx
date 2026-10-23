@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { api, API_BASE, ApiError } from "@/lib/api";
-import type { Health } from "@/lib/types";
-import { Badge, Button, Card, inputCls } from "@/components/ui";
+import { useRef, useState } from "react";
+import { api, ApiError } from "@/lib/api";
+import { Button, Card, inputCls } from "@/components/ui";
+
+import AppearanceSettings from "@/components/AppearanceSettings";
+import ModelSettings from "@/components/ModelSettings";
 
 function errMsg(e: unknown): string {
   if (e instanceof ApiError) return e.message;
@@ -12,18 +14,11 @@ function errMsg(e: unknown): string {
 }
 
 export default function SettingsPage() {
-  const [health, setHealth] = useState<Health | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
-    api
-      .get<Health>("/api/health")
-      .then(setHealth)
-      .catch((e) => setError(errMsg(e)));
-  }, []);
 
   const exportData = async () => {
     setBusy("export");
@@ -86,7 +81,7 @@ export default function SettingsPage() {
         <div className="mb-2 text-[11px] font-bold tracking-[1.5px] text-brand">PREFERENCES</div>
         <h1 className="mb-2 text-[27px] font-bold tracking-tight">偏好设置</h1>
         <p className="max-w-[700px] text-[13px] leading-relaxed text-muted">
-          模型配置状态、数据备份与恢复。密钥只保存在服务端 `.env`，不会进入浏览器。
+          让学习环境适合你：外观、模型接入与学习数据备份。
         </p>
       </div>
 
@@ -102,30 +97,8 @@ export default function SettingsPage() {
       )}
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card title="模型服务" desc="当前后端连通状态">
-          <div className="grid gap-2 text-[12px]">
-            <div className="flex items-center justify-between rounded-lg border border-line px-3 py-2">
-              <span>后端地址</span>
-              <span className="font-mono text-[11px] text-muted">
-                {API_BASE || "同源 /api（Next 反向代理 → 127.0.0.1:8000）"}
-              </span>
-            </div>
-            <div className="flex items-center justify-between rounded-lg border border-line px-3 py-2">
-              <span>模型配置</span>
-              {health?.llm_configured ? (
-                <Badge tone="done">已配置</Badge>
-              ) : (
-                <Badge tone="warn">演示模式</Badge>
-              )}
-            </div>
-            {health?.demo && (
-              <div className="rounded-lg bg-[#fffaf0] p-3 text-[11px] leading-relaxed text-[#8a6411]">
-                未检测到模型密钥：教程、诊断、反馈等内容由演示生成器产生并在界面标注。要接入真实模型，在仓库根目录
-                `.env` 中填写 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`，然后重启后端。
-              </div>
-            )}
-          </div>
-        </Card>
+        <AppearanceSettings />
+        <div className="lg:row-span-2"><ModelSettings /></div>
 
         <Card title="数据备份" desc="导出 / 导入版本化 JSON；导入前自动备份当前数据">
           <div className="grid gap-3 text-[12px]">
@@ -156,14 +129,7 @@ export default function SettingsPage() {
           </div>
         </Card>
 
-        <Card title="开发环境说明" desc="本版本边界">
-          <ul className="grid gap-1.5 text-[11px] leading-relaxed text-muted">
-            <li>· 单用户本地运行：SQLite 数据库位于 `services/api/data/aiedu.db`。</li>
-            <li>· 公网部署前必须增加访问保护，本版本不宣称多用户安全。</li>
-            <li>· 演示模式内容仅用于体验流程，不代表真实模型输出。</li>
-            <li>· 生成内容需核验：模型自评不能作为准确性保证。</li>
-          </ul>
-        </Card>
+
       </div>
     </div>
   );

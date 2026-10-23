@@ -48,7 +48,7 @@ class Settings:
 
     @property
     def llm_configured(self) -> bool:
-        return bool(self.llm_base_url and self.llm_api_key and self.llm_model)
+        return bool(self.llm_base_url and self.llm_model and (self.llm_api_key or getattr(self, "allow_no_key", False)))
 
     @property
     def cors_origin_list(self) -> list[str]:

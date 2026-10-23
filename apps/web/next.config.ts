@@ -4,6 +4,8 @@ const nextConfig: NextConfig = {
   /* config options here */
   cacheComponents: true,
   partialPrefetching: true,
+  // Long model calls and multi-step generation must outlive the default 30s proxy timeout.
+  experimental: { proxyTimeout: 3_600_000 },
   turbopack: {
     rules: {
       "*.css": {
@@ -20,7 +22,7 @@ const nextConfig: NextConfig = {
     return [
       {
         source: "/api/:path*",
-        destination: "http://127.0.0.1:8000/api/:path*",
+        destination: `${process.env.API_BACKEND_URL ?? "http://127.0.0.1:8000"}/api/:path*`,
       },
     ];
   },

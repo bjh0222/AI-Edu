@@ -5,6 +5,7 @@ import Link from "next/link";
 import { api } from "@/lib/api";
 import type { Goal, Health, Knowledge } from "@/lib/types";
 import { Badge, Card, DemoNotice, Empty } from "@/components/ui";
+import { ContinueLearning } from "@/components/StudyNotes";
 
 const STATUS_LABEL: Record<string, string> = {
   goal_definition: "目标定义",
@@ -76,6 +77,7 @@ export default function Home() {
         </Link>
       </div>
 
+      <ContinueLearning />
       {error && (
         <div className="mb-4 rounded-xl border border-[#f3c4c4] bg-[#fff5f5] px-4 py-3 text-[12px] text-[#a33]">
           无法连接后端：{error}。请确认 API 服务（services/api）已启动，或在
