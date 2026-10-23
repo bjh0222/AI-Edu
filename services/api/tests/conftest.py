@@ -16,6 +16,7 @@ os.environ["BACKUP_DIR"] = (Path(__file__).resolve().parent / "test_backups").as
 os.environ["LLM_BASE_URL"] = ""
 os.environ["LLM_API_KEY"] = ""
 os.environ["LLM_MODEL"] = ""
+os.environ["MODEL_SETTINGS_FILE"] = str(Path(__file__).parent / "test_model_settings.json")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -25,6 +26,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 @pytest.fixture()
 def client():
+    Path(os.environ["MODEL_SETTINGS_FILE"]).unlink(missing_ok=True)
     from app.db import Base, engine
 
     Base.metadata.drop_all(bind=engine)
@@ -33,3 +35,4 @@ def client():
 
     with TestClient(app) as c:
         yield c
+    Path(os.environ["MODEL_SETTINGS_FILE"]).unlink(missing_ok=True)

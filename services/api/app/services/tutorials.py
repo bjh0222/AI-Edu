@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from ..config import settings
+from ..model_settings import runtime_settings
 from ..learning.disciplines import get_profile
 from ..learning.engine import check_structure
 from ..learning.levels import normalize_level
@@ -733,6 +733,7 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
             _fail_job(db, job_id, "no_outline")
             return
 
+        model_snapshot = runtime_settings()
         # 草稿版本：每完成一节即写入，避免中断丢失已完成章节
         base_version = version.version if version else 0
         draft = TutorialVersion(
@@ -740,8 +741,8 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
             version=base_version + 1,
             content_json=jdump({"outline": outline, "sections": []}),
             prompt_version="v1",
-            model_provider="demo" if not settings.llm_configured else "openai-compatible",
-            model_name=settings.llm_model or "demo",
+            model_provider="demo" if not model_snapshot.llm_configured else "openai-compatible",
+            model_name=model_snapshot.llm_model or "demo",
             quality_report=jdump({}),
             prompt_tokens=0,
             completion_tokens=0,

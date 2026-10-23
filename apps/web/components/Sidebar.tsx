@@ -71,7 +71,7 @@ export default function Sidebar() {
         <Link
           href="/"
           title="AI Edu · 返回工作台"
-          className="mb-2 grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-[#a89cff] to-[#5c4bf0] text-[15px] font-extrabold"
+          className="mb-2 grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-brand to-brand-dark text-[15px] font-extrabold"
         >
           E
         </Link>
@@ -86,7 +86,7 @@ export default function Sidebar() {
                 aria-label={it.label}
                 className={`grid h-10 w-10 place-items-center rounded-xl text-[16px] transition-colors ${
                   active
-                    ? "bg-[#6d5dfc36] text-white shadow-[inset_2px_0_#a99dff]"
+                    ? "bg-brand/20 text-white shadow-[inset_2px_0_var(--color-brand)]"
                     : "text-[#8a99b5] hover:bg-white/5 hover:text-white"
                 }`}
               >
@@ -102,7 +102,7 @@ export default function Sidebar() {
   return (
     <aside className="hidden w-[238px] shrink-0 flex-col gap-7 bg-navy px-3.5 py-6 text-[#eaf0fa] md:flex">
       <div className="flex items-center gap-2.5 px-2">
-        <div className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-[#a89cff] to-[#5c4bf0] text-[17px] font-extrabold">
+        <div className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-brand to-brand-dark text-[17px] font-extrabold">
           E
         </div>
         <div>
@@ -121,7 +121,7 @@ export default function Sidebar() {
                 href={it.href}
                 className={`flex items-center gap-3 rounded-[10px] px-3 py-3 text-left text-[13px] transition-colors ${
                   active
-                    ? "bg-[#6d5dfc36] text-white shadow-[inset_3px_0_#a99dff]"
+                    ? "bg-brand/20 text-white shadow-[inset_3px_0_var(--color-brand)]"
                     : "text-[#acbad0] hover:bg-white/5 hover:text-white"
                 }`}
               >
@@ -135,7 +135,7 @@ export default function Sidebar() {
                     href="/knowledge"
                     className={`rounded-lg px-2 py-1.5 text-[11px] ${
                       !currentDomain && !currentGoal
-                        ? "bg-[#6d5dfc36] font-semibold text-white"
+                        ? "bg-brand/20 font-semibold text-white"
                         : "text-[#94a4be] hover:bg-white/5 hover:text-white"
                     }`}
                   >
@@ -161,7 +161,7 @@ export default function Sidebar() {
                             title={d.name}
                             className={`flex-1 truncate rounded-lg px-1.5 py-1.5 text-[11px] ${
                               domainActive
-                                ? "bg-[#6d5dfc36] font-semibold text-white"
+                                ? "bg-brand/20 font-semibold text-white"
                                 : "text-[#94a4be] hover:bg-white/5 hover:text-white"
                             }`}
                           >
@@ -190,7 +190,7 @@ export default function Sidebar() {
                                       title={g.archived ? `${g.title}（已归档）` : g.title}
                                       className={`flex-1 truncate rounded-lg px-1.5 py-1 text-[10.5px] ${
                                         goalActive
-                                          ? "bg-[#6d5dfc36] font-semibold text-white"
+                                          ? "bg-brand/20 font-semibold text-white"
                                           : g.archived
                                             ? "text-[#5f6d87] hover:bg-white/5 hover:text-[#94a4be]"
                                             : "text-[#8a99b5] hover:bg-white/5 hover:text-white"

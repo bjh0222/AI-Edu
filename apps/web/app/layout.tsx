@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import { Suspense } from "react";
 import "./globals.css";
 import Sidebar from "@/components/Sidebar";
+import ThemeSync from "@/components/ThemeSync";
+import { themeBootstrap } from "@/lib/theme";
 
 export const metadata: Metadata = {
   title: "AI Edu · 学习工作台",
@@ -10,8 +12,10 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="zh-CN" className="h-full antialiased">
+    <html lang="zh-CN" className="h-full antialiased" suppressHydrationWarning>
+      <head><script dangerouslySetInnerHTML={{ __html: themeBootstrap }} /></head>
       <body className="min-h-full">
+        <ThemeSync />
         <div className="mx-auto flex min-h-screen max-w-[1450px]">
           {/* Sidebar 依赖 useSearchParams（知识网络子目录高亮），必须包在 Suspense 内：
               否则静态外壳无法预渲染，且首屏会在客户端挂起。 */}
