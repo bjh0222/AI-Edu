@@ -52,6 +52,8 @@ def goal_dict(goal) -> dict:
         "status": goal.status,
         "user_notes": goal.user_notes or "",
         "archived": bool(goal.archived),
+        "completed": bool(getattr(goal, "completed", False)),
+        "completed_at": getattr(goal, "completed_at", "") or "",
         "created_at": goal.created_at,
         "updated_at": goal.updated_at,
     }

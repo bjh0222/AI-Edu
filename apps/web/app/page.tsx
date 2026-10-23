@@ -6,6 +6,7 @@ import { api } from "@/lib/api";
 import type { Goal, Health, Knowledge } from "@/lib/types";
 import { Badge, Card, DemoNotice, Empty } from "@/components/ui";
 import { ContinueLearning } from "@/components/StudyNotes";
+import { Button, inputCls } from "@/components/ui";
 
 const STATUS_LABEL: Record<string, string> = {
   goal_definition: "目标定义",
@@ -29,24 +30,39 @@ const PHASE_ORDER = [
   "learning",
 ];
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function createdDays(goal: Goal) {
+  const time = goal.created_at ? new Date(goal.created_at).getTime() : NaN;
+  return Number.isFinite(time) ? Math.max(0, Math.floor((Date.now() - time) / DAY_MS)) : 0;
+}
+
 export default function Home() {
   const [goals, setGoals] = useState<Goal[]>([]);
   const [health, setHealth] = useState<Health | null>(null);
   const [knowledge, setKnowledge] = useState<Knowledge | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [sortOrder, setSortOrder] = useState<"desc" | "asc">("desc");
+  const [profile, setProfile] = useState("");
+  const [profileDraft, setProfileDraft] = useState("");
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [profileError, setProfileError] = useState("");
 
   useEffect(() => {
     (async () => {
       try {
-        const [g, h, k] = await Promise.all([
+        const [g, h, k, setting] = await Promise.all([
           api.get<Goal[]>("/api/goals"),
           api.get<Health>("/api/health"),
           api.get<Knowledge>("/api/knowledge"),
+          api.get<{ user_profile: string }>("/api/settings/models"),
         ]);
         setGoals(g);
         setHealth(h);
         setKnowledge(k);
+        setProfile(setting.user_profile);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {
@@ -57,6 +73,91 @@ export default function Home() {
 
   const inProgress = goals.filter((g) => PHASE_ORDER.indexOf(g.status) > 0).length;
   const done = goals.filter((g) => g.status === "learning").length;
+  const sortedGoals = [...goals].sort((a, b) => {
+    const at = a.created_at ?? "";
+    const bt = b.created_at ?? "";
+    return sortOrder === "desc" ? bt.localeCompare(at) : at.localeCompare(bt);
+  });
+  const activeGoals = sortedGoals.filter((g) => !g.completed);
+  const completedGoals = sortedGoals.filter((g) => g.completed);
+
+  const saveProfile = async () => {
+    setProfileBusy(true);
+    setProfileError("");
+    try {
+      const setting = await api.put<{ user_profile: string }>("/api/settings/models/user-profile", {
+        content: profileDraft,
+      });
+      setProfile(setting.user_profile);
+      setProfileOpen(false);
+    } catch (e) {
+      setProfileError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setProfileBusy(false);
+    }
+  };
+
+  const setCompletion = async (goal: Goal, completed: boolean) => {
+    if (
+      completed &&
+      !window.confirm(`确认已完成「${goal.title}」？完成后会移入右栏，可随时恢复为未完成。`)
+    ) {
+      return;
+    }
+    setError("");
+    try {
+      await api.patch(`/api/goals/${goal.id}`, { completed });
+      setGoals((items) => items.map((item) => (item.id === goal.id ? { ...item, completed } : item)));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const renderGoal = (g: Goal, completed: boolean) => (
+    <article
+      key={g.id}
+      className={`rounded-xl border p-4 transition-colors ${
+        completed ? "border-[#c9e8de] bg-[#f7fbfa]" : "border-line hover:border-[#c9c2ff] hover:bg-[#faf9ff]"
+      }`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <Link href={`/goals/${g.id}`} className="text-[13px] font-bold hover:text-brand">
+          {g.title}
+        </Link>
+        <button
+          type="button"
+          onClick={() => void setCompletion(g, !completed)}
+          className={`shrink-0 rounded-lg border px-2 py-1 text-[10px] font-semibold transition-colors ${
+            completed
+              ? "border-line bg-white text-muted hover:text-brand"
+              : "border-[#b8e5d8] bg-[#eefaf6] text-[#128b78] hover:border-[#128b78]"
+          }`}
+        >
+          {completed ? "恢复未完成" : "确认完成"}
+        </button>
+      </div>
+      <div className="mt-1.5 text-[11px] text-muted">
+        {g.domain_name}
+        {g.application_context ? ` · ${g.application_context}` : ""}
+      </div>
+      {!completed && (
+        <div className="mt-1.5 text-[11px] font-semibold text-[#a96a08]">
+          已创建 {createdDays(g)} 天
+        </div>
+      )}
+      <div className="mt-2 flex flex-wrap gap-1">
+        {PHASE_ORDER.map((p, i) => (
+          <span
+            key={p}
+            title={STATUS_LABEL[p]}
+            className={`h-1 w-4 rounded-full ${
+              i <= PHASE_ORDER.indexOf(g.status) ? "bg-brand" : "bg-[#e7e9f3]"
+            }`}
+          />
+        ))}
+      </div>
+    </article>
+  );
 
   return (
     <div className="mx-auto max-w-[1450px] px-6 py-8 md:px-10">
@@ -69,15 +170,62 @@ export default function Home() {
             先明确要解决的问题，再学习真正需要的知识。每一次实践，都会成为下一次独立解决问题的起点。
           </p>
         </div>
-        <Link
-          href="/goals"
-          className="rounded-[10px] bg-brand px-4 py-2.5 text-[12px] font-semibold text-white shadow-[0_5px_15px_#6d5dfc2a] hover:bg-brand-dark"
-        >
-          ＋ 创建学习目标
-        </Link>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setProfileDraft(profile);
+              setProfileError("");
+              setProfileOpen(true);
+            }}
+            className="rounded-[10px] border border-line bg-white px-4 py-2.5 text-[12px] font-semibold text-[#39455d] transition-colors hover:border-[#c9c3ff] hover:text-brand"
+          >
+            用户画像
+          </button>
+          <Link
+            href="/goals"
+            className="rounded-[10px] bg-brand px-4 py-2.5 text-[12px] font-semibold text-white shadow-[0_5px_15px_#6d5dfc2a] hover:bg-brand-dark"
+          >
+            ＋ 创建学习目标
+          </Link>
+        </div>
       </div>
 
       <ContinueLearning />
+      {profileOpen && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-[#1118274d] p-4">
+          <div className="w-full max-w-[620px] rounded-2xl border border-line bg-panel p-5 shadow-[0_20px_60px_#19254226]">
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-[16px] font-bold text-ink">用户画像</h2>
+              <button
+                type="button"
+                onClick={() => setProfileOpen(false)}
+                className="rounded-lg px-2 py-1 text-[12px] font-semibold text-muted hover:text-brand"
+              >
+                关闭
+              </button>
+            </div>
+            <textarea
+              className={inputCls}
+              rows={9}
+              value={profileDraft}
+              onChange={(event) => setProfileDraft(event.target.value)}
+              placeholder="例如：非科班转行、偏好可运行示例、希望少用专业术语。"
+            />
+            {profileError && (
+              <p role="alert" className="mt-2 text-[12px] text-[#a33]">{profileError}</p>
+            )}
+            <div className="mt-4 flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => setProfileOpen(false)}>
+                取消
+              </Button>
+              <Button onClick={() => void saveProfile()} disabled={profileBusy}>
+                {profileBusy ? "保存中…" : "保存画像"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
       {error && (
         <div className="mb-4 rounded-xl border border-[#f3c4c4] bg-[#fff5f5] px-4 py-3 text-[12px] text-[#a33]">
           无法连接后端：{error}。请确认 API 服务（services/api）已启动，或在
@@ -124,9 +272,20 @@ export default function Home() {
         title="当前学习路径"
         desc="以真实项目为牵引，逐步减少 AI 提示。点击目标进入闭环工作区。"
         actions={
-          <Link href="/goals" className="text-[12px] font-semibold text-brand hover:underline">
-            全部目标 →
-          </Link>
+          <div className="flex items-center gap-3">
+            <select
+              aria-label="按创建时间排序"
+              className="rounded-lg border border-line bg-panel px-2 py-1 text-[11px]"
+              value={sortOrder}
+              onChange={(e) => setSortOrder(e.target.value as "desc" | "asc")}
+            >
+              <option value="desc">创建时间：新→旧</option>
+              <option value="asc">创建时间：旧→新</option>
+            </select>
+            <Link href="/goals" className="text-[12px] font-semibold text-brand hover:underline">
+              全部目标 →
+            </Link>
+          </div>
         }
       >
         {loading ? (
@@ -139,34 +298,29 @@ export default function Home() {
             </Link>
           </div>
         ) : (
-          <div className="grid gap-3 lg:grid-cols-2">
-            {goals.map((g) => (
-              <Link
-                key={g.id}
-                href={`/goals/${g.id}`}
-                className="block rounded-xl border border-line p-4 transition-colors hover:border-[#c9c2ff] hover:bg-[#faf9ff]"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <b className="text-[13px]">{g.title}</b>
-                  <Badge tone="active">{STATUS_LABEL[g.status] ?? g.status}</Badge>
-                </div>
-                <div className="mt-1.5 text-[11px] text-muted">
-                  {g.domain_name}
-                  {g.application_context ? ` · ${g.application_context}` : ""}
-                </div>
-                <div className="mt-2 flex flex-wrap gap-1">
-                  {PHASE_ORDER.map((p, i) => (
-                    <span
-                      key={p}
-                      title={STATUS_LABEL[p]}
-                      className={`h-1 w-4 rounded-full ${
-                        i <= PHASE_ORDER.indexOf(g.status) ? "bg-brand" : "bg-[#e7e9f3]"
-                      }`}
-                    />
-                  ))}
-                </div>
-              </Link>
-            ))}
+          <div className="grid gap-4 lg:grid-cols-2">
+            <section aria-label="未完成学习路径">
+              <div className="mb-2 flex items-center justify-between">
+                <h3 className="text-[12px] font-bold text-ink">未完成</h3>
+                <Badge tone="active">{activeGoals.length} 个</Badge>
+              </div>
+              <div className="grid gap-2.5">
+                {activeGoals.length === 0 ? (
+                  <Empty>没有未完成的学习路径。</Empty>
+                ) : activeGoals.map((g) => renderGoal(g, false))}
+              </div>
+            </section>
+            <section aria-label="已完成学习路径">
+              <div className="mb-2 flex items-center justify-between">
+                <h3 className="text-[12px] font-bold text-ink">已完成</h3>
+                <Badge tone="done">{completedGoals.length} 个</Badge>
+              </div>
+              <div className="grid gap-2.5">
+                {completedGoals.length === 0 ? (
+                  <Empty>确认完成的学习路径会显示在这里。</Empty>
+                ) : completedGoals.map((g) => renderGoal(g, true))}
+              </div>
+            </section>
           </div>
         )}
       </Card>

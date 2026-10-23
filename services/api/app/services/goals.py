@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from fastapi import HTTPException
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from ..learning.disciplines import get_profile
@@ -265,6 +266,10 @@ def patch_goal(db: Session, goal_id: str, payload) -> dict:
     extra = getattr(payload, "generate_extra_exercises", None)
     if extra is not None:
         goal.generate_extra_exercises = bool(extra)
+    completed = getattr(payload, "completed", None)
+    if completed is not None:
+        goal.completed = bool(completed)
+        goal.completed_at = datetime.now(timezone.utc).isoformat() if completed else ""
     db.commit()
     return goal_dict(goal)
 

@@ -26,6 +26,8 @@ export interface Goal {
   status: string;
   user_notes: string;
   archived: boolean;
+  completed: boolean;
+  completed_at: string;
   created_at?: string;
   updated_at?: string;
 }

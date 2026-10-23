@@ -47,6 +47,7 @@ class GoalPatch(BaseModel):
     time_budget: Optional[str] = None
     capability_level: Optional[Literal["L1", "L2", "L3"]] = None
     generate_extra_exercises: Optional[bool] = None
+    completed: Optional[bool] = None
     status: Optional[str] = None
     user_notes: Optional[str] = None
 
@@ -65,6 +66,8 @@ class GoalOut(BaseModel):
     status: str
     user_notes: str
     archived: bool
+    completed: bool = False
+    completed_at: str = ""
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 

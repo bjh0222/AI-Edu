@@ -42,6 +42,8 @@ class LearningGoal(Base, TimestampMixin):
     status = Column(String(30), default="goal_definition")
     user_notes = Column(Text, default="")
     archived = Column(Boolean, default=False)
+    completed = Column(Boolean, default=False)
+    completed_at = Column(String(40), default="")
 
 
 class GoalAssessment(Base, TimestampMixin):

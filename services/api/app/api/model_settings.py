@@ -1,6 +1,6 @@
 """Model setup, discovery and real generation probes (no demo fallback)."""
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..config import settings
 from .. import model_settings as store
@@ -30,6 +30,15 @@ def save_model(profile: store.ModelProfile):
 
 class Selection(BaseModel):
     active_id: str | None = None
+
+
+class UserProfile(BaseModel):
+    content: str = Field(default="", max_length=4000)
+
+
+@router.put("/user-profile")
+def update_user_profile(payload: UserProfile):
+    return store.save_user_profile(payload.content)
 
 
 @router.post("/activate")

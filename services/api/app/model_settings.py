@@ -51,13 +51,19 @@ def read_config() -> dict:
     with _lock:
         path = config_path()
         if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
+            config = json.loads(path.read_text(encoding="utf-8"))
+            config.setdefault("user_profile", "")
+            return config
         profiles = []
         if settings.llm_configured:
             profiles.append(dict(id="environment", name="环境变量配置", base_url=settings.llm_base_url,
                                  model=settings.llm_model, api_key=settings.llm_api_key,
                                  timeout=settings.llm_timeout, temperature=0.3, json_mode=True))
-        return {"active_id": "environment" if profiles else None, "profiles": profiles}
+        return {
+            "active_id": "environment" if profiles else None,
+            "profiles": profiles,
+            "user_profile": "",
+        }
 
 
 def write_config(config: dict) -> None:
@@ -75,10 +81,18 @@ def write_config(config: dict) -> None:
 
 def public_config() -> dict:
     config = read_config()
-    return {"active_id": config["active_id"], "profiles": [
+    return {"active_id": config["active_id"], "user_profile": config.get("user_profile", ""), "profiles": [
         {**{k: v for k, v in p.items() if k != "api_key"}, "has_key": bool(p.get("api_key"))}
         for p in config["profiles"]
     ]}
+
+
+def save_user_profile(content: str) -> dict:
+    with _lock:
+        config = read_config()
+        config["user_profile"] = content.strip()[:4000]
+        write_config(config)
+    return public_config()
 
 
 def resolve_profile(profile: ModelProfile) -> dict:

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 
 from ..learning.levels import level_prompt_block
+from ..model_settings import read_config
 
 SYSTEM = (
     "你是 AI Edu 的学习引擎与资深教学设计者。你帮助用户把学习目标转化为可验收、可实践、可迁移的学习闭环，"
@@ -37,13 +38,17 @@ WIKILINK_RULE = (
 
 
 def _goal_ctx(goal) -> dict:
-    return {
+    context = {
         "title": goal.title,
         "motivation": goal.motivation,
         "application_context": goal.application_context,
         "current_level": goal.current_level,
         "time_budget": goal.time_budget,  # 可投入总时间（如「共 10 小时」），不是每日日程
     }
+    user_profile = str(read_config().get("user_profile", "")).strip()
+    if user_profile:
+        context["user_profile"] = user_profile
+    return context
 
 
 def _capability(goal) -> str:
