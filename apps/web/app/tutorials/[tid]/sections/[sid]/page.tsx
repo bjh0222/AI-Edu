@@ -6,7 +6,7 @@ import { useParams } from "next/navigation";
 import { api, ApiError } from "@/lib/api";
 import type { Criterion, GoalUsage, SectionDetail, Tutorial } from "@/lib/types";
 import { fmtTokens, usageSourceLabel } from "@/lib/format";
-import { SectionContent, TokenLine } from "@/components/tutorial";
+import { SectionContent, TeachingPlanNotice, TokenLine } from "@/components/tutorial";
 import { FeedbackForm } from "@/components/FeedbackForm";
 import StudyNotes from "@/components/StudyNotes";
 import { Badge, Button, Card, DemoNotice } from "@/components/ui";
@@ -169,6 +169,7 @@ function SectionDetailView() {
             }
           >
             <DemoNotice show={!!isDemo}>演示生成内容，关键事实与命令需人工核验。</DemoNotice>
+            <TeachingPlanNotice plan={tutorial?.current_version?.content.teaching_plan} />
             <div className="reading-content"><SectionContent section={section} criteria={criteria} /></div>
             <div className="mt-3">
               <TokenLine

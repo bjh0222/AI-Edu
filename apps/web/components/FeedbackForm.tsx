@@ -95,7 +95,7 @@ export function FeedbackForm({
     <div className="rounded-xl border border-line bg-[#fbfcff] p-3">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <b className="text-[11px]">{title}</b>
-        <span className="text-[10px] text-muted">测试版反馈将用于改进与后续训练数据</span>
+        <span className="text-[10px] text-muted">反馈首先用于当前教程；不会自动修改长期画像</span>
       </div>
       <div className="flex flex-wrap items-center gap-2">
         {ratingBtn(1, "👍 有帮助")}
@@ -120,7 +120,7 @@ export function FeedbackForm({
       <textarea
         className={`${inputCls} mt-2`}
         rows={2}
-        placeholder="补充说明（可选）：哪里不清楚、哪里最有帮助？"
+        placeholder="补充说明（可选）：当前教程哪里不清楚、哪里最有帮助？长期要求请到首页画像修改。"
         value={comment}
         onChange={(e) => setComment(e.target.value)}
       />

@@ -198,6 +198,37 @@ export interface QualityReport {
   coverage?: Record<string, number>;
 }
 
+export interface TeachingProfileRule {
+  id: string;
+  text: string;
+  rule_type: "forbidden" | "required" | "default" | "conditional";
+  hard: boolean;
+  condition: string;
+}
+
+export interface TeachingPlan {
+  rules?: TeachingProfileRule[];
+  rules_applied?: string[];
+  decisions?: string[];
+  task_overrides?: string[];
+  unresolved_conflicts?: string[];
+  source?: string;
+}
+
+export interface ProfileSuggestion {
+  summary: string;
+  profile_text: string;
+  evidence: string;
+  notes: string;
+}
+
+export interface ProfileSuggestionState {
+  eligible: boolean;
+  completed_count: number;
+  suggestion: ProfileSuggestion | null;
+  error?: string;
+}
+
 export interface TutorialVersion {
   id: string;
   tutorial_id: string;
@@ -205,6 +236,7 @@ export interface TutorialVersion {
   content: {
     outline: OutlineItem[];
     sections: Section[];
+    teaching_plan?: TeachingPlan;
     cheatsheet?: Cheatsheet | null;
     extra_exercises?: ExtraExercises | null;
   };

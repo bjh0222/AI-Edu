@@ -304,6 +304,7 @@ class ExtraExercisesOut(BaseModel):
 class TutorialContent(BaseModel):
     outline: list[OutlineItem] = []
     sections: list[SectionOut] = []
+    teaching_plan: dict[str, Any] = Field(default_factory=dict)
     # 配套文件（可能为 None：速查未生成 / 用户未开启额外练习）
     cheatsheet: Optional[CheatsheetOut] = None
     extra_exercises: Optional[ExtraExercisesOut] = None

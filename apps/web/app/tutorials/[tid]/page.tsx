@@ -6,7 +6,7 @@ import { useParams } from "next/navigation";
 import { api, ApiError, downloadFile } from "@/lib/api";
 import type { Criterion, Goal, GoalUsage, Tutorial } from "@/lib/types";
 import { featureLabel, fmtTokens, usageSourceLabel } from "@/lib/format";
-import { OutlineList, SectionContent, TokenLine } from "@/components/tutorial";
+import { OutlineList, SectionContent, TeachingPlanNotice, TokenLine } from "@/components/tutorial";
 import { FeedbackForm } from "@/components/FeedbackForm";
 import { Badge, Button, Card, DemoNotice, Empty } from "@/components/ui";
 
@@ -254,6 +254,7 @@ function TutorialDetail() {
             }
           >
             <DemoNotice show={!!isDemo}>教程由演示生成器产生，关键事实与命令需人工核验。</DemoNotice>
+            <TeachingPlanNotice plan={content?.teaching_plan} />
 
             <div className="mb-3">
               <div className="mb-1.5 text-[11px] font-bold text-[#5a6a86]">

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import type { ContentBlock, Criterion, OutlineItem, Section, TokenUsage } from "@/lib/types";
+import type { ContentBlock, Criterion, OutlineItem, Section, TeachingPlan, TokenUsage } from "@/lib/types";
 import { CONTENT_TYPE_LABELS } from "@/lib/types";
 import { fmtTokens, usageSourceLabel } from "@/lib/format";
 
@@ -246,5 +246,65 @@ export function TokenLine({
         )}
       </span>
     </div>
+  );
+}
+
+const RULE_TYPE_LABELS: Record<string, string> = {
+  forbidden: "禁止",
+  required: "必须",
+  default: "默认偏好",
+  conditional: "条件规则",
+};
+
+/** 本次教程实际采用的教学规则；用 details 收起，不挤占正文阅读空间。 */
+export function TeachingPlanNotice({ plan }: { plan?: TeachingPlan }) {
+  const rules = plan?.rules ?? [];
+  const decisions = plan?.decisions ?? [];
+  const overrides = plan?.task_overrides ?? [];
+  const conflicts = plan?.unresolved_conflicts ?? [];
+  if (!rules.length && !decisions.length && !overrides.length && !conflicts.length) return null;
+
+  return (
+    <details className="mb-3 rounded-lg border border-line bg-[#fbfcff] px-3 py-2">
+      <summary className="cursor-pointer text-[11px] font-semibold text-[#39455d]">
+        本次个性化教学要求
+      </summary>
+      <div className="mt-2 grid gap-2 text-[10px] leading-relaxed text-[#5a6a86]">
+        {rules.length > 0 && (
+          <ul className="grid gap-1">
+            {rules.map((rule) => (
+              <li key={rule.id}>
+                <b className="text-[#6255e8]">{RULE_TYPE_LABELS[rule.rule_type] ?? rule.rule_type}</b>
+                {rule.hard ? "（硬约束）" : ""}：{rule.text}
+              </li>
+            ))}
+          </ul>
+        )}
+        {decisions.length > 0 && (
+          <div>
+            <b>本次教学决策</b>
+            <ul className="mt-1 grid gap-0.5">
+              {decisions.map((item, index) => <li key={index}>· {item}</li>)}
+            </ul>
+          </div>
+        )}
+        {overrides.length > 0 && (
+          <div>
+            <b>本次任务覆盖的默认偏好</b>
+            <ul className="mt-1 grid gap-0.5">
+              {overrides.map((item, index) => <li key={index}>· {item}</li>)}
+            </ul>
+          </div>
+        )}
+        {conflicts.length > 0 && (
+          <div className="text-[#a33]">
+            <b>未消解的硬约束冲突</b>
+            <ul className="mt-1 grid gap-0.5">
+              {conflicts.map((item, index) => <li key={index}>· {item}</li>)}
+            </ul>
+          </div>
+        )}
+      </div>
+    </details>
   );
 }

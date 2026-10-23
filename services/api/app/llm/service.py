@@ -374,3 +374,33 @@ class AIService:
             return self._demo("chat", {"answer": demo.chat(goal, question, context)}, goal)
         system, user = prompts.chat(goal, question, context)
         return self._real_json("chat", system, user, ("answer",), goal)
+
+    def user_profile_suggestion(self, context: dict) -> dict:
+        """每 N 次完整学习后的候选画像；必须由用户确认后才可保存。"""
+        if self.is_demo:
+            goals = context.get("completed_goals", [])
+            feedback = context.get("recent_feedback", [])
+            notes = [str(item.get("comment", "")).strip() for item in feedback if str(item.get("comment", "")).strip()]
+            text = "\n".join(
+                [
+                    "重视从真实任务出发组织教程。",
+                    "练习和结果检查要围绕已完成目标中的关键操作。",
+                    *(f"反馈中反复关注：{note}" for note in notes[:3]),
+                ]
+            ) or "现有证据不足，暂不提出画像修改建议。"
+            output = {
+                "summary": "根据最近完整学习记录整理的候选教学画像。",
+                "profile_text": text,
+                "evidence": "；".join(str(item.get("title", "")) for item in goals[:5]),
+                "notes": "演示建议，仅用于测试流程，不自动保存。",
+            }
+            return self._demo("user_profile_suggestion", output, None)
+        system, user = prompts.user_profile_suggestion(context)
+        data = self._real_json(
+            "user_profile_suggestion", system, user,
+            ("summary", "profile_text", "evidence", "notes"),
+            None,
+        )
+        if not isinstance(data.get("profile_text"), str) or not data["profile_text"].strip():
+            raise AIServiceError("画像建议缺少候选画像文本")
+        return data

@@ -13,6 +13,7 @@ from ..model_settings import runtime_settings
 from ..learning.disciplines import get_profile
 from ..learning.engine import check_structure
 from ..learning.levels import normalize_level
+from ..learning.teaching_profile import normalize_teaching_plan
 from ..llm.service import AIService, AIServiceError
 from ..models import GenerationJob, ModelCallLog, Tutorial, TutorialVersion
 from . import goals as goals_service
@@ -233,7 +234,8 @@ def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
         outline = _normalize_outline_items(raw_sections[:MAX_SECTIONS_HINT])
         if not outline:
             raise AIServiceError("模型输出缺少有效章节大纲，请重试")
-        content = {"outline": outline, "sections": []}
+        teaching_plan = normalize_teaching_plan(data.get("teaching_plan"))
+        content = {"teaching_plan": teaching_plan, "outline": outline, "sections": []}
         usage = dict(ai.usage_last)
 
         version = TutorialVersion(
@@ -729,6 +731,7 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         version = db.get(TutorialVersion, tutorial.current_version_id) if tutorial.current_version_id else None
         content = jload(version.content_json, {"outline": [], "sections": []}) if version else {}
         outline = content.get("outline", [])
+        teaching_plan = content.get("teaching_plan") or normalize_teaching_plan({})
         if not outline:
             _fail_job(db, job_id, "no_outline")
             return
@@ -739,7 +742,7 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         draft = TutorialVersion(
             tutorial_id=tutorial.id,
             version=base_version + 1,
-            content_json=jdump({"outline": outline, "sections": []}),
+            content_json=jdump({"teaching_plan": teaching_plan, "outline": outline, "sections": []}),
             prompt_version="v1",
             model_provider="demo" if not model_snapshot.llm_configured else "openai-compatible",
             model_name=model_snapshot.llm_model or "demo",
@@ -776,7 +779,7 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
                     goal_id=goal.id,
                     job_id=job_id,
                     index=idx,
-                    item=item,
+                    item={**item, "_teaching_plan": teaching_plan},
                     criteria_dicts=criteria_dicts,
                     # 并发下「前置章节标题」取大纲静态切片，避免依赖完成顺序
                     prior_titles=outline_titles[:idx],
@@ -825,7 +828,7 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         _update_job(db, job_id, progress=90, stage="质量检查")
         db.commit()
         sections = [results[i]["section"] for i in sorted(results)]
-        new_content = {"outline": outline, "sections": sections}
+        new_content = {"teaching_plan": teaching_plan, "outline": outline, "sections": sections}
         quality = check_structure(new_content, criteria_dicts)
         draft.quality_report = jdump(quality)
         tutorial.status = "drafted" if quality.get("passed") else "drafted_with_issues"
@@ -935,6 +938,7 @@ def regenerate_section(db: Session, tutorial_id: str, section_id: str, ai: AISer
     if target_idx is None:
         raise HTTPException(status_code=404, detail={"code": "section_not_found", "message": "章节不存在"})
     item = outline[target_idx] if target_idx < len(outline) else {"title": sections[target_idx].get("title", ""), "criteria_ids": sections[target_idx].get("mapping_criteria", [])}
+    item = {**item, "_teaching_plan": content.get("teaching_plan") or normalize_teaching_plan({})}
     mapped = [criteria_by_id[cid] for cid in item.get("criteria_ids", []) if cid in criteria_by_id]
     ai.tutorial_id = tutorial.id
     ai.section_id = section_id

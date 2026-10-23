@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { api } from "@/lib/api";
-import type { Goal, Health, Knowledge } from "@/lib/types";
+import type { Goal, Health, Knowledge, ProfileSuggestionState } from "@/lib/types";
 import { Badge, Card, DemoNotice, Empty } from "@/components/ui";
 import { ContinueLearning } from "@/components/StudyNotes";
 import { Button, inputCls } from "@/components/ui";
@@ -49,15 +49,17 @@ export default function Home() {
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileBusy, setProfileBusy] = useState(false);
   const [profileError, setProfileError] = useState("");
+  const [suggestion, setSuggestion] = useState<ProfileSuggestionState | null>(null);
 
   useEffect(() => {
     (async () => {
       try {
-        const [g, h, k, setting] = await Promise.all([
+        const [g, h, k, setting, suggestionData] = await Promise.all([
           api.get<Goal[]>("/api/goals"),
           api.get<Health>("/api/health"),
           api.get<Knowledge>("/api/knowledge"),
           api.get<{ user_profile: string }>("/api/settings/models"),
+          api.get<ProfileSuggestionState>("/api/settings/models/user-profile-suggestion").catch(() => null),
         ]);
         setGoals(g);
         setHealth(h);
@@ -80,6 +82,16 @@ export default function Home() {
   });
   const activeGoals = sortedGoals.filter((g) => !g.completed);
   const completedGoals = sortedGoals.filter((g) => g.completed);
+
+
+  const loadSuggestion = async () => {
+    setSuggestion(await api.get<ProfileSuggestionState>("/api/settings/models/user-profile-suggestion"));
+  };
+
+  const dismissSuggestion = async () => {
+    const next = await api.post<ProfileSuggestionState>("/api/settings/models/user-profile-suggestion/dismiss", {});
+    setSuggestion(next);
+  };
 
   const saveProfile = async () => {
     setProfileBusy(true);
@@ -177,6 +189,7 @@ export default function Home() {
               setProfileDraft(profile);
               setProfileError("");
               setProfileOpen(true);
+              void loadSuggestion();
             }}
             className="rounded-[10px] border border-line bg-white px-4 py-2.5 text-[12px] font-semibold text-[#39455d] transition-colors hover:border-[#c9c3ff] hover:text-brand"
           >
@@ -205,12 +218,38 @@ export default function Home() {
                 关闭
               </button>
             </div>
+            {suggestion?.eligible && suggestion.suggestion && (
+              <div className="mb-3 rounded-xl border border-[#e7e3ff] bg-[#f7f6ff] p-3">
+                <b className="text-[11px]">完成 {suggestion.completed_count} 次学习后的画像建议</b>
+                <p className="mt-1 text-[11px] text-muted">{suggestion.suggestion.summary}</p>
+                <pre className="mt-2 whitespace-pre-wrap text-[11px] leading-relaxed text-[#33415c]">
+{suggestion.suggestion.profile_text}
+                </pre>
+                <p className="mt-2 text-[10px] text-muted">
+                  依据：{suggestion.suggestion.evidence || "无"} · {suggestion.suggestion.notes}
+                </p>
+                <div className="mt-2 flex gap-2">
+                  <Button
+                    onClick={() => setProfileDraft(suggestion.suggestion?.profile_text ?? profileDraft)}
+                  >
+                    填入草稿
+                  </Button>
+                  <Button variant="secondary" onClick={() => void dismissSuggestion()}>
+                    忽略
+                  </Button>
+                </div>
+              </div>
+            )}
+            <p className="mb-3 text-[11px] leading-relaxed text-muted">
+              写长期教学要求：一次一行。以「不要 / 禁止」开头会视为禁区，含「必须 / 务必」会视为必须原则，
+              「当 / 如果 / 遇到」开头的偏好会按条件处理。本次任务的特殊要求请写在具体学习目标里。
+            </p>
             <textarea
               className={inputCls}
               rows={9}
               value={profileDraft}
               onChange={(event) => setProfileDraft(event.target.value)}
-              placeholder="例如：非科班转行、偏好可运行示例、希望少用专业术语。"
+              placeholder="例如：非科班转行，必须解释关键推理步骤，遇到抽象概念先给一个可运行示例，不要跳过前置概念。"
             />
             {profileError && (
               <p role="alert" className="mt-2 text-[12px] text-[#a33]">{profileError}</p>

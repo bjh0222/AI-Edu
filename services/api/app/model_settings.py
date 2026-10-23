@@ -157,3 +157,11 @@ def runtime_settings():
     snapshot = copy.copy(settings)
     snapshot.llm_base_url = snapshot.llm_api_key = snapshot.llm_model = ""
     return snapshot
+
+
+def mark_profile_suggestion_seen(completed_count: int) -> None:
+    """记录已提醒到的完成数，避免同一轮学习重复弹出建议。"""
+    with _lock:
+        config = read_config()
+        config["profile_suggestion_seen_count"] = max(0, int(completed_count))
+        write_config(config)
