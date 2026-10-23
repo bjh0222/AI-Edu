@@ -20,6 +20,10 @@ async function errorFrom(status: number, bodyText: string): Promise<ApiError> {
     if (body?.detail?.message) {
       code = body.detail.code ?? code;
       message = body.detail.message;
+    } else if (typeof body?.detail === "string") {
+      message = body.detail;
+    } else if (Array.isArray(body?.detail)) {
+      message = body.detail.map((item: { loc?: string[]; msg?: string }) => `${item.loc?.slice(1).join(".")}: ${item.msg}`).join("；");
     } else if (body?.message) {
       code = body.code ?? code;
       message = body.message;

@@ -216,6 +216,37 @@ class OpenAICompatibleProvider:
         self.api_key = settings.llm_api_key
         self.model = settings.llm_model
         self.timeout = settings.llm_timeout
+        self.temperature = getattr(settings, "llm_temperature", 0.3)
+        self.json_mode = getattr(settings, "llm_json_mode", True)
+
+    def _headers(self) -> dict:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    def _detail(self, resp: httpx.Response) -> str:
+        detail = _error_detail(resp)
+        if not self.api_key:
+            return detail
+        if len(self.api_key) < 6:
+            return re.sub(r"(?<!\w)" + re.escape(self.api_key) + r"(?!\w)", "[REDACTED]", detail)
+        return detail.replace(self.api_key, "[REDACTED]")
+
+    def list_models(self) -> list[str]:
+        try:
+            resp = httpx.get(f"{self.base_url}/models", headers=self._headers(), timeout=self.timeout)
+        except httpx.HTTPError as exc:
+            raise LLMError(f"获取模型列表失败：{exc.__class__.__name__}") from exc
+        if resp.status_code >= 300:
+            raise LLMError(f"获取模型列表失败（HTTP {resp.status_code}）；可直接手填模型 ID")
+        try:
+            data = resp.json()["data"]
+            if not isinstance(data, list):
+                raise ValueError()
+            return sorted({item["id"] for item in data if isinstance(item, dict) and isinstance(item.get("id"), str)})
+        except (ValueError, KeyError, TypeError) as exc:
+            raise LLMError("模型列表格式不兼容，请手填模型 ID") from exc
 
     def _post(
         self, messages: list[dict], json_mode: bool
@@ -224,15 +255,16 @@ class OpenAICompatibleProvider:
         payload = {
             "model": self.model,
             "messages": messages,
-            "temperature": 0.3,
         }
-        if json_mode:
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+        if json_mode and self.json_mode:
             payload["response_format"] = {"type": "json_object"}
         started = time.monotonic()
         try:
             resp = httpx.post(
                 url,
-                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                headers=self._headers(),
                 json=payload,
                 timeout=self.timeout,
             )
@@ -242,17 +274,19 @@ class OpenAICompatibleProvider:
             raise LLMError(f"模型请求失败：{exc.__class__.__name__}") from exc
         latency_ms = int((time.monotonic() - started) * 1000)
         if resp.status_code == 401:
-            raise LLMError(f"模型认证失败（检查 API Key）：{_error_detail(resp)}")
+            raise LLMError(f"模型认证失败（检查 API Key）：{self._detail(resp)}")
         if resp.status_code == 429:
-            raise LLMError(f"模型限流（稍后重试）：{_error_detail(resp)}")
-        if resp.status_code >= 400:
-            raise LLMError(f"模型请求被拒绝（HTTP {resp.status_code}）：{_error_detail(resp)}")
+            raise LLMError(f"模型限流（稍后重试）：{self._detail(resp)}")
+        if resp.status_code >= 300:
+            raise LLMError(f"模型请求被拒绝（HTTP {resp.status_code}）：{self._detail(resp)}")
         try:
             data = resp.json()
             choice = data["choices"][0]
             content = choice["message"].get("content") or ""
-        except (KeyError, IndexError, json.JSONDecodeError, AttributeError) as exc:
-            raise LLMError(f"模型响应格式异常：{resp.text[:200]}") from exc
+        except (KeyError, IndexError, ValueError, AttributeError, TypeError) as exc:
+            raise LLMError("模型响应格式异常：需要兼容 Chat Completions 的接口") from exc
+        if not isinstance(content, str):
+            raise LLMError("模型响应 content 必须为文本")
         finish_reason = str(choice.get("finish_reason") or "")
         if not content.strip():
             raise LLMError(f"模型返回空内容（finish_reason={finish_reason or 'unknown'}）")
@@ -265,6 +299,8 @@ class OpenAICompatibleProvider:
         content, latency, usage, _finish_reason = self._post(
             [{"role": "system", "content": system}, {"role": "user", "content": user}], json_mode=True
         )
+        if len(self.api_key) >= 6:
+            content = content.replace(self.api_key, "[REDACTED]")
         return extract_json(content), latency, usage
 
     def complete_text(self, system: str, user: str) -> tuple[str, int, dict[str, Any] | None]:

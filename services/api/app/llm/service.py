@@ -14,7 +14,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from ..config import settings
+from ..model_settings import runtime_settings
 from ..learning import demo
 from ..models import ModelCallLog, TrainingRecord
 from . import prompts
@@ -90,7 +90,8 @@ class AIService:
         job_id: str | None = None,
     ):
         self.db = db
-        self.provider = OpenAICompatibleProvider(settings) if settings.llm_configured else None
+        snapshot = runtime_settings()
+        self.provider = OpenAICompatibleProvider(snapshot) if snapshot.llm_configured else None
         self.goal_id = goal_id
         self.tutorial_id = tutorial_id
         self.section_id = section_id
@@ -122,7 +123,7 @@ class AIService:
             return
         goal_id = getattr(goal, "id", None) or self.goal_id
         provider = "demo" if self.is_demo else "openai-compatible"
-        model_name = "demo" if self.is_demo else (settings.llm_model or "configured")
+        model_name = self.provider.model if self.provider else "demo"
         try:
             self.db.add(
                 ModelCallLog(

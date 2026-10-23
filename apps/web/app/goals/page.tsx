@@ -46,6 +46,10 @@ export default function GoalsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [query, setQuery] = useState("");
+  const [phase, setPhase] = useState("");
+  const [draftStatus, setDraftStatus] = useState("");
+  const [draftReady, setDraftReady] = useState(false);
   const [form, setForm] = useState({
     title: "",
     domain_key: "cs_it",
@@ -56,6 +60,45 @@ export default function GoalsPage() {
     capability_level: "L2" as Goal["capability_level"],
     generate_extra_exercises: false,
   });
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("aiedu-goal-draft");
+      if (raw) {
+        const draft = JSON.parse(raw);
+        // Restore browser-only draft after hydration.
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setForm(previous => {
+          const next = { ...previous };
+          for (const key of ["title", "motivation", "application_context", "current_level", "time_budget"] as const) {
+            if (typeof draft[key] === "string") next[key] = draft[key];
+          }
+          if (DOMAINS.some(d => d.key === draft.domain_key)) next.domain_key = draft.domain_key;
+          if (["L1", "L2", "L3"].includes(draft.capability_level)) next.capability_level = draft.capability_level;
+          next.generate_extra_exercises = draft.generate_extra_exercises === true;
+          return next;
+        });
+        setDraftStatus("已恢复上次未提交的草稿");
+      }
+    } catch { setDraftStatus("浏览器无法读取草稿"); }
+    setDraftReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!draftReady) return;
+    const timer = setTimeout(() => {
+      try {
+        if (form.title || form.motivation || form.application_context || form.current_level) {
+          localStorage.setItem("aiedu-goal-draft", JSON.stringify(form));
+          setDraftStatus("草稿已自动保存到此浏览器");
+        } else { localStorage.removeItem("aiedu-goal-draft"); setDraftStatus(""); }
+      } catch { setDraftStatus("草稿保存失败，请勿关闭页面"); }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [form, draftReady]);
+
+  const visibleGoals = goals.filter(g => (!phase || g.status === phase) &&
+    `${g.title} ${g.domain_name} ${g.application_context}`.toLowerCase().includes(query.trim().toLowerCase()));
 
   const load = async () => {
     try {
@@ -95,6 +138,7 @@ export default function GoalsPage() {
         current_level: "",
         generate_extra_exercises: false,
       });
+      try { localStorage.removeItem("aiedu-goal-draft"); } catch { /* Creation already succeeded. */ }
       await load();
       router.push(`/goals/${goal.id}`);
     } catch (e) {
@@ -151,13 +195,19 @@ export default function GoalsPage() {
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
         <Card title="我的目标" desc="点击进入闭环工作区" actions={<Badge>{goals.length} 个</Badge>}>
+          <div className="mb-4 flex flex-wrap gap-2">
+            <input aria-label="搜索学习目标" className={`${inputCls} min-w-0 flex-1`} placeholder="搜索目标、学科或应用场景" value={query} onChange={e => setQuery(e.target.value)} />
+            <select aria-label="按学习阶段筛选" className="rounded-xl border border-line bg-panel px-3 text-xs" value={phase} onChange={e => setPhase(e.target.value)}>
+              <option value="">全部阶段</option>{Object.entries(STATUS_LABEL).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+            </select>
+          </div>
           {loading ? (
             <Empty>加载中…</Empty>
-          ) : goals.length === 0 ? (
-            <Empty>还没有目标，右侧创建第一个。</Empty>
+          ) : visibleGoals.length === 0 ? (
+            <Empty>{goals.length ? "没有匹配的目标，试试其他关键词或阶段。" : "还没有目标，右侧创建第一个。"}</Empty>
           ) : (
             <div className="grid gap-2.5">
-              {goals.map((g) => (
+              {visibleGoals.map((g) => (
                 <div
                   key={g.id}
                   className="rounded-xl border border-line p-3.5 transition-colors hover:border-[#c9c2ff]"
@@ -232,6 +282,7 @@ export default function GoalsPage() {
         </Card>
 
         <Card title="创建学习目标" desc="先描述想解决的问题，创建后再评估价值、范围与验收标准">
+          <p role="status" className="mb-3 text-xs text-muted">{draftStatus || "填写内容自动暂存，刷新页面也不会丢失。"}</p>
           <Field label="目标名称 *">
             <input
               className={inputCls}
