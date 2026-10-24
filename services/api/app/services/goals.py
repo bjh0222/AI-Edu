@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from ..learning.disciplines import get_profile
 from ..learning.engine import PHASES
+from ..learning.generation_tiers import normalize_tier
 from ..learning.levels import normalize_level
 from ..llm.service import AIService, AIServiceError
 from ..models import AcceptanceCriterion, GoalAssessment, LearningGoal, LearningPlan, PlanStep
@@ -31,6 +32,8 @@ def create_goal(db: Session, payload) -> dict:
         time_budget=payload.time_budget,
         capability_level=normalize_level(getattr(payload, "capability_level", None)),
         generate_extra_exercises=bool(getattr(payload, "generate_extra_exercises", False)),
+        generation_tier=normalize_tier(getattr(payload, "generation_tier", None)),
+        user_notes=getattr(payload, "user_notes", "") or "",
     )
     db.add(goal)
     db.commit()
@@ -263,6 +266,9 @@ def patch_goal(db: Session, goal_id: str, payload) -> dict:
     level = getattr(payload, "capability_level", None)
     if level is not None:
         goal.capability_level = normalize_level(level)
+    tier = getattr(payload, "generation_tier", None)
+    if tier is not None:
+        goal.generation_tier = normalize_tier(tier)
     extra = getattr(payload, "generate_extra_exercises", None)
     if extra is not None:
         goal.generate_extra_exercises = bool(extra)

@@ -1,5 +1,13 @@
 export type CapabilityLevel = "L1" | "L2" | "L3";
 
+export type GenerationTier = "fast" | "standard" | "deep";
+
+export const GENERATION_TIERS: { key: GenerationTier; name: string; description: string }[] = [
+  { key: "fast", name: "快速", description: "单个概念、命令或小任务的直接教程。" },
+  { key: "standard", name: "标准", description: "完整工作流或概念体系的默认生成深度。" },
+  { key: "deep", name: "深度", description: "复杂主题、项目实践或需要严格验证的主题。" },
+];
+
 export interface CapabilityLevelInfo {
   key: CapabilityLevel;
   name: string;
@@ -23,6 +31,7 @@ export interface Goal {
   time_budget: string;
   capability_level: CapabilityLevel;
   generate_extra_exercises: boolean;
+  generation_tier: GenerationTier;
   status: string;
   user_notes: string;
   archived: boolean;
@@ -256,6 +265,9 @@ export interface Tutorial {
   title: string;
   status: string;
   current_version?: TutorialVersion | null;
+  delivery_status: string;
+  delivery_path: string;
+  delivery_version: number;
   history_count: number;
   tokens?: TokenUsage;
 }
@@ -265,6 +277,14 @@ export interface QuickStartStep {
   label: string;
   status: string;
   detail: string;
+}
+
+export interface OneShotGenerateResult {
+  goal: Goal;
+  steps: QuickStartStep[];
+  tutorial: Tutorial;
+  job_id?: string | null;
+  demo: boolean;
 }
 
 export interface QuickStartResult {

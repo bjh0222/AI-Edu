@@ -93,10 +93,12 @@ def test_closed_loop_demo(client):
     assert resp.status_code == 200, resp.text
     assert "text/markdown" in resp.headers["content-type"]
     md = resp.text
-    assert md.startswith("# ")
-    assert "验收标准" in md
+    assert md.startswith("---")
+    assert "ai_edu:" in md
     assert "操作步骤" in md
-    assert "质量报告" in md
+    assert "## 验收标准" not in md
+    assert "## 质量报告" not in md
+    assert "由 AI Edu 生成" not in md
     assert "attachment" in resp.headers["content-disposition"]
 
     # 章节重生成（版本递增）

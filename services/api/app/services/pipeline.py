@@ -7,13 +7,30 @@
 """
 from __future__ import annotations
 
+import re
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
+
+from ..learning.generation_tiers import normalize_tier
 
 from ..llm.service import AIService
 from ..models import GenerationJob, GoalAssessment, LearningGoal
 from . import goals as goals_service
 from . import tutorials as tutorials_service
+
+
+_MATH_HINTS = ("数学", "统计", "概率", "数据分析", "推导", "证明", "假设检验", "回归")
+_CS_HINTS = ("代码", "编程", "python", "linux", "命令", "命令行", "api", "sql", "算法", "调试", "git", "grep", "awk", "日志", "shell", "bash")
+
+
+def infer_domain_key(text: str) -> str:
+    """一次性入口不再要求用户先选学科；按明确线索推断，未命中时用通用学科。"""
+    lowered = text.lower()
+    if any(word in lowered for word in _CS_HINTS):
+        return "cs_it"
+    if any(word in lowered for word in _MATH_HINTS):
+        return "math_logic"
+    return "interdisciplinary"
 
 
 def _step(key: str, label: str, status: str, detail: str = "") -> dict:
@@ -41,7 +58,7 @@ def _usable_tutorial(tutorials: list[dict]) -> dict | None:
     return None
 
 
-def quickstart(db: Session, goal_id: str, ai: AIService) -> dict:
+def quickstart(db: Session, goal_id: str, ai: AIService, pause_action: str | None = None) -> dict:
     goal = db.get(LearningGoal, goal_id)
     if goal is None or goal.archived:
         raise HTTPException(status_code=404, detail={"code": "goal_not_found", "message": "学习目标不存在"})
@@ -67,13 +84,48 @@ def quickstart(db: Session, goal_id: str, ai: AIService) -> dict:
     else:
         steps.append(_step("diagnose", "价值诊断", "reused", "沿用已有诊断"))
 
-    # ② 用户决定（一键同意 = 按建议继续）
-    if assessment is not None and not assessment.user_decision:
-        goals_service.set_decision(db, goal.id, "继续", "一键同意：按诊断建议推进")
-        steps.append(_step("decision", "你的决定", "created", "已按建议选择「继续」"))
+    # ② 用户决定：只有明显不值得推进才暂停；暂停后必须由用户选择续跑方式
+    if assessment is not None:
+        recommendation = assessment.recommendation or ""
+        explicit_continue = assessment.user_decision in {"坚决执行", "采纳建议继续"}
+        paused = not explicit_continue and (
+            assessment.user_decision == "暂停"
+            or bool(re.search(r"暂缓|不建议推进|不值得|无法推进", recommendation))
+        )
+        if paused:
+            if pause_action == "proceed":
+                goals_service.set_decision(db, goal.id, "坚决执行", "用户选择坚决执行")
+                steps.append(_step("decision", "你的决定", "created", "已选择坚决执行"))
+            elif pause_action == "adopt":
+                goals_service.set_decision(db, goal.id, "采纳建议继续", "用户采纳 AI 建议后执行")
+                advice = f"\n用户已采纳 AI 建议，请按此约束生成：{recommendation}"
+                if advice not in (goal.user_notes or ""):
+                    goal.user_notes = ((goal.user_notes or "") + advice).strip()
+                    db.commit()
+                steps.append(_step("decision", "你的决定", "created", "已采纳 AI 建议并继续"))
+            else:
+                if assessment.user_decision != "暂停":
+                    goals_service.set_decision(db, goal.id, "暂停", "AI 判断当前需求不值得继续")
+                steps.append(_step("decision", "你的决定", "created", "AI 已暂停生成"))
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "generation_paused",
+                        "message": f"AI 判断当前需求不值得继续：{recommendation[:200]}",
+                        "goal_id": goal.id,
+                        "recommendation": recommendation,
+                        "choices": [
+                            {"key": "proceed", "label": "坚决执行"},
+                            {"key": "adopt", "label": "采纳AI建议后立即执行"},
+                            {"key": "revise", "label": "修改计划"},
+                        ],
+                    },
+                )
+        else:
+            goals_service.set_decision(db, goal.id, "继续", "一键同意：按诊断建议推进")
+            steps.append(_step("decision", "你的决定", "created", "已按建议选择「继续」"))
     else:
-        steps.append(_step("decision", "你的决定", "reused", assessment.user_decision if assessment else ""))
-
+        steps.append(_step("decision", "你的决定", "reused", "无诊断结果"))
     # ③ 学习计划
     plan = goals_service.get_plan(db, goal.id)
     if plan is None:
@@ -159,3 +211,35 @@ def quickstart(db: Session, goal_id: str, ai: AIService) -> dict:
         "job_id": job_id,
         "demo": ai.is_demo,
     }
+
+
+def create_and_quickstart(db: Session, payload, ai: AIService) -> dict:
+    """统一一次性入口：需求 + 挡位 → 创建目标并复用完整 quickstart 管线。"""
+    requirement = payload.requirement.strip()
+    title = payload.title.strip()
+    if not title:
+        first_line = next((line.strip() for line in requirement.splitlines() if line.strip()), "")
+        title = first_line[:120] or "自定义学习需求"
+    domain_key = payload.domain_key or infer_domain_key(f"{title}\n{requirement}")
+    application_context = payload.application_context.strip() or requirement
+
+    from ..schemas import GoalCreate
+
+    goal = goals_service.create_goal(
+        db,
+        GoalCreate(
+            title=title,
+            domain_key=domain_key,
+            motivation=payload.motivation.strip() or "完成用户提出的学习需求",
+            application_context=application_context,
+            current_level=payload.current_level.strip(),
+            time_budget=payload.time_budget.strip(),
+            capability_level=payload.capability_level,
+            generate_extra_exercises=bool(payload.generate_extra_exercises),
+            generation_tier=normalize_tier(payload.generation_tier),
+            user_notes=requirement,
+        ),
+    )
+    result = quickstart(db, goal["id"], ai)
+    result["goal"] = goal
+    return result

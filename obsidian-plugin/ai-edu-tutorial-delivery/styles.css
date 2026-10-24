@@ -1,0 +1,106 @@
+/* AI Edu Tutorial Delivery — 与网站「创建并生成教程」表单一致的样式 */
+
+.modal.ai-edu-modal-wide {
+  width: min(720px, 94vw);
+}
+
+.ai-edu-modal .modal-content {
+  max-height: 76vh;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+.ai-edu-subtitle {
+  margin: 0 0 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.ai-edu-draft-status {
+  margin: 0 0 14px;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.ai-edu-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.ai-edu-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ai-edu-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-normal);
+}
+
+.ai-edu-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 13px;
+}
+
+textarea.ai-edu-input {
+  min-height: 64px;
+  resize: vertical;
+  line-height: 1.55;
+}
+
+.ai-edu-hint {
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.ai-edu-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ai-edu-check input[type="checkbox"] {
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+
+.ai-edu-status {
+  margin-top: 14px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.ai-edu-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.ai-edu-paused {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m, 8px);
+  background: var(--background-secondary);
+}
+
+.ai-edu-paused .ai-edu-actions {
+  margin-top: 0;
+}

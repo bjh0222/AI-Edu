@@ -12,10 +12,14 @@ from ..db import get_db
 from ..llm.service import AIService
 from ..models import GenerationJob
 from ..schemas import (
+    DeliveryUpdateIn,
     GenerateOut,
     GoalUsageOut,
     JobOut,
+    OneShotGenerateIn,
+    OneShotGenerateOut,
     QuickStartOut,
+    QuickStartRequest,
     SectionDetailOut,
     TokenUsage,
     TutorialOut,
@@ -55,9 +59,20 @@ def generate_tutorial(goal_id: str, db: Session = Depends(get_db), ai: AIService
 
 
 @router.post("/goals/{goal_id}/tutorials/quickstart", response_model=QuickStartOut, tags=["tutorials"])
-def quickstart_tutorial(goal_id: str, db: Session = Depends(get_db), ai: AIService = Depends(get_ai)):
+def quickstart_tutorial(
+    goal_id: str,
+    payload: QuickStartRequest | None = None,
+    db: Session = Depends(get_db),
+    ai: AIService = Depends(get_ai),
+):
     """一键生成教材：诊断 → 计划 → 验收标准（一键同意）→ 大纲 → 全部章节。"""
-    return pipeline_service.quickstart(db, goal_id, ai)
+    return pipeline_service.quickstart(db, goal_id, ai, payload.pause_action if payload else None)
+
+
+@router.post("/goals/quickstart", response_model=OneShotGenerateOut, tags=["tutorials"])
+def one_shot_quickstart(payload: OneShotGenerateIn, db: Session = Depends(get_db), ai: AIService = Depends(get_ai)):
+    """统一生成入口：一段需求 + 挡位即可创建任务并自动完成规划与教程生成。"""
+    return pipeline_service.create_and_quickstart(db, payload, ai)
 
 
 @router.get("/goals/{goal_id}/tutorials", response_model=list[TutorialOut], tags=["tutorials"])
@@ -163,3 +178,13 @@ def job_events(job_id: str, db: Session = Depends(get_db)):
         yield "event: done\ndata: {}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.post("/tutorials/{tutorial_id}/delivery", response_model=TutorialOut, tags=["tutorials"])
+def mark_tutorial_delivery(
+    tutorial_id: str,
+    payload: DeliveryUpdateIn,
+    db: Session = Depends(get_db),
+):
+    """Obsidian 插件写入 Vault 后回写交付结果；不改变教程生成状态。"""
+    return tutorials_service.mark_delivery(db, tutorial_id, payload)

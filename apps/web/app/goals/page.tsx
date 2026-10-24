@@ -4,16 +4,23 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { api, ApiError } from "@/lib/api";
-import type { Goal } from "@/lib/types";
-import { CAPABILITY_LEVELS } from "@/lib/types";
+import type { Goal, GenerationTier, OneShotGenerateResult, QuickStartResult } from "@/lib/types";
+import { CAPABILITY_LEVELS, GENERATION_TIERS } from "@/lib/types";
 import { PHASE_LABELS } from "@/lib/goal-phases";
 import { Badge, Button, Card, Empty, Field, inputCls } from "@/components/ui";
 import { GoalExamples } from "@/components/goals/GoalExamples";
+import { PausedGenerationPanel, type PauseResumeAction } from "@/components/PausedGeneration";
 
 const STATUS_LABEL = PHASE_LABELS;
 
 // 与后端 services/api/app/learning/disciplines.py 的 SUBJECTS 保持一致
 // （依据《AI-Edu-教程分类体系规范》一级学科目录 S01–S21）
+type PausedGenerationState = {
+  goalId: string;
+  recommendation: string;
+  plan: string;
+};
+
 const DOMAINS = [
   { key: "math_logic", label: "数学、逻辑与统计" },
   { key: "cs_it", label: "计算机科学与信息技术" },
@@ -45,6 +52,8 @@ export default function GoalsPage() {
   const [showArchived, setShowArchived] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [paused, setPaused] = useState<PausedGenerationState | null>(null);
+  const [pausedBusy, setPausedBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState("");
   const [phase, setPhase] = useState("");
@@ -59,6 +68,7 @@ export default function GoalsPage() {
     time_budget: "共 10 小时",
     capability_level: "L2" as Goal["capability_level"],
     generate_extra_exercises: false,
+    generation_tier: "standard" as GenerationTier,
   });
 
   useEffect(() => {
@@ -76,6 +86,7 @@ export default function GoalsPage() {
           if (DOMAINS.some(d => d.key === draft.domain_key)) next.domain_key = draft.domain_key;
           if (["L1", "L2", "L3"].includes(draft.capability_level)) next.capability_level = draft.capability_level;
           next.generate_extra_exercises = draft.generate_extra_exercises === true;
+          if (GENERATION_TIERS.some(t => t.key === draft.generation_tier)) next.generation_tier = draft.generation_tier;
           return next;
         });
         setDraftStatus("已恢复上次未提交的草稿");
@@ -121,7 +132,20 @@ export default function GoalsPage() {
     load();
   }, []);
 
-  const create = async () => {
+  const resetDraft = () => {
+    setForm((previous) => ({
+      ...previous,
+      title: "",
+      motivation: "",
+      application_context: "",
+      current_level: "",
+      generate_extra_exercises: false,
+      generation_tier: "standard",
+    }));
+    try { localStorage.removeItem("aiedu-goal-draft"); } catch { /* Draft cleanup is best effort. */ }
+  };
+
+  const create = async (autoGenerate = true) => {
     if (!form.title.trim()) {
       setError("请填写目标名称");
       return;
@@ -129,25 +153,93 @@ export default function GoalsPage() {
     setBusy(true);
     setError("");
     try {
-      const goal = await api.post<Goal>("/api/goals", form);
-      setForm({
-        ...form,
-        title: "",
-        motivation: "",
-        application_context: "",
-        current_level: "",
-        generate_extra_exercises: false,
+      if (!autoGenerate) {
+        const goal = await api.post<Goal>("/api/goals", form);
+        resetDraft();
+        await load();
+        router.push(`/goals/${goal.id}`);
+        return;
+      }
+
+      const requirement = [
+        form.application_context,
+        form.motivation,
+        form.current_level ? `当前基础：${form.current_level}` : "",
+        form.time_budget ? `可投入时间：${form.time_budget}` : "",
+      ].filter(Boolean).join("\n") || form.title;
+      const result = await api.post<OneShotGenerateResult>("/api/goals/quickstart", {
+        title: form.title,
+        requirement,
+        domain_key: form.domain_key,
+        motivation: form.motivation,
+        application_context: form.application_context,
+        current_level: form.current_level,
+        time_budget: form.time_budget,
+        capability_level: form.capability_level,
+        generate_extra_exercises: form.generate_extra_exercises,
+        generation_tier: form.generation_tier,
       });
-      try { localStorage.removeItem("aiedu-goal-draft"); } catch { /* Creation already succeeded. */ }
+      resetDraft();
+      setPaused(null);
       await load();
-      router.push(`/goals/${goal.id}`);
+      router.push(`/tutorials/${result.tutorial.id}`);
     } catch (e) {
+      const detail = e instanceof ApiError ? e.data as { goal_id?: string; recommendation?: string } | null : null;
+      if (e instanceof ApiError && e.code === "generation_paused" && detail?.goal_id) {
+        setPaused({
+          goalId: detail.goal_id,
+          recommendation: detail.recommendation || e.message,
+          plan: form.application_context || form.motivation || form.title,
+        });
+        return;
+      }
       setError(e instanceof ApiError ? e.message : String(e));
     } finally {
       setBusy(false);
     }
   };
 
+  const resumePaused = async (action: PauseResumeAction) => {
+    if (!paused) return;
+    setPausedBusy(true);
+    setError("");
+    try {
+      const result = await api.post<QuickStartResult>(
+        `/api/goals/${paused.goalId}/tutorials/quickstart`,
+        { pause_action: action }
+      );
+      setPaused(null);
+      await load();
+      router.push(`/tutorials/${result.tutorial.id}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPausedBusy(false);
+    }
+  };
+
+  const revisePaused = async (plan: string) => {
+    if (!paused || !plan.trim()) return;
+    setPausedBusy(true);
+    setError("");
+    try {
+      await api.patch(`/api/goals/${paused.goalId}`, {
+        application_context: plan,
+        user_notes: plan,
+      });
+      const result = await api.post<QuickStartResult>(
+        `/api/goals/${paused.goalId}/tutorials/quickstart`,
+        { pause_action: "proceed" }
+      );
+      setPaused(null);
+      await load();
+      router.push(`/tutorials/${result.tutorial.id}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPausedBusy(false);
+    }
+  };
   const archive = async (id: string) => {
     if (!window.confirm("归档该目标？归档后不在目标列表显示，可在「已归档目标」中彻底删除。")) return;
     try {
@@ -183,13 +275,27 @@ export default function GoalsPage() {
         <div className="mb-2 text-[11px] font-bold tracking-[1.5px] text-brand">LEARNING GOALS</div>
         <h1 className="mb-2 text-[27px] font-bold tracking-tight">学习目标</h1>
         <p className="max-w-[700px] text-[13px] leading-relaxed text-muted">
-          把模糊兴趣转化为清晰、值得投入且可以验收的目标。创建后先做价值评估与验收标准设计，再生成教程。
+          填写需求并选择挡位后，AI 会自动完成价值判断、学习计划、验收标准设计和教程生成。
         </p>
       </div>
 
       {error && (
         <div className="mb-4 rounded-xl border border-[#f3c4c4] bg-[#fff5f5] px-4 py-3 text-[12px] text-[#a33]">
           {error}
+        </div>
+      )}
+
+      {paused && (
+        <div className="mb-4">
+          <Card title="生成已暂停" desc="请选择如何继续；三个选项都不会自动修改 AI 的原始判断记录。">
+            <PausedGenerationPanel
+              recommendation={paused.recommendation}
+              initialPlan={paused.plan}
+              busy={pausedBusy}
+              onResume={(action) => void resumePaused(action)}
+              onRevise={(plan) => void revisePaused(plan)}
+            />
+          </Card>
         </div>
       )}
 
@@ -281,7 +387,7 @@ export default function GoalsPage() {
           )}
         </Card>
 
-        <Card title="创建学习目标" desc="先描述想解决的问题，创建后再评估价值、范围与验收标准">
+        <Card title="创建并生成教程" desc="默认一次生成：价值判断、学习计划、验收标准和教程自动完成">
           <p role="status" className="mb-3 text-xs text-muted">{draftStatus || "填写内容自动暂存，刷新页面也不会丢失。"}</p>
           <Field label="目标名称 *">
             <input
@@ -359,6 +465,23 @@ export default function GoalsPage() {
               {CAPABILITY_LEVELS.find((lv) => lv.key === form.capability_level)?.description}
             </span>
           </Field>
+          <Field label="生成挡位">
+            <select
+              className={inputCls}
+              value={form.generation_tier}
+              onChange={(e) => setForm({ ...form, generation_tier: e.target.value as GenerationTier })}
+            >
+              {GENERATION_TIERS.map((tier) => (
+                <option key={tier.key} value={tier.key}>
+                  {tier.name} · {tier.key}
+                </option>
+              ))}
+            </select>
+            <span className="text-[10px] leading-relaxed text-muted">
+              {GENERATION_TIERS.find((tier) => tier.key === form.generation_tier)?.description}
+              一键生成会按此挡位自动完成价值判断、计划、验收标准与教程。
+            </span>
+          </Field>
           <Field label="额外练习文件">
             <label className="flex cursor-pointer items-center gap-2 text-[12px]">
               <input
@@ -372,12 +495,18 @@ export default function GoalsPage() {
               开启后会随教程生成一份 Markdown 练习集并在教程中建立双链；教程内的必要练习不受影响
             </span>
           </Field>
-          <Button onClick={create} disabled={busy}>
-            {busy ? "创建中…" : "创建目标"}
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={() => void create(true)} disabled={busy}>
+              {busy ? "自动生成中…" : "创建并自动生成教程"}
+            </Button>
+            <Button variant="secondary" onClick={() => void create(false)} disabled={busy}>
+              仅创建目标
+            </Button>
+          </div>
+
           <GoalExamples />
           <p className="mt-3 text-[11px] leading-relaxed text-muted">
-            创建后仍需评估价值、学习范围与验收标准；这里不会自动生成教程。
+            默认路径会自动生成教程并跳转；仅当 AI 明确判断不值得推进时才暂停。
           </p>
         </Card>
       </div>

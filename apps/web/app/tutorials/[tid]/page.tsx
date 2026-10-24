@@ -152,6 +152,9 @@ function TutorialDetail() {
           <Badge tone={report.passed ? "done" : "warn"}>
             质量{report.passed ? "通过" : "待改进"}
           </Badge>
+          <Badge tone={tutorial.delivery_status === "delivered" ? "done" : "neutral"}>
+            {tutorial.delivery_status === "delivered" ? "Obsidian 已交付" : "未交付"}
+          </Badge>
           <Badge>累计 {fmtTokens(tutorial.tokens?.total_tokens)} tokens</Badge>
         </div>
         <p className="mt-1 text-[12px] text-muted">

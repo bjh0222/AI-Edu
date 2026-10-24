@@ -42,7 +42,7 @@ class Settings:
         self.material_max_bytes = int(os.getenv("MATERIAL_MAX_BYTES", str(20 * 1024 * 1024)) or 20 * 1024 * 1024)
         self.cors_origins = os.getenv(
             "CORS_ORIGINS",
-            "http://127.0.0.1:3000,http://localhost:3000,http://127.0.0.1:3001,http://localhost:3001",
+            "http://127.0.0.1:3000,http://localhost:3000,http://127.0.0.1:3001,http://localhost:3001,app://obsidian.md,capacitor://localhost",
         ).strip()
         self.demo_mode = os.getenv("DEMO_MODE", "1").strip() not in ("0", "false", "False")
 

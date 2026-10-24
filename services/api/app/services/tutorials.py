@@ -1,6 +1,7 @@
 """教程服务：大纲 → 分节生成 → 质量检查 → 版本管理。"""
 from __future__ import annotations
 
+import re
 import threading
 import time
 import uuid
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 from ..model_settings import runtime_settings
 from ..learning.disciplines import get_profile
 from ..learning.engine import check_structure
+from ..learning.generation_tiers import normalize_tier
 from ..learning.levels import normalize_level
 from ..learning.teaching_profile import normalize_teaching_plan
 from ..llm.service import AIService, AIServiceError
@@ -178,6 +180,9 @@ def tutorial_dict(db: Session, tutorial: Tutorial) -> dict:
         "title": tutorial.title,
         "status": tutorial.status,
         "current_version": tutorial_version_dict(version) if version else None,
+        "delivery_status": getattr(tutorial, "delivery_status", "") or "",
+        "delivery_path": getattr(tutorial, "delivery_path", "") or "",
+        "delivery_version": int(getattr(tutorial, "delivery_version", 0) or 0),
         "history_count": count,
         "tokens": tutorial_tokens(db, tutorial),
     }
@@ -613,6 +618,7 @@ def _section_with_retry(
     criteria: list[dict],
     prior_titles: list[str],
     materials_text: str,
+    companion_names: list[str] | None = None,
 ) -> dict:
     """单节生成带重试。
 
@@ -622,7 +628,9 @@ def _section_with_retry(
     attempts = len(SECTION_RETRY_DELAYS) + 1
     for attempt in range(1, attempts + 1):
         try:
-            return ai.section(goal, profile, item, criteria, prior_titles, materials_text)
+            return ai.section(
+                goal, profile, item, criteria, prior_titles, materials_text, companion_names
+            )
         except AIServiceError as exc:
             if attempt >= attempts:
                 raise
@@ -685,8 +693,13 @@ def _generate_section_task(
         ai.section_id = section_id
         criteria_by_id = {c["id"]: c for c in criteria_dicts}
         mapped = [criteria_by_id[cid] for cid in item.get("criteria_ids", []) if cid in criteria_by_id]
+        # 配套文件名在生成章节时已确定（见 _generate_companions），提前注入，避免模型猜错双链目标
+        companion_names = [f"{_safe_filename(goal.title)}-知识速查"]
+        if bool(getattr(goal, "generate_extra_exercises", False)):
+            companion_names.append(f"{_safe_filename(goal.title)}-额外练习")
         raw = _section_with_retry(
-            db, job_id, ai, goal, profile, item, mapped or criteria_dicts, prior_titles, materials_text
+            db, job_id, ai, goal, profile, item, mapped or criteria_dicts, prior_titles,
+            materials_text, companion_names,
         )
         usage = dict(ai.usage_last)
         db.commit()  # 短事务：调用日志 / 训练样本立即落库，尽快释放写锁
@@ -1026,11 +1039,65 @@ def restore_version(db: Session, tutorial_id: str, version_number: int) -> dict:
 
 
 def _safe_filename(name: str) -> str:
-    import re
-
     # 含 Obsidian 不允许/易冲突的字符（# ^ [ ] |）一并清理，保证双链文件名可用
     cleaned = re.sub(r'[\\/:*?"<>|#^\[\]\r\n]+', " ", name).strip()
     return cleaned or "tutorial"
+
+
+# 双链与标签的导出归一化：模型可能写出 [[...]]、[[笔记名]] 这类占位链接，
+# 也可能在正文里写 #标签。交付到 Vault 前统一处理：
+# - 指向本次配套文件的 [[文件名]] 原样保留（这些文件由插件同时写入）；
+# - 其余 [[...]] 与行内 #标签 包进行内代码，既保留原文又不会生成断链/真标签；
+# - 围栏代码块与已有行内代码不处理，避免破坏命令、代码和语法示例。
+WIKILINK_RE = re.compile(r"!?\[\[[^\[\]\n]{0,200}\]\]")
+INLINE_TAG_RE = re.compile(r"(?<![\w#])#([A-Za-z0-9_\u4e00-\u9fff][\w\u4e00-\u9fff/-]*)")
+
+
+def _wikilink_target(token: str) -> str:
+    inner = token[3:-2] if token.startswith("![[") else token[2:-2]
+    return inner.split("|", 1)[0].split("#", 1)[0].strip()
+
+
+def normalize_obsidian_syntax(markdown: str, allowed_links: set[str]) -> str:
+    """把不该生效的双链 / 标签降级为行内代码，保证导出文件只有指向真实文件的链接。"""
+    allowed = {name.strip().removesuffix(".md") for name in allowed_links if name}
+    lines: list[str] = []
+    fence: str | None = None
+    for line in markdown.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            marker = stripped[:3]
+            if fence is None:
+                fence = marker
+            elif stripped.startswith(fence):
+                fence = None
+            lines.append(line)
+            continue
+        if fence is not None:
+            lines.append(line)
+            continue
+
+        def fix_links(part: str) -> str:
+            def repl(match: re.Match) -> str:
+                target = _wikilink_target(match.group(0))
+                if not target or target in allowed:
+                    return match.group(0)
+                return f"`{match.group(0)}`"
+
+            return WIKILINK_RE.sub(repl, part)
+
+        def fix_tags(part: str) -> str:
+            if stripped.startswith("#"):
+                return part  # 标题行
+            return INLINE_TAG_RE.sub(lambda m: f"`{m.group(0)}`", part)
+
+        pieces = re.split(r"(`[^`\n]*`)", line)
+        for idx, piece in enumerate(pieces):
+            if idx % 2 == 1:
+                continue
+            pieces[idx] = fix_links(fix_tags(piece))
+        lines.append("".join(pieces))
+    return "\n".join(lines)
 
 
 # 内容块类型的默认标题（模型未给 title 时使用）
@@ -1198,55 +1265,34 @@ def _tutorial_base_name(goal) -> str:
 
 
 def export_markdown(db: Session, tutorial_id: str) -> tuple[str, str]:
-    """把当前教程版本导出为 Markdown，返回 (文件名, 内容)。"""
+    """导出聚焦学习的 Markdown；任务元数据放 YAML，内部验收与质量报告不进正文。"""
     tutorial = _get_tutorial(db, tutorial_id)
     goal = _goal_for(db, tutorial.goal_id)
     version = _current_version(db, tutorial)
     if version is None:
         raise HTTPException(status_code=409, detail={"code": "no_content", "message": "教程尚无内容"})
     content = jload(version.content_json, {"outline": [], "sections": []})
-    quality = jload(version.quality_report, {})
     profile = get_profile(goal.domain_key)
-    criteria = goals_service.list_criteria(db, goal.id)
-    crit_by_id = {c["id"]: c for c in criteria}
-    level = _LEVEL_LABELS.get(normalize_level(goal.capability_level), "独立应用")
+    crit_by_id = {}
     cheatsheet = content.get("cheatsheet") or {}
     exercises_file = content.get("extra_exercises") or {}
 
     lines: list[str] = []
+    lines.append("---")
+    lines.append(f"title: {tutorial.title}")
+    lines.append("ai_edu:")
+    lines.append(f"  tutorial_id: {tutorial.id}")
+    lines.append(f"  goal_id: {goal.id}")
+    lines.append(f"  version: {version.version}")
+    lines.append(f"  generation_tier: {normalize_tier(getattr(goal, 'generation_tier', None))}")
+    lines.append(f"  generated_at: {version.created_at or ''}")
+    lines.append(f"  discipline: {profile.display_name}")
+    lines.append("---")
+    lines.append("")
     lines.append(f"# {tutorial.title}")
     lines.append("")
-    lines.append(f"- 学习目标：{goal.title}")
-    lines.append(f"- 学科：{profile.display_name}")
-    lines.append(f"- 能力层级：{level}（{normalize_level(goal.capability_level)}）")
-    if goal.application_context:
-        lines.append(f"- 应用场景：{goal.application_context}")
-    if goal.current_level:
-        lines.append(f"- 当前基础：{goal.current_level}")
-    lines.append(f"- 生成时间：{version.created_at or ''}")
-    lines.append(f"- 模型：{version.model_provider} / {version.model_name}")
-    quality_text = "通过" if quality.get("passed") else "待改进"
-    lines.append(f"- 版本：v{version.version} ｜ 质量检查：{quality_text}")
-    usage = tutorial_tokens(db, tutorial)
-    if usage["total_tokens"]:
-        usage_label = "实测" if usage["usage_source"] == "provider" else "估算"
-        lines.append(f"- Token 消耗：{usage['total_tokens']}（{usage_label}）")
-    lines.append("")
 
-    lines.append("## 验收标准")
-    lines.append("")
-    if criteria:
-        for idx, c in enumerate(criteria, 1):
-            lines.append(f"{idx}. [ ] {c['statement']}")
-            if c.get("conditions"):
-                lines.append(f"   - 条件：{c['conditions']}")
-            if c.get("pass_rule"):
-                lines.append(f"   - 通过条件：{c['pass_rule']}")
-    else:
-        lines.append("（无验收标准）")
-    lines.append("")
-
-    # 配套文件（Obsidian 双链：链接名 = 导出文件名去掉 .md，保证可解析）
+    # 配套文件是学习内容的直接延伸，保留 Obsidian 双链；验收与质量报告另行在 AI Edu 查看。
     companion = []
     if cheatsheet.get("sections"):
         companion.append(f"[[{cheatsheet.get('filename') or _safe_filename(goal.title) + '-知识速查'}]]（知识速查）")
@@ -1257,8 +1303,8 @@ def export_markdown(db: Session, tutorial_id: str) -> tuple[str, str]:
     if companion:
         lines.append("## 配套文件")
         lines.append("")
-        for c in companion:
-            lines.append(f"- {c}")
+        for item in companion:
+            lines.append(f"- {item}")
         lines.append("")
 
     outline = content.get("outline", [])
@@ -1266,42 +1312,25 @@ def export_markdown(db: Session, tutorial_id: str) -> tuple[str, str]:
     if outline:
         lines.append("## 目录")
         lines.append("")
-        for idx, o in enumerate(outline, 1):
-            lines.append(f"{idx}. {o.get('title', '')}")
+        for idx, item in enumerate(outline, 1):
+            lines.append(f"{idx}. {item.get('title', '')}")
         lines.append("")
 
-    for idx, s in enumerate(sections, 1):
-        lines.append(f"## 第 {idx} 节：{s.get('title', '')}")
+    for idx, section in enumerate(sections, 1):
+        lines.append(f"## 第 {idx} 节：{section.get('title', '')}")
         lines.append("")
-        if s.get("content"):
-            _render_section_v2(s, crit_by_id, lines)
+        if section.get("content"):
+            _render_section_v2(section, crit_by_id, lines)
         else:
-            _render_section_v1(s, crit_by_id, lines)
+            _render_section_v1(section, crit_by_id, lines)
 
-    checks = quality.get("checks", [])
-    if checks:
-        lines.append("## 质量报告")
-        lines.append("")
-        for c in checks:
-            mark = "✅" if c.get("passed") else "❌"
-            lines.append(f"- {mark} {c.get('name', '')}：{c.get('detail', '')}")
-        lines.append("")
-    if quality.get("issues"):
-        lines.append("### 待改进项")
-        lines.append("")
-        for issue in quality["issues"]:
-            lines.append(f"- {issue}")
-        lines.append("")
-
-    lines.append("---")
-    lines.append("")
-    lines.append("> 由 AI Edu 生成。教程内容需结合实践核验；证据比感觉更可靠。")
-    lines.append("")
-
+    allowed_links = {_tutorial_base_name(goal)}
+    if cheatsheet.get("sections"):
+        allowed_links.add(cheatsheet.get("filename") or f"{_safe_filename(goal.title)}-知识速查")
+    if exercises_file.get("exercises"):
+        allowed_links.add(exercises_file.get("filename") or f"{_safe_filename(goal.title)}-额外练习")
     filename = f"{_tutorial_base_name(goal)}.md"
-    return filename, "\n".join(lines)
-
-
+    return filename, normalize_obsidian_syntax("\n".join(lines), allowed_links)
 def export_cheatsheet(db: Session, tutorial_id: str) -> tuple[str, str]:
     """导出配套知识速查文件。未生成时 404。"""
     tutorial = _get_tutorial(db, tutorial_id)
@@ -1332,7 +1361,7 @@ def export_cheatsheet(db: Session, tutorial_id: str) -> tuple[str, str]:
         lines.append("")
 
     filename = f"{cheatsheet.get('filename') or _safe_filename(goal.title) + '-知识速查'}.md"
-    return filename, "\n".join(lines)
+    return filename, normalize_obsidian_syntax("\n".join(lines), {_tutorial_base_name(goal)})
 
 
 def export_extra_exercises(db: Session, tutorial_id: str) -> tuple[str, str]:
@@ -1395,4 +1424,16 @@ def export_extra_exercises(db: Session, tutorial_id: str) -> tuple[str, str]:
         lines.append("")
 
     filename = f"{extra.get('filename') or _safe_filename(goal.title) + '-额外练习'}.md"
-    return filename, "\n".join(lines)
+    return filename, normalize_obsidian_syntax("\n".join(lines), {_tutorial_base_name(goal)})
+
+
+def mark_delivery(db: Session, tutorial_id: str, payload) -> dict:
+    """插件写入 Vault 成功后回写交付状态；生成状态与交付状态独立。"""
+    tutorial = _get_tutorial(db, tutorial_id)
+    version = _current_version(db, tutorial)
+    tutorial.delivery_status = "delivered" if payload.status == "delivered" else "failed"
+    tutorial.delivery_path = str(payload.path or "")
+    version_id = payload.version or (version.version if version else 0)
+    tutorial.delivery_version = int(version_id or 0)
+    db.commit()
+    return tutorial_dict(db, tutorial)

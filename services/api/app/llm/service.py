@@ -260,7 +260,8 @@ class AIService:
         return data
 
     def section(
-        self, goal, discipline, item, criteria_list, prior_titles, materials_text: str = ""
+        self, goal, discipline, item, criteria_list, prior_titles, materials_text: str = "",
+        companion_names: list[str] | None = None,
     ) -> dict:
         if self.is_demo:
             by_id = {c["id"]: c for c in criteria_list}
@@ -268,7 +269,7 @@ class AIService:
                 "section", demo.section(goal, discipline, item, by_id), goal, materials_text
             )
         system, user = prompts.section(
-            goal, discipline, item, criteria_list, prior_titles, materials_text
+            goal, discipline, item, criteria_list, prior_titles, materials_text, companion_names
         )
         data = self._real_json(
             "section", system, user,

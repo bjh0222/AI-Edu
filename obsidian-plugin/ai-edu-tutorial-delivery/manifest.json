@@ -1,0 +1,9 @@
+{
+  "id": "ai-edu-tutorial-delivery",
+  "name": "AI Edu Tutorial Delivery",
+  "version": "0.3.0",
+  "minAppVersion": "1.5.0",
+  "description": "Create a learning goal with the same form as AI Edu web, generate the tutorial, save it with companion files, then open it in Obsidian.",
+  "author": "AI Edu",
+  "isDesktopOnly": true
+}

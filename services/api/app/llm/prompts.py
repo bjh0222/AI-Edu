@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 
+from ..learning.generation_tiers import tier_prompt_block, tier_system
 from ..learning.levels import level_prompt_block
 from ..learning.teaching_profile import RULE_LABELS, normalize_teaching_plan, parse_teaching_profile
 
@@ -27,14 +28,35 @@ SYSTEM = (
     "6. 不要安排日程：任何生成内容中都不出现「第 X 天 / 第 X 周 / 每天 / 每周投入多少时间」这类按日历分配时间的表述；"
     "时间只以单个步骤或章节的工作量估计（如「1–2 小时」）出现，具体什么时候学由用户自己决定。\n"
     "7. 因材施教：根据知识性质选择教学方式，不为所有知识点套用统一栏目；空缺的栏目允许留空（[] 或空串），不要编造。\n"
-    "8. 用户会在 Obsidian 中阅读教程：正文 Markdown 中的标题层级、表格、代码块、数学公式、Mermaid 图必须语法正确。"
+    "8. 用户会在 Obsidian 中阅读教程：正文 Markdown 中的标题层级、表格、代码块、数学公式、Mermaid 图必须语法正确。\n"
+    "9. 不要添加 Obsidian 标签：正文和配套文件里不得出现用于分类的 #标签（如 #命令行 #基础），"
+    "也不得输出 frontmatter 的 tags 字段；需要分类或索引时用标题层级、目录或配套文件双链表达。"
+    "只有教学内容本身需要举例说明标签语法时，才可以在行内代码或代码块中提及 #标签，"
+    "且不得在正文末尾堆叠标签。"
 )
 
-# Obsidian 双链说明：正文允许使用 [[链接]] 指向本次生成集合内的配套文件
+# Obsidian 双链说明：正文只允许用 [[文件名]] 指向本次生成集合内的配套文件。
+# 模型此前会写出 [[...]]、[[目标]]、[[笔记名]] 这类占位/虚构链接，交付到 Vault 后全部是断链；
+# 这里把「可链接对象」和「写法」都收紧，语法示例必须放进行内代码或代码块。
 WIKILINK_RULE = (
-    "允许在正文使用 Obsidian 双链 [[文件名]] 引用本次同时生成的配套文件；"
-    "禁止指向本次生成集合之外或不存在的文件。\n"
+    "Obsidian 双链使用规则（严格）：\n"
+    "- 只有本次同时生成的配套文件才能作为双链目标，且只能写 [[文件名]] 这一种形式；\n"
+    "- 文件名必须与配套文件名完全一致：保留中文括号与大小写，不加 .md、不加路径、不加别名；\n"
+    "- 不得出现占位或虚构链接，例如 [[...]]、[[目标]]、[[B]]、[[笔记名]]；\n"
+    "- 不得使用 [[文件#标题]]、[[文件|别名]]、![[文件]] 等扩展形式；\n"
+    "- 如果教学内容本身需要演示双链语法，必须写进行内代码（如 `[[笔记名]]`）或代码块，"
+    "不要写成会生效的真实链接；\n"
+    "- 不需要引用配套文件时就不写任何双链。\n"
 )
+
+
+def _tier_prompt_block(goal) -> str:
+    return tier_prompt_block(goal)
+
+
+def _system_for(goal) -> str:
+    """系统提示 = 通用规则 + 当前挡位的独立角色与预算要求。"""
+    return f"{SYSTEM}\n\n{tier_system(goal)}"
 
 
 def _goal_ctx(goal) -> dict:
@@ -110,19 +132,21 @@ def diagnose(goal, discipline, materials_text: str = "") -> tuple[str, str]:
     user = (
         f"学科：{discipline.display_name}\n"
         f"学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
+        f"{_tier_prompt_block(goal)}"
         f"{_capability(goal)}\n"
         f"{_materials_section(materials_text)}\n"
         "请输出 JSON：{\"benefits\": str, \"prerequisites\": str, \"alternatives\": str, "
         "\"assumptions\": str, \"uncertainties\": str, \"recommendation\": str}。\n"
         "benefits/alternatives 用编号列表；recommendation 给出明确建议（推进/缩小范围/暂缓）。"
     )
-    return SYSTEM, user
+    return _system_for(goal), user
 
 
 def plan(goal, discipline, materials_text: str = "") -> tuple[str, str]:
     user = (
         f"学科：{discipline.display_name}\n学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
         f"该学科的常见实践形式：{discipline.practice_templates}\n"
+        f"{_tier_prompt_block(goal)}"
         f"{_capability(goal)}\n"
         f"{_materials_section(materials_text)}\n"
         "输出 JSON：{\"steps\": [{\"title\": str, \"objective\": str, \"estimated_effort\": str}]}。"
@@ -130,12 +154,13 @@ def plan(goal, discipline, materials_text: str = "") -> tuple[str, str]:
         "time_budget 是可投入总时间；estimated_effort 只表示完成该步骤所需的工作量估计（如「1–2 小时」），"
         "不要把步骤映射到具体日期或天次，不要出现「第 X 天」「每天」的表述。"
     )
-    return SYSTEM, user
+    return _system_for(goal), user
 
 
 def criteria(goal, discipline) -> tuple[str, str]:
     user = (
         f"学科：{discipline.display_name}\n学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
+        f"{_tier_prompt_block(goal)}"
         f"{_capability(goal)}\n"
         f"评估维度：{discipline.assessment_rubrics}\n\n"
         "输出 JSON：{\"criteria\": [{\"statement\": str, \"conditions\": str, \"evidence_type\": str, "
@@ -147,7 +172,7 @@ def criteria(goal, discipline) -> tuple[str, str]:
         "验收难度必须与能力层级匹配：层级越高，对独立完成、变式迁移与决策解释的要求越高；"
         "不得要求用户展示教程没有提供必要基础的能力。"
     )
-    return SYSTEM, user
+    return _system_for(goal), user
 
 
 # ---------------------------------------------------------------- 教程规划
@@ -157,6 +182,7 @@ def outline(goal, discipline, criteria_list, materials_text: str = "") -> tuple[
     user = (
         f"学科：{discipline.display_name}\n学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
         f"已确认的验收标准：{json.dumps(criteria_list, ensure_ascii=False)}\n"
+        f"{_tier_prompt_block(goal)}"
         f"{_capability(goal)}\n"
         f"{_materials_section(materials_text)}\n"
         f"{_teaching_charter({'rules': profile_data['rules']})}"
@@ -183,11 +209,24 @@ def outline(goal, discipline, criteria_list, materials_text: str = "") -> tuple[
         "本次任务的明确特殊要求可覆盖普通偏好，写入 task_overrides；"
         "硬约束冲突无法合理消解时写入 unresolved_conflicts，并采用不违反任一已知硬约束的可行方案。"
     )
-    return SYSTEM, user
+    return _system_for(goal), user
+
+
+def _companion_names_section(companion_names: list[str] | None) -> str:
+    """列出本次确定会交付的配套文件名，模型只能按这些名字写双链。"""
+    names = [str(name).strip() for name in (companion_names or []) if str(name).strip()]
+    if not names:
+        return ""
+    lines = "\n".join(f"- [[{name}]]" for name in names)
+    return (
+        "\n本次同时生成的配套文件（双链目标只能是下列文件名；不引用就留空）：\n"
+        f"{lines}\n"
+    )
 
 
 def section(
-    goal, discipline, outline_item, criteria_list, prior_titles, materials_text: str = ""
+    goal, discipline, outline_item, criteria_list, prior_titles, materials_text: str = "",
+    companion_names: list[str] | None = None,
 ) -> tuple[str, str]:
     plan = outline_item.get("_teaching_plan") if isinstance(outline_item, dict) else None
     if not plan:
@@ -198,10 +237,12 @@ def section(
         f"已学过章节：{prior_titles}\n"
         f"本章大纲：{json.dumps(outline_for_prompt, ensure_ascii=False)}\n"
         f"相关验收标准：{json.dumps(criteria_list, ensure_ascii=False)}\n"
+        f"{_tier_prompt_block(goal)}"
         f"{_capability(goal)}\n"
         f"{_materials_section(materials_text)}\n"
         f"{_teaching_charter(plan)}\n"
         f"{_teaching_plan_section(plan)}\n"
+        f"{_companion_names_section(companion_names)}"
         f"{WIKILINK_RULE}"
         "任务：撰写本章教程正文。先做内部教学规划（不必输出）：\n"
         "1. 本章的核心知识（A 级：直接决定目标达成，必须讲透——直觉、原理、关键结论、适用条件、使用方式）；\n"
@@ -255,7 +296,7 @@ def section(
         "- Markdown 必须语法正确：表格、代码块、公式、Mermaid 都要能直接渲染。\n"
         "不要把完整教学规划过程写进输出；输出即教程正文本身。"
     )
-    return SYSTEM, user
+    return _system_for(goal), user
 
 
 # ---------------------------------------------------------------- 配套文件
@@ -264,6 +305,7 @@ def cheatsheet(goal, discipline, outline_items, materials_text: str = "") -> tup
     user = (
         f"学科：{discipline.display_name}\n学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
         f"教程大纲：{json.dumps(outline_items, ensure_ascii=False)}\n"
+        f"{_tier_prompt_block(goal)}"
         f"{_capability(goal)}\n"
         f"{_materials_section(materials_text)}\n"
         f"{_teaching_charter()}"
@@ -279,13 +321,14 @@ def cheatsheet(goal, discipline, outline_items, materials_text: str = "") -> tup
         "输出 JSON：{\"title\": str, \"sections\": [{\"heading\": str, \"body\": str}]}，"
         "body 为 Markdown（表格 / 列表 / 代码块），heading 是速查文件内的小节标题。"
     )
-    return SYSTEM, user
+    return _system_for(goal), user
 
 
 def extra_exercises(goal, discipline, outline_items, materials_text: str = "") -> tuple[str, str]:
     user = (
         f"学科：{discipline.display_name}\n学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
         f"教程大纲：{json.dumps(outline_items, ensure_ascii=False)}\n"
+        f"{_tier_prompt_block(goal)}"
         f"{_capability(goal)}\n"
         f"{_materials_section(materials_text)}\n"
         f"{_teaching_charter()}"

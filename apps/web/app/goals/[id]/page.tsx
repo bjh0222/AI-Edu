@@ -22,6 +22,7 @@ import { FeedbackForm } from "@/components/FeedbackForm";
 import { Badge, Button, Card, DemoNotice, Empty, inputCls } from "@/components/ui";
 import { GOAL_PHASES } from "@/lib/goal-phases";
 import { GoalMaterialsCard } from "@/components/goals/GoalMaterialsCard";
+import { PausedGenerationPanel, type PauseResumeAction } from "@/components/PausedGeneration";
 
 const PHASES: { key: string; label: string }[] = [
   { key: "goal_definition", label: "目标定义" },
@@ -68,6 +69,8 @@ function GoalWorkspace() {
   const [quickSteps, setQuickSteps] = useState<QuickStartStep[]>([]);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [paused, setPaused] = useState<{ recommendation: string; plan: string } | null>(null);
+  const [pausedBusy, setPausedBusy] = useState(false);
   const [notice, setNotice] = useState("");
 
   const tutorial = tutorials[0] ?? null;
@@ -95,6 +98,12 @@ function GoalWorkspace() {
     ]);
     setGoal(g);
     setDiagnosis(d);
+    if (d?.user_decision === "暂停") {
+      setPaused({
+        recommendation: d.recommendation || "AI 判断当前需求不值得继续。",
+        plan: g.application_context || g.user_notes || g.title || "",
+      });
+    }
     setPlan(p);
     setCriteria(c);
     setTutorials(ts);
@@ -166,15 +175,19 @@ function GoalWorkspace() {
     }
   };
 
-  const startQuickstart = async () => {
+  const startQuickstart = async (pauseAction?: PauseResumeAction) => {
     if (busy) return;
     setBusy("quickstart");
     setError("");
     setNotice("");
     setQuickSteps([]);
     try {
-      const resp = await api.post<QuickStartResult>(`/api/goals/${goalId}/tutorials/quickstart`);
+      const resp = await api.post<QuickStartResult>(
+        `/api/goals/${goalId}/tutorials/quickstart`,
+        pauseAction ? { pause_action: pauseAction } : undefined
+      );
       setQuickSteps(resp.steps);
+      setPaused(null);
       await loadAll();
       if (resp.job_id) {
         // 可能是章节任务，也可能是「只差配套文件」的后台任务，进度文案交给 job.stage
@@ -185,8 +198,40 @@ function GoalWorkspace() {
         setNotice("教材已是最新状态：没有重复生成。");
       }
     } catch (e) {
+      const detail = e instanceof ApiError ? e.data as { goal_id?: string; recommendation?: string } | null : null;
+      if (e instanceof ApiError && e.code === "generation_paused" && detail?.goal_id) {
+        setPaused({
+          recommendation: detail.recommendation || e.message,
+          plan: goal?.application_context || goal?.user_notes || goal?.title || "",
+        });
+      } else {
+        setError(errMsg(e));
+      }
       setBusy("");
+    }
+  };
+
+  const resumePaused = (action: PauseResumeAction) => {
+    setPausedBusy(true);
+    void startQuickstart(action).finally(() => setPausedBusy(false));
+  };
+
+  const revisePaused = async (plan: string) => {
+    if (!plan.trim()) return;
+    setPausedBusy(true);
+    setError("");
+    try {
+      await api.patch(`/api/goals/${goalId}`, {
+        application_context: plan,
+        user_notes: plan,
+      });
+      await loadAll();
+      setPaused(null);
+      await startQuickstart("proceed");
+    } catch (e) {
       setError(errMsg(e));
+    } finally {
+      setPausedBusy(false);
     }
   };
 
@@ -247,6 +292,20 @@ function GoalWorkspace() {
           {error}
         </div>
       )}
+
+        {paused && (
+          <div className="mb-4">
+            <Card title="生成已暂停" desc="请选择如何继续；三个选项都不会自动修改 AI 的原始判断记录。">
+              <PausedGenerationPanel
+                recommendation={paused.recommendation}
+                initialPlan={paused.plan}
+                busy={pausedBusy || busy === "quickstart"}
+                onResume={resumePaused}
+                onRevise={(plan) => void revisePaused(plan)}
+              />
+            </Card>
+          </div>
+        )}
       {notice && (
         <div className="mb-4 rounded-xl border border-[#c6eee4] bg-[#f0fbf8] px-4 py-2.5 text-[12px] text-[#128b78]">
           {notice}
@@ -459,7 +518,7 @@ function GoalWorkspace() {
                   一键生成会自动生成并同意验收标准，不需要逐条点击。当前已确认 {confirmedCount} 条。
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  <Button onClick={startQuickstart} disabled={busy === "quickstart" || !!gen}>
+                  <Button onClick={() => void startQuickstart()} disabled={busy === "quickstart" || !!gen}>
                     {busy === "quickstart" ? "一键生成中…" : "一键生成教材（推荐）"}
                   </Button>
                   <Button
@@ -491,7 +550,7 @@ function GoalWorkspace() {
                   </Link>
                   <Button
                     variant="secondary"
-                    onClick={startQuickstart}
+                    onClick={() => void startQuickstart()}
                     disabled={busy === "quickstart" || !!gen}
                   >
                     {busy === "quickstart" ? "补齐中…" : tutorial.current_version?.content.sections.length ? "一键补齐流程" : "一键生成全部章节"}

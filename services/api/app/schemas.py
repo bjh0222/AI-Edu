@@ -37,6 +37,9 @@ class GoalCreate(BaseModel):
     capability_level: Literal["L1", "L2", "L3"] = "L2"
     # 是否生成独立的额外练习文件（教程内的必要练习不受此开关影响）
     generate_extra_exercises: bool = False
+    # 生成挡位：快速 / 标准 / 深度
+    generation_tier: Literal["fast", "standard", "deep"] = "standard"
+    user_notes: str = ""
 
 
 class GoalPatch(BaseModel):
@@ -47,6 +50,7 @@ class GoalPatch(BaseModel):
     time_budget: Optional[str] = None
     capability_level: Optional[Literal["L1", "L2", "L3"]] = None
     generate_extra_exercises: Optional[bool] = None
+    generation_tier: Optional[Literal["fast", "standard", "deep"]] = None
     completed: Optional[bool] = None
     status: Optional[str] = None
     user_notes: Optional[str] = None
@@ -63,6 +67,8 @@ class GoalOut(BaseModel):
     time_budget: str
     capability_level: str = "L2"
     generate_extra_exercises: bool = False
+    # 生成挡位：快速 / 标准 / 深度
+    generation_tier: Literal["fast", "standard", "deep"] = "standard"
     status: str
     user_notes: str
     archived: bool
@@ -338,6 +344,9 @@ class TutorialOut(BaseModel):
     title: str
     status: str
     current_version: Optional[TutorialVersionOut] = None
+    delivery_status: str = ""
+    delivery_path: str = ""
+    delivery_version: int = 0
     history_count: int = 0
     tokens: TokenUsage = Field(default_factory=TokenUsage)
 
@@ -801,3 +810,43 @@ class ChatResponse(BaseModel):
     user: ChatMessageOut
     assistant: ChatMessageOut
     demo: bool = False
+
+
+# ---------------------------------------------------------------- one-shot generation & delivery
+
+
+
+
+class QuickStartRequest(BaseModel):
+    """一键生成续跑参数；仅在 AI 暂停后由用户选择是否继续。"""
+
+    pause_action: Optional[Literal["proceed", "adopt"]] = None
+
+class OneShotGenerateIn(BaseModel):
+    """统一生成入口：一段需求 + 一个挡位即可创建任务并自动规划。"""
+
+    title: str = Field(default="", max_length=200)
+    requirement: str = Field(min_length=1, max_length=8000)
+    generation_tier: Literal["fast", "standard", "deep"] = "standard"
+    domain_key: Optional[str] = None
+    motivation: str = ""
+    application_context: str = ""
+    current_level: str = ""
+    time_budget: str = ""
+    capability_level: Literal["L1", "L2", "L3"] = "L2"
+    generate_extra_exercises: bool = False
+    user_notes: str = ""
+
+
+class OneShotGenerateOut(BaseModel):
+    goal: GoalOut
+    steps: list[QuickStartStep] = []
+    tutorial: TutorialOut
+    job_id: Optional[str] = None
+    demo: bool = False
+
+
+class DeliveryUpdateIn(BaseModel):
+    status: Literal["delivered", "failed"]
+    path: str = ""
+    version: Optional[int] = None

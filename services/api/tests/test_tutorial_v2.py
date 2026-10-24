@@ -117,7 +117,7 @@ def test_quickstart_with_extra_exercises_and_wikilinks(client):
     md = resp.text
     assert f"[[{cheat['filename']}]]" in md
     assert f"[[{extra['filename']}]]" in md
-    assert "能力层级" in md
+    assert "generation_tier: standard" in md
 
     # 配套文件可导出，文件名与双链一致（header 中文件名为 URL 编码）
     from urllib.parse import unquote
@@ -272,3 +272,127 @@ def test_quickstart_backfills_missing_companions(client):
 
 def report_passed(tutorial: dict) -> bool:
     return tutorial["current_version"]["quality_report"]["passed"] is True
+
+
+# ---------------------------------------------------------------- 导出：无标签 + 双链有效
+
+def _active_markdown(md: str) -> str:
+    """去掉围栏代码块与行内代码，只保留会生效的 Markdown 文本。"""
+    import re
+
+    without_fences = re.sub(r"```.*?```", "", md, flags=re.S)
+    return re.sub(r"`[^`\n]*`", "", without_fences)
+
+
+def _active_links(md: str) -> set[str]:
+    import re
+
+    targets = set()
+    for token in re.findall(r"!?\[\[([^\[\]\n]+)\]\]", _active_markdown(md)):
+        target = token.split("|", 1)[0].split("#", 1)[0].strip()
+        if target:
+            targets.add(target.removesuffix(".md"))
+    return targets
+
+
+def _active_tags(md: str) -> list[str]:
+    import re
+
+    return re.findall(
+        r"(?<![\w#])#[A-Za-z0-9_\u4e00-\u9fff][\w\u4e00-\u9fff/-]*", _active_markdown(md)
+    )
+
+
+def test_export_has_no_obsidian_tags(client):
+    """导出的教程与配套文件不应带会生效的 Obsidian 标签。"""
+    goal = _create_goal(client, title="命令行标签检查", generate_extra_exercises=False)
+    body = _quickstart(client, goal["id"])
+    _poll_job(client, body["job_id"])
+
+    tutorial_id = body["tutorial"]["id"]
+    main = client.get(f"/api/tutorials/{tutorial_id}/export").text
+    cheat = client.get(f"/api/tutorials/{tutorial_id}/export/cheatsheet").text
+
+    assert _active_tags(main) == []
+    assert _active_tags(cheat) == []
+    assert "tags:" not in main.split("---", 2)[1]
+
+
+def test_export_wikilinks_only_point_to_delivered_files(client):
+    """主教程与配套文件里的双链必须指向本次实际交付的文件名。"""
+    goal = _create_goal(client, title="命令行双链检查", generate_extra_exercises=True)
+    body = _quickstart(client, goal["id"])
+    _poll_job(client, body["job_id"])
+
+    tutorial_id = body["tutorial"]["id"]
+    tutorial = client.get(f"/api/tutorials/{tutorial_id}").json()
+    content = tutorial["current_version"]["content"]
+    cheat_name = content["cheatsheet"]["filename"]
+    extra_name = content["extra_exercises"]["filename"]
+    main_name = f"{goal['title']}-教程"
+
+    main = client.get(f"/api/tutorials/{tutorial_id}/export").text
+    cheat = client.get(f"/api/tutorials/{tutorial_id}/export/cheatsheet").text
+    extra = client.get(f"/api/tutorials/{tutorial_id}/export/exercises").text
+
+    assert _active_links(main) == {cheat_name, extra_name}
+    assert _active_links(cheat) == {main_name}
+    assert _active_links(extra) == {main_name}
+
+
+def test_normalize_obsidian_syntax_keeps_examples_but_disables_them():
+    from app.services.tutorials import normalize_obsidian_syntax
+
+    md = "\n".join(
+        [
+            "# 标题不含标签",
+            "正文引用配套文件：[[真实配套]]，占位链接 [[...]] 与示例 [[笔记名]]。",
+            "分类： #命令行 #基础/管道",
+            "行内代码 `[[示例]]` 与 `#标签` 保持原样。",
+            "```powershell",
+            "# 这是 PowerShell 注释，不是标签",
+            "Get-ChildItem | Sort-Object",
+            "```",
+        ]
+    )
+    out = normalize_obsidian_syntax(md, {"真实配套"})
+    assert "[[真实配套]]" in out
+    assert "`[[...]]`" in out
+    assert "`[[笔记名]]`" in out
+    assert "`#命令行`" in out
+    assert "`#基础/管道`" in out
+    assert "`[[示例]]`" in out
+    assert "# 这是 PowerShell 注释" in out
+
+    active = _active_markdown(out)
+    assert "[[真实配套]]" in active
+    assert "[[" not in active.replace("[[真实配套]]", "")
+    assert _active_tags(out) == []
+
+
+def test_section_prompt_forbids_tags_and_guesses(client):
+    """章节提示词必须注入禁标签规则与确切的配套文件名。"""
+    from app.llm.prompts import WIKILINK_RULE, section
+
+    class FakeGoal:
+        title = "目标标题"
+        motivation = "动机"
+        application_context = "场景"
+        current_level = "基础"
+        time_budget = "共 10 小时"
+        capability_level = "L2"
+        generation_tier = "standard"
+        generate_extra_exercises = True
+        user_notes = ""
+
+    class FakeDiscipline:
+        display_name = "计算机科学与信息技术"
+
+    system, user = section(
+        FakeGoal(), FakeDiscipline(), {"title": "节", "content_type": "concept"},
+        [], [], "", ["目标标题-知识速查", "目标标题-额外练习"],
+    )
+    assert "不要添加 Obsidian 标签" in system
+    assert "[[目标标题-知识速查]]" in user
+    assert "[[目标标题-额外练习]]" in user
+    assert "[[...]]" in WIKILINK_RULE and "占位" in WIKILINK_RULE

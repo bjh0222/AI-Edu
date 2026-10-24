@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from .disciplines import DisciplineProfile
+from .generation_tiers import tier_config
 
 
 def _goal_title(goal) -> str:
@@ -53,7 +54,7 @@ def diagnose(goal, discipline: DisciplineProfile) -> dict:
 
 def plan(goal, discipline: DisciplineProfile) -> dict:
     title = _goal_title(goal)
-    return {
+    all_steps = {
         "steps": [
             {
                 "title": "明确目标边界与环境准备",
@@ -87,6 +88,12 @@ def plan(goal, discipline: DisciplineProfile) -> dict:
             },
         ]
     }
+    tier = tier_config(goal).key
+    if tier == "fast":
+        all_steps["steps"] = all_steps["steps"][:2]
+    elif tier == "standard":
+        all_steps["steps"] = all_steps["steps"][:4]
+    return all_steps
 
 
 def criteria(goal, discipline: DisciplineProfile) -> list[dict]:
@@ -122,6 +129,10 @@ def criteria(goal, discipline: DisciplineProfile) -> list[dict]:
             "rationale": "迁移是真正理解的标志",
         },
     ]
+    if tier_config(goal).key == "fast":
+        return base[:2]
+    if tier_config(goal).key == "standard" and level != "L3":
+        base = base[:3]
     if level == "L1":
         # L1 不要求迁移；保留概念解释、最小任务与错误识别，并显式放宽范围
         kept = base[:3]
@@ -139,7 +150,7 @@ def criteria(goal, discipline: DisciplineProfile) -> list[dict]:
 def outline(goal, discipline: DisciplineProfile, criterion_ids: list[str]) -> list[dict]:
     title = _goal_title(goal)
     c = (criterion_ids + ["", "", "", ""])[:4]
-    return [
+    items = [
         {
             "title": "准备与核心概念",
             "purpose": f"明确「{title}」的范围，建立必要概念与工具环境。",
@@ -169,6 +180,7 @@ def outline(goal, discipline: DisciplineProfile, criterion_ids: list[str]) -> li
             "criteria_ids": [x for x in [c[3], c[1]] if x],
         },
     ]
+    return items[:tier_config(goal).max_sections]
 
 
 def section(goal, discipline: DisciplineProfile, item: dict, criteria_by_id: dict) -> dict:

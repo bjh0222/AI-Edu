@@ -79,7 +79,7 @@ def test_sections_generate_runs_three_way_concurrent(client, monkeypatch):
     state = {"active": 0, "max_active": 0, "calls": 0}
     threads: set[str] = set()
 
-    def fake_section(self, goal, discipline, item, criteria_list, prior_titles, materials_text=""):
+    def fake_section(self, goal, discipline, item, criteria_list, prior_titles, materials_text="", companion_names=None):
         with lock:
             state["active"] += 1
             state["max_active"] = max(state["max_active"], state["active"])
@@ -90,7 +90,7 @@ def test_sections_generate_runs_three_way_concurrent(client, monkeypatch):
             if enter_index <= 3:
                 # 串行实现等不到 3 个并发 → BrokenBarrierError → 任务失败 → 断言失败
                 barrier.wait()
-            return original(self, goal, discipline, item, criteria_list, prior_titles, materials_text)
+            return original(self, goal, discipline, item, criteria_list, prior_titles, materials_text, companion_names)
         finally:
             with lock:
                 state["active"] -= 1
@@ -113,10 +113,10 @@ def test_sections_merge_in_outline_order_when_later_finishes_first(client, monke
     total = len(outline)
     original = AIService.section
 
-    def slow_first_section(self, goal, discipline, item, criteria_list, prior_titles, materials_text=""):
+    def slow_first_section(self, goal, discipline, item, criteria_list, prior_titles, materials_text="", companion_names=None):
         idx = len(prior_titles)  # 大纲静态前缀长度 == 本节序号
         time.sleep(0.02 * (total - idx))  # 越靠前的节越慢：完成顺序与大纲相反
-        data = original(self, goal, discipline, item, criteria_list, prior_titles, materials_text)
+        data = original(self, goal, discipline, item, criteria_list, prior_titles, materials_text, companion_names)
         data["title"] = f"{idx:02d}-{item.get('title', '')}"
         return data
 
@@ -143,11 +143,11 @@ def test_sections_failure_keeps_completed_draft(client, monkeypatch):
     # 重试延迟归零，避免测试真的等 3s + 8s
     monkeypatch.setattr(tutorials_service, "SECTION_RETRY_DELAYS", (0, 0))
 
-    def failing_second_section(self, goal, discipline, item, criteria_list, prior_titles, materials_text=""):
+    def failing_second_section(self, goal, discipline, item, criteria_list, prior_titles, materials_text="", companion_names=None):
         idx = len(prior_titles)
         if idx == 1:
             raise AIServiceError("模拟模型故障")
-        data = original(self, goal, discipline, item, criteria_list, prior_titles, materials_text)
+        data = original(self, goal, discipline, item, criteria_list, prior_titles, materials_text, companion_names)
         data["title"] = f"{idx:02d}-{item.get('title', '')}"
         return data
 

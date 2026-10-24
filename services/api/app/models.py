@@ -39,6 +39,8 @@ class LearningGoal(Base, TimestampMixin):
     capability_level = Column(String(10), default=CAPABILITY_DEFAULT)
     # 是否生成独立的额外练习文件（默认关闭；教程内的必要练习不受此开关影响）
     generate_extra_exercises = Column(Boolean, default=False)
+    # 生成挡位：fast / standard / deep；旧数据回退 standard
+    generation_tier = Column(String(20), default="standard")
     status = Column(String(30), default="goal_definition")
     user_notes = Column(Text, default="")
     archived = Column(Boolean, default=False)
@@ -109,6 +111,10 @@ class Tutorial(Base, TimestampMixin):
     title = Column(String(200), default="")
     status = Column(String(30), default="outline")  # outline / drafted / reviewed
     current_version_id = Column(String(36), nullable=True)
+    # 生成状态在 Tutorial / TutorialVersion / GenerationJob；以下只记录单向交付结果
+    delivery_status = Column(String(20), default="")
+    delivery_path = Column(Text, default="")
+    delivery_version = Column(Integer, default=0)
 
 
 class TutorialVersion(Base):

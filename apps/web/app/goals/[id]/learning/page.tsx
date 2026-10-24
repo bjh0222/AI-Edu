@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { api, downloadFile } from "@/lib/api";
+import { api, ApiError, downloadFile } from "@/lib/api";
 import { jobDoneMessage, startJobPolling } from "@/lib/job-poll";
 import type {
   ChatResponse,
@@ -17,6 +17,7 @@ import { OutlineList, SectionContent, TokenLine } from "@/components/tutorial";
 import { FeedbackForm } from "@/components/FeedbackForm";
 import { Badge, Button, Card, DemoNotice, Empty, inputCls } from "@/components/ui";
 import { GoalPhaseView } from "@/components/goals/GoalPhaseView";
+import { PausedGenerationPanel, type PauseResumeAction } from "@/components/PausedGeneration";
 import { errMsg, type WorkspaceSlices } from "@/components/goals/useGoalWorkspace";
 
 const PHASE = phase("learning");
@@ -34,6 +35,8 @@ export default function LearningPage() {
   const [gen, setGen] = useState<{ stage: string; progress: number; tokens: number } | null>(null);
   // 轮询取消函数放在页面组件里，渲染回调只负责使用（Hook 不能写在 render prop 内）
   const pollCancel = useRef<(() => void) | null>(null);
+  const [paused, setPaused] = useState<{ recommendation: string; plan: string } | null>(null);
+  const [pausedBusy, setPausedBusy] = useState(false);
 
   useEffect(() => {
     return () => {
@@ -76,15 +79,19 @@ export default function LearningPage() {
           });
         };
 
-        const startQuickstart = async () => {
+        const startQuickstart = async (pauseAction?: PauseResumeAction) => {
           if (busy) return;
           setBusy("quickstart");
           setError("");
           setNotice("");
           setSteps([]);
           try {
-            const resp = await api.post<QuickStartResult>(`/api/goals/${goalId}/tutorials/quickstart`);
+            const resp = await api.post<QuickStartResult>(
+              `/api/goals/${goalId}/tutorials/quickstart`,
+              pauseAction ? { pause_action: pauseAction } : undefined
+            );
             setSteps(resp.steps);
+            setPaused(null);
             await reload();
             if (resp.job_id) {
               setGen({ stage: "一键生成已提交，正在生成全部章节…", progress: 0, tokens: 0 });
@@ -94,8 +101,42 @@ export default function LearningPage() {
               setNotice("教材已是最新状态：没有重复生成。");
             }
           } catch (e) {
+            const detail = e instanceof ApiError
+              ? e.data as { goal_id?: string; recommendation?: string } | null
+              : null;
+            if (e instanceof ApiError && e.code === "generation_paused" && detail?.goal_id) {
+              setPaused({
+                recommendation: detail.recommendation || e.message,
+                plan: data.goal?.application_context || data.goal?.user_notes || data.goal?.title || "",
+              });
+            } else {
+              setError(errMsg(e));
+            }
             setBusy("");
+          }
+        };
+
+        const resumePaused = (action: PauseResumeAction) => {
+          setPausedBusy(true);
+          void startQuickstart(action).finally(() => setPausedBusy(false));
+        };
+
+        const revisePaused = async (plan: string) => {
+          if (!plan.trim()) return;
+          setPausedBusy(true);
+          setError("");
+          try {
+            await api.patch(`/api/goals/${goalId}`, {
+              application_context: plan,
+              user_notes: plan,
+            });
+            await reload();
+            setPaused(null);
+            await startQuickstart("proceed");
+          } catch (e) {
             setError(errMsg(e));
+          } finally {
+            setPausedBusy(false);
           }
         };
 
@@ -133,6 +174,15 @@ export default function LearningPage() {
                   </div>
                 }
               >
+              {paused && (
+                <PausedGenerationPanel
+                  recommendation={paused.recommendation}
+                  initialPlan={paused.plan}
+                  busy={pausedBusy || busy === "quickstart"}
+                  onResume={resumePaused}
+                  onRevise={(plan) => void revisePaused(plan)}
+                />
+              )}
                 {steps.length > 0 && <QuickStepsPanel steps={steps} />}
                 {gen && (
                   <div className="mb-3 rounded-xl border border-[#c9c2ff] bg-[#f8f7ff] px-3 py-2 text-[11px] text-brand">
@@ -147,7 +197,7 @@ export default function LearningPage() {
                       一键生成会自动生成并同意验收标准，不需要逐条点击。当前已确认 {confirmedCount} 条。
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
-                      <Button onClick={startQuickstart} disabled={busy === "quickstart" || !!gen}>
+                      <Button onClick={() => void startQuickstart()} disabled={busy === "quickstart" || !!gen}>
                         {busy === "quickstart" ? "一键生成中…" : "一键生成教材（推荐）"}
                       </Button>
                       <Button

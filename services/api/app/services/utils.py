@@ -6,6 +6,7 @@ from typing import Any
 
 from ..learning.disciplines import get_profile
 from ..learning.engine import PHASES
+from ..learning.generation_tiers import normalize_tier
 from ..learning.levels import normalize_level
 
 
@@ -49,6 +50,7 @@ def goal_dict(goal) -> dict:
         # 旧数据该字段为 NULL → 归一化默认层级
         "capability_level": normalize_level(getattr(goal, "capability_level", None)),
         "generate_extra_exercises": bool(getattr(goal, "generate_extra_exercises", False)),
+        "generation_tier": normalize_tier(getattr(goal, "generation_tier", None)),
         "status": goal.status,
         "user_notes": goal.user_notes or "",
         "archived": bool(goal.archived),

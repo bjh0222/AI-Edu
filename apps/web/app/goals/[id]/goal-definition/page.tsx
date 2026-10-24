@@ -3,8 +3,8 @@
 import Link from "next/link";
 import { useState } from "react";
 import { api } from "@/lib/api";
-import type { Goal } from "@/lib/types";
-import { CAPABILITY_LEVELS } from "@/lib/types";
+import type { Goal, GenerationTier } from "@/lib/types";
+import { CAPABILITY_LEVELS, GENERATION_TIERS } from "@/lib/types";
 import { phase } from "@/lib/goal-phases";
 import { Badge, Button, Card, Field, inputCls } from "@/components/ui";
 import { GoalPhaseView } from "@/components/goals/GoalPhaseView";
@@ -49,16 +49,16 @@ export default function GoalDefinitionPage() {
             <Card title="目标完整性检查" desc="描述越具体，价值诊断与验收标准越可判定">
               {data.goal && <Completeness goal={data.goal} />}
             </Card>
-            <Card title="下一步" desc="目标定义只是起点，先做价值诊断再决定投入">
+            <Card title="下一步" desc="除非只是修改基础信息，否则默认回到总览页一键生成">
               <div className="grid gap-2 text-[12px]">
                 <Link
-                  href={`/goals/${data.goal?.id}/diagnosis`}
+                  href={`/goals/${data.goal?.id}`}
                   className="rounded-lg border border-line bg-white px-3 py-2 font-semibold text-brand hover:border-[#c9c3ff]"
                 >
-                  去做价值诊断 →
+                  自动生成教程 →
                 </Link>
                 <p className="text-[11px] leading-relaxed text-muted">
-                  目标定义阶段不生成教程：先判断是否值得学、范围是否合理，再进入计划与验收标准。
+                  总览页的一键生成会自动完成价值判断、学习计划、验收标准与教程；只有明显不值得推进时才暂停。
                 </p>
               </div>
             </Card>
@@ -87,6 +87,7 @@ function GoalForm({
     user_notes: goal.user_notes,
     capability_level: (goal.capability_level || "L2") as Goal["capability_level"],
     generate_extra_exercises: !!goal.generate_extra_exercises,
+    generation_tier: (goal.generation_tier || "standard") as GenerationTier,
   });
 
   return (
@@ -136,6 +137,23 @@ function GoalForm({
         <span className="text-[10px] leading-relaxed text-muted">
           {CAPABILITY_LEVELS.find((lv) => lv.key === form.capability_level)?.description}
           层级决定教程深度、练习设计与验收难度；修改后重新生成教程才会生效。
+        </span>
+      </Field>
+      <Field label="生成挡位">
+        <select
+          className={inputCls}
+          value={form.generation_tier}
+          onChange={(event) => setForm({ ...form, generation_tier: event.target.value as GenerationTier })}
+        >
+          {GENERATION_TIERS.map((tier) => (
+            <option key={tier.key} value={tier.key}>
+              {tier.name} · {tier.key}
+            </option>
+          ))}
+        </select>
+        <span className="text-[10px] leading-relaxed text-muted">
+          {GENERATION_TIERS.find((tier) => tier.key === form.generation_tier)?.description}
+          一键生成会按此挡位自动完成价值判断、计划、验收标准与教程。
         </span>
       </Field>
       <Field label="额外练习文件">

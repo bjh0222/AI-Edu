@@ -5,16 +5,20 @@ const BASE = process.env.NEXT_PUBLIC_API_BASE ?? "";
 export class ApiError extends Error {
   code: string;
   status: number;
-  constructor(status: number, code: string, message: string) {
+  data?: unknown;
+
+  constructor(status: number, code: string, message: string, data?: unknown) {
     super(message);
     this.code = code;
     this.status = status;
+    this.data = data;
   }
 }
 
 async function errorFrom(status: number, bodyText: string): Promise<ApiError> {
   let code = "error";
   let message = `请求失败（${status}）`;
+  let data: unknown;
   try {
     const body = JSON.parse(bodyText);
     if (body?.detail?.message) {
@@ -28,10 +32,11 @@ async function errorFrom(status: number, bodyText: string): Promise<ApiError> {
       code = body.code ?? code;
       message = body.message;
     }
+    data = body?.detail ?? body;
   } catch {
     /* ignore */
   }
-  return new ApiError(status, code, message);
+  return new ApiError(status, code, message, data);
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
