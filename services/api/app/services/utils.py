@@ -47,6 +47,7 @@ def goal_dict(goal) -> dict:
         "application_context": goal.application_context or "",
         "current_level": goal.current_level or "",
         "time_budget": goal.time_budget or "",
+        "hard_constraints": getattr(goal, "hard_constraints", "") or "",
         # 旧数据该字段为 NULL → 归一化默认层级
         "capability_level": normalize_level(getattr(goal, "capability_level", None)),
         "generate_extra_exercises": bool(getattr(goal, "generate_extra_exercises", False)),

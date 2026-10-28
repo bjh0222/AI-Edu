@@ -200,6 +200,7 @@ function makeModal() {
     motivation: "",
     application_context: "",
     current_level: "",
+    hard_constraints: "",
     time_budget: "共 10 小时",
     capability_level: "L2",
     generate_extra_exercises: false,

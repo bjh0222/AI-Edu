@@ -18,6 +18,12 @@ const FIELDS = [
   { key: "motivation", label: "为什么要学", placeholder: "它和你的当前需求或长期目标有什么关系？", rows: 2 },
   { key: "application_context", label: "学完要能做什么", placeholder: "尽量描述一个可观察、可验收的任务。", rows: 3 },
   { key: "current_level", label: "当前基础", placeholder: "你已经会什么、卡在哪里？", rows: 2 },
+  {
+    key: "hard_constraints",
+    label: "硬性约束（可选）",
+    placeholder: "生成内容必须满足的强制要求，每行一条。例如：\n不安排任何日程\n所有命令示例同时给出 Linux 与 Windows 写法",
+    rows: 2,
+  },
 ] as const;
 
 export default function GoalDefinitionPage() {
@@ -25,7 +31,7 @@ export default function GoalDefinitionPage() {
     <GoalPhaseView phase={PHASE} slices={SLICES}>
       {({ data, run, busy }) => (
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
-          <Card title="目标基础信息" desc="名称、动机、应用场景、当前基础与时间预算——这些会进入后续所有生成的 prompt">
+          <Card title="目标基础信息" desc="名称、动机、应用场景、当前基础、时间预算与硬性约束——这些会进入后续所有生成的 prompt">
             {data.goal && (
               <GoalForm
                 // 服务端数据更新后换 key 重新挂载表单，避免用 effect 强行 setState
@@ -84,6 +90,7 @@ function GoalForm({
     application_context: goal.application_context,
     current_level: goal.current_level,
     time_budget: goal.time_budget,
+    hard_constraints: goal.hard_constraints || "",
     user_notes: goal.user_notes,
     capability_level: (goal.capability_level || "L2") as Goal["capability_level"],
     generate_extra_exercises: !!goal.generate_extra_exercises,

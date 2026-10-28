@@ -117,7 +117,8 @@ def test_quickstart_with_extra_exercises_and_wikilinks(client):
     md = resp.text
     assert f"[[{cheat['filename']}]]" in md
     assert f"[[{extra['filename']}]]" in md
-    assert "generation_tier: standard" in md
+    assert not md.startswith("---")
+    assert "ai_edu:" not in md
 
     # 配套文件可导出，文件名与双链一致（header 中文件名为 URL 编码）
     from urllib.parse import unquote
@@ -315,7 +316,7 @@ def test_export_has_no_obsidian_tags(client):
 
     assert _active_tags(main) == []
     assert _active_tags(cheat) == []
-    assert "tags:" not in main.split("---", 2)[1]
+    assert not main.startswith("---")
 
 
 def test_export_wikilinks_only_point_to_delivered_files(client):
@@ -392,7 +393,8 @@ def test_section_prompt_forbids_tags_and_guesses(client):
         FakeGoal(), FakeDiscipline(), {"title": "节", "content_type": "concept"},
         [], [], "", ["目标标题-知识速查", "目标标题-额外练习"],
     )
-    assert "不要添加 Obsidian 标签" in system
+    assert "不要添加 Obsidian 笔记属性" in system
+    assert "#标签" in system
     assert "[[目标标题-知识速查]]" in user
     assert "[[目标标题-额外练习]]" in user
     assert "[[...]]" in WIKILINK_RULE and "占位" in WIKILINK_RULE

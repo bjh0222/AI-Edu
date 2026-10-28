@@ -1,7 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import type { ContentBlock, Criterion, OutlineItem, Section, TeachingPlan, TokenUsage } from "@/lib/types";
+import type {
+  ContentBlock,
+  Criterion,
+  OutlineItem,
+  RuleCheck,
+  Section,
+  TeachingPlan,
+  TokenUsage,
+} from "@/lib/types";
 import { CONTENT_TYPE_LABELS } from "@/lib/types";
 import { fmtTokens, usageSourceLabel } from "@/lib/format";
 
@@ -81,6 +89,28 @@ function BlockView({ block }: { block: ContentBlock }) {
   );
 }
 
+/** 画像硬性约束的核验提示：只有生成期核验过的内容才带 rule_check。 */
+export function RuleCheckNotice({ check }: { check?: RuleCheck }) {
+  if (!check) return null;
+  if (check.repaired) {
+    return (
+      <div className="rounded-lg border border-[#e7e3ff] bg-[#f7f6ff] px-2.5 py-1.5 text-[10px] leading-relaxed text-[#5a6a86]">
+        首稿违反了你的硬性约束，已定向重写并通过核验：{check.violations.join("；")}
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-lg border border-[#f0d3d3] bg-[#fdf7f7] px-2.5 py-1.5 text-[10px] leading-relaxed text-[#a33]">
+      <b>本次交付未完全满足你的硬性约束</b>（建议重新生成本节）：
+      <ul className="mt-1 list-disc pl-4">
+        {check.violations.map((item, index) => (
+          <li key={index}>{item}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 /** 单节正文：v2 内容块结构优先；旧结构（explanation/steps/…）原样兼容渲染。 */
 export function SectionContent({
   section,
@@ -93,6 +123,7 @@ export function SectionContent({
   const isV2 = (section.content?.length ?? 0) > 0;
   return (
     <div className="grid gap-2">
+      <RuleCheckNotice check={section.rule_check} />
       {isV2 ? (
         <>
           {section.purpose && <div className="text-[11px] text-muted">{section.purpose}</div>}

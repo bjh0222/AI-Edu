@@ -311,6 +311,22 @@ class AIEduModal extends Modal {
     });
     this.currentLevelEl.value = "";
 
+    // 硬性约束：注入所有生成阶段 prompt，违反任一条即视为交付不合格
+    const constraintsField = this.createField(form, "硬性约束（可选）");
+    this.hardConstraintsEl = constraintsField.createEl("textarea", {
+      cls: "ai-edu-input",
+      attr: {
+        rows: "2",
+        placeholder:
+          "生成内容必须满足的强制要求，每行一条。例如：\n不安排任何日程\n所有命令示例同时给出 Linux 与 Windows 写法",
+      },
+    });
+    this.hardConstraintsEl.value = "";
+    constraintsField.createEl("span", {
+      cls: "ai-edu-hint",
+      text: "填写后会注入价值判断、计划、验收标准、教程与配套文件的全部生成提示词；违反任一条即视为交付不合格",
+    });
+
     // 可投入总时间
     const timeField = this.createField(form, "可投入总时间");
     this.timeBudgetEl = timeField.createEl("input", {
@@ -409,6 +425,7 @@ class AIEduModal extends Modal {
       this.motivationEl,
       this.applicationEl,
       this.currentLevelEl,
+      this.hardConstraintsEl,
       this.timeBudgetEl,
       this.capabilityEl,
       this.tierEl,
@@ -656,6 +673,7 @@ class AIEduModal extends Modal {
       application_context: this.applicationEl.value.trim(),
       current_level: this.currentLevelEl.value.trim(),
       time_budget: this.timeBudgetEl.value.trim(),
+      hard_constraints: this.hardConstraintsEl.value.trim(),
       capability_level: this.capabilityEl.value,
       generate_extra_exercises: !!this.extraEl.checked,
       generation_tier: this.tierEl.value,
@@ -811,6 +829,7 @@ class AIEduModal extends Modal {
                   application_context: form.application_context || requirement,
                   current_level: form.current_level,
                   time_budget: form.time_budget,
+                  hard_constraints: form.hard_constraints,
                   capability_level: form.capability_level,
                   generate_extra_exercises: form.generate_extra_exercises,
                   generation_tier: form.generation_tier,

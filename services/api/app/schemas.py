@@ -33,6 +33,8 @@ class GoalCreate(BaseModel):
     application_context: str = ""
     current_level: str = ""
     time_budget: str = ""
+    # 用户针对本次目标填写的硬性约束：注入所有生成阶段 prompt，违反即交付不合格
+    hard_constraints: str = ""
     # 能力层级：L1 基础理解 / L2 独立应用 / L3 深入掌握与迁移
     capability_level: Literal["L1", "L2", "L3"] = "L2"
     # 是否生成独立的额外练习文件（教程内的必要练习不受此开关影响）
@@ -48,6 +50,7 @@ class GoalPatch(BaseModel):
     application_context: Optional[str] = None
     current_level: Optional[str] = None
     time_budget: Optional[str] = None
+    hard_constraints: Optional[str] = None
     capability_level: Optional[Literal["L1", "L2", "L3"]] = None
     generate_extra_exercises: Optional[bool] = None
     generation_tier: Optional[Literal["fast", "standard", "deep"]] = None
@@ -65,6 +68,7 @@ class GoalOut(BaseModel):
     application_context: str
     current_level: str
     time_budget: str
+    hard_constraints: str = ""
     capability_level: str = "L2"
     generate_extra_exercises: bool = False
     # 生成挡位：快速 / 标准 / 深度
@@ -257,6 +261,17 @@ class ContentBlock(BaseModel):
     body: str = ""
 
 
+class RuleCheck(BaseModel):
+    """画像硬性约束的核验结果（只有注入画像的阶段才有）。
+
+    repaired=True 表示首稿违规、定向重写后已通过；repaired=False 表示重写后仍违规，
+    交付保留的原稿并如实列出违规项——让「违反即不合格」有可展示的落点。
+    """
+
+    repaired: bool = False
+    violations: list[str] = []
+
+
 class SectionOut(BaseModel):
     id: str = ""
     title: str
@@ -270,6 +285,7 @@ class SectionOut(BaseModel):
     exercises: list[str] = []
     sources: list[SourceRef] = []
     mapping_criteria: list[str] = []
+    rule_check: Optional[RuleCheck] = None
     # ---- v1 结构（兼容旧版本数据）
     goal_statement: str = ""
     prerequisites: list[str] = []
@@ -289,6 +305,7 @@ class CheatsheetOut(BaseModel):
     filename: str = ""  # 配套文件名（不含 .md），与主教程中的 Obsidian 双链一致
     title: str = ""
     sections: list[CheatsheetSection] = []
+    rule_check: Optional[RuleCheck] = None
 
 
 class ExtraExerciseItem(BaseModel):
@@ -305,12 +322,29 @@ class ExtraExercisesOut(BaseModel):
     intro: str = ""
     exercises: list[ExtraExerciseItem] = []
     answers_note: str = ""
+    rule_check: Optional[RuleCheck] = None
+
+
+class DeliveryContract(BaseModel):
+    """交付契约：画像硬性约束对「这次交付物由哪几项组成」的规定。
+
+    例如「目标里出现输出试卷时，只交付试卷、分析与压轴拓展」——它决定教程结构，
+    不只是提示词里的一句话，所以要在 API 里能看到。
+    """
+
+    items: list[str] = []
+    forbid_answers: bool = False
+    exclusive: bool = False
+    suppress_companions: bool = False
+    rule: str = ""
 
 
 class TutorialContent(BaseModel):
     outline: list[OutlineItem] = []
     sections: list[SectionOut] = []
     teaching_plan: dict[str, Any] = Field(default_factory=dict)
+    # 交付契约（仅当画像里存在「只包括…」这类组成约束时出现）
+    delivery_contract: Optional[DeliveryContract] = None
     # 配套文件（可能为 None：速查未生成 / 用户未开启额外练习）
     cheatsheet: Optional[CheatsheetOut] = None
     extra_exercises: Optional[ExtraExercisesOut] = None
@@ -833,6 +867,7 @@ class OneShotGenerateIn(BaseModel):
     application_context: str = ""
     current_level: str = ""
     time_budget: str = ""
+    hard_constraints: str = ""
     capability_level: Literal["L1", "L2", "L3"] = "L2"
     generate_extra_exercises: bool = False
     user_notes: str = ""

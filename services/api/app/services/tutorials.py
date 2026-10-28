@@ -17,7 +17,12 @@ from ..learning.disciplines import get_profile
 from ..learning.engine import check_structure
 from ..learning.generation_tiers import normalize_tier
 from ..learning.levels import normalize_level
-from ..learning.teaching_profile import normalize_teaching_plan
+from ..learning.teaching_profile import (
+    delivery_contract_for,
+    goal_context_text,
+    normalize_teaching_plan,
+    parse_teaching_profile,
+)
 from ..llm.service import AIService, AIServiceError
 from ..models import GenerationJob, ModelCallLog, Tutorial, TutorialVersion
 from . import goals as goals_service
@@ -34,15 +39,27 @@ from .utils import (
 )
 
 MAX_SECTIONS_HINT = 8  # 安全上限：防止异常输出撑爆成本；正常章节数由目标范围决定
-# 章节并发生成上限：默认 1 路（串行）。实测自建端点（单卡）按队列串行处理请求：
-# 单节约 385s，3 路并发时第 2/3 个请求排队超过超时上限必然超时→重试再排队→永追不上。
-# 端点支持真并发时可用环境变量 AIEDU_LLM_CONCURRENCY 提高（如 3）。
-MAX_SECTION_WORKERS = max(1, int(os.environ.get("AIEDU_LLM_CONCURRENCY", "1")))
+# 章节并发生成上限：默认 9 路（deep 挡位最多 8 节，等于全并行，把「逐节排队」的尾巴消掉）。
+# 注意：该值只在端点真能并发时才有意义——接 DeepSeek 等托管 API 可直接用默认值；
+# 若换回单卡自建端点（按队列串行处理请求，单节约 385s），必须用
+# AIEDU_LLM_CONCURRENCY=1 退化串行，否则第 2 个起的请求排队超过超时上限→重试再排队→永远追不上。
+MAX_SECTION_WORKERS = max(1, int(os.environ.get("AIEDU_LLM_CONCURRENCY", "9")))
 
 logger = logging.getLogger(__name__)
 # 知识网络提取全局串行锁：提取已是后台锦上添花，串行化零性能损失；
 # 避免大纲提取线程与章节 draft 提取线程并发「查-插」产生同名重复概念节点
 _KNOWLEDGE_EXTRACTION_LOCK = threading.Lock()
+# 后台提取的可观测性：_extract_knowledge_async 是 fire-and-forget，job 状态与 HTTP
+# 响应都不反映它是否跑完。登记在途线程，测试和排障才能确定地等「后台提取全部结束」，
+# 而不是靠 sleep 猜时间窗。
+_PENDING_EXTRACTIONS: set[threading.Thread] = set()
+_PENDING_EXTRACTIONS_LOCK = threading.Lock()
+
+
+def pending_knowledge_extractions() -> int:
+    """在途的知识提取线程数；0 表示后台提取已全部结束。"""
+    with _PENDING_EXTRACTIONS_LOCK:
+        return len(_PENDING_EXTRACTIONS)
 
 VALID_CONTENT_TYPES = {"concept", "method", "tool", "fact", "application", "mixed"}
 
@@ -68,6 +85,30 @@ def _normalize_outline_items(raw_sections: list) -> list[dict]:
             "criteria_ids": _as_str_list(raw.get("criteria_ids")),
         })
     return items
+
+
+def _contract_outline(contract: dict, criteria: list[dict]) -> list[dict]:
+    """交付契约优先于模型大纲：清单即章节，一个交付物一章。
+
+    「只包括 A/B/C」是对交付物组成的硬性规定。只把它写进提示词时，模型会认为
+    「多写几章讲解」不算违反「不要输出答案」，于是照样交付一份教程；这里直接用规则
+    定死结构，模型只负责把每一章写成那一项成品。
+    """
+    items = [str(item).strip() for item in (contract or {}).get("items") or []]
+    items = [item for item in items if item][:MAX_SECTIONS_HINT]
+    criteria_ids = [str(c["id"]) for c in criteria or [] if isinstance(c, dict) and c.get("id")]
+    return [
+        {
+            "id": uuid.uuid4().hex[:8],
+            "title": item[:120],
+            "purpose": f"本次交付物：{item}",
+            "content_type": "application",
+            "summary": "",
+            # 交付物整体承载验收标准：契约模式下不再按章节拆验收点
+            "criteria_ids": list(criteria_ids),
+        }
+        for item in items
+    ]
 
 
 def _as_str_list(value) -> list[str]:
@@ -248,8 +289,16 @@ def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
         outline = _normalize_outline_items(raw_sections[:MAX_SECTIONS_HINT])
         if not outline:
             raise AIServiceError("模型输出缺少有效章节大纲，请重试")
-        teaching_plan = normalize_teaching_plan(data.get("teaching_plan"))
+        teaching_plan = normalize_teaching_plan(
+            data.get("teaching_plan"), parse_teaching_profile(context_text=goal_context_text(goal))
+        )
+        # 交付契约（如「目标里出现输出试卷时只交付试卷」）：模型大纲不采信，直接按清单定死结构
+        contract = delivery_contract_for(goal)
+        if contract:
+            outline = _contract_outline(contract, criteria)
         content = {"teaching_plan": teaching_plan, "outline": outline, "sections": []}
+        if contract:
+            content["delivery_contract"] = contract
         usage = dict(ai.usage_last)
 
         version = TutorialVersion(
@@ -324,7 +373,12 @@ def start_sections(db: Session, tutorial_id: str, ai: AIService) -> dict:
 
 
 def _companions_missing(content: dict, goal) -> dict:
-    """配套文件缺口：知识速查总是需要；额外练习只在目标开启时需要。"""
+    """配套文件缺口：知识速查总是需要；额外练习只在目标开启时需要。
+
+    交付契约（「内容只包括…不要其它内容」）已把配套文件排除在外时，一律视为不缺。
+    """
+    if content.get("delivery_contract") or delivery_contract_for(goal):
+        return {"cheatsheet": False, "extra_exercises": False}
     return {
         "cheatsheet": not content.get("cheatsheet"),
         "extra_exercises": bool(goal.generate_extra_exercises) and not content.get("extra_exercises"),
@@ -586,6 +640,12 @@ def start_companions(db: Session, tutorial_id: str, ai: AIService) -> dict:
     content = jload(version.content_json, {})
     if not (content.get("sections") or []):
         raise HTTPException(status_code=409, detail={"code": "no_content", "message": "教程尚无章节内容"})
+    # 交付契约明确排除配套文件时直接拒绝，避免排一个什么都不做的后台任务
+    if content.get("delivery_contract") or delivery_contract_for(goal):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "no_companions", "message": "本次交付按画像硬性约束只交付指定内容，不生成配套文件"},
+        )
 
     active = (
         db.query(GenerationJob)
@@ -644,16 +704,22 @@ def _knowledge_extraction_worker(goal_id: str, tutorial_id: str, version_id: str
             exc_info=True,
         )
     finally:
+        with _PENDING_EXTRACTIONS_LOCK:
+            _PENDING_EXTRACTIONS.discard(threading.current_thread())
         db.close()
 
 
 def _extract_knowledge_async(goal_id: str, tutorial_id: str, version_id: str) -> None:
-    threading.Thread(
+    thread = threading.Thread(
         target=_knowledge_extraction_worker,
         args=(goal_id, tutorial_id, version_id),
         name="knowledge-extract",
         daemon=True,
-    ).start()
+    )
+    # 先登记再启动：调用方在 start() 返回后即可看到「还有后台提取在跑」
+    with _PENDING_EXTRACTIONS_LOCK:
+        _PENDING_EXTRACTIONS.add(thread)
+    thread.start()
 
 
 def _update_job(
@@ -684,6 +750,14 @@ def _fail_job(db: Session, job_id: str, code: str, message: str = "") -> None:
 
 
 SECTION_RETRY_DELAYS = (3, 8)
+
+
+def _with_rule_check(section_data: dict, raw) -> dict:
+    """保留生成阶段对画像硬约束的核验结果；未触发核验时不留空字段。"""
+    check = raw.get("rule_check") if isinstance(raw, dict) else None
+    if isinstance(check, dict) and check:
+        section_data["rule_check"] = check
+    return section_data
 
 
 def _section_with_retry(
@@ -771,9 +845,10 @@ def _generate_section_task(
         ai.section_id = section_id
         criteria_by_id = {c["id"]: c for c in criteria_dicts}
         mapped = [criteria_by_id[cid] for cid in item.get("criteria_ids", []) if cid in criteria_by_id]
-        # 配套文件名在生成章节时已确定（见 _generate_companions），提前注入，避免模型猜错双链目标
-        companion_names = [f"{_safe_filename(goal.title)}-知识速查"]
-        if bool(getattr(goal, "generate_extra_exercises", False)):
+        # 配套文件名在生成章节时已确定（见 _generate_companions），提前注入，避免模型猜错双链目标；
+        # 交付契约模式下不生成配套文件，正文也就不该出现双链
+        companion_names = [] if item.get("_deliverable") else [f"{_safe_filename(goal.title)}-知识速查"]
+        if companion_names and bool(getattr(goal, "generate_extra_exercises", False)):
             companion_names.append(f"{_safe_filename(goal.title)}-额外练习")
         raw = _section_with_retry(
             db, job_id, ai, goal, profile, item, mapped or criteria_dicts, prior_titles,
@@ -781,8 +856,13 @@ def _generate_section_task(
         )
         usage = dict(ai.usage_last)
         db.commit()  # 短事务：调用日志 / 训练样本立即落库，尽快释放写锁
-        section_data = _normalize_section_raw(raw)
-        section_data["title"] = section_data["title"] or item.get("title", "")
+        section_data = _with_rule_check(_normalize_section_raw(raw), raw)
+        # 交付物章节统一用契约里的名称，避免模型把标题写成「目标：三项」
+        section_data["title"] = (
+            item.get("title", "")
+            if item.get("_deliverable")
+            else (section_data["title"] or item.get("title", ""))
+        )
         section_data.update(
             {
                 "id": section_id,
@@ -822,7 +902,21 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         version = db.get(TutorialVersion, tutorial.current_version_id) if tutorial.current_version_id else None
         content = jload(version.content_json, {"outline": [], "sections": []}) if version else {}
         outline = content.get("outline", [])
-        teaching_plan = content.get("teaching_plan") or normalize_teaching_plan({})
+        teaching_plan = content.get("teaching_plan") or normalize_teaching_plan(
+            {}, parse_teaching_profile(context_text=goal_context_text(goal))
+        )
+        # 交付契约决定章节形态
+        contract = content.get("delivery_contract")
+        if not contract:
+            # 旧版本教程：画像现在要求「只交付清单内容」时重建结构。
+            # 已生成的讲解大纲不会自己变对，必须按契约整章重生成，否则重跑仍是那份跑偏的教程。
+            contract = delivery_contract_for(goal)
+            if contract:
+                outline = _contract_outline(contract, criteria_dicts)
+                content = {**content, "delivery_contract": contract, "outline": outline, "sections": []}
+        contract_items = (contract or {}).get("items") or []
+        # 配套文件是否生成：新旧版本都按画像判断（「不要其它内容」与章节结构无关）
+        suppress_companions = bool(contract) or delivery_contract_for(goal) is not None
         if not outline:
             _fail_job(db, job_id, "no_outline")
             return
@@ -833,7 +927,14 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         draft = TutorialVersion(
             tutorial_id=tutorial.id,
             version=base_version + 1,
-            content_json=jdump({"teaching_plan": teaching_plan, "outline": outline, "sections": []}),
+            content_json=jdump(
+                {
+                    "teaching_plan": teaching_plan,
+                    "outline": outline,
+                    "sections": [],
+                    **({"delivery_contract": contract} if contract else {}),
+                }
+            ),
             prompt_version="v1",
             model_provider="demo" if not model_snapshot.llm_configured else "openai-compatible",
             model_name=model_snapshot.llm_model or "demo",
@@ -873,7 +974,11 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
                     goal_id=goal.id,
                     job_id=job_id,
                     index=idx,
-                    item={**item, "_teaching_plan": teaching_plan},
+                    item={
+                        **item,
+                        "_teaching_plan": teaching_plan,
+                        "_deliverable": contract_items[idx] if idx < len(contract_items) else None,
+                    },
                     criteria_dicts=criteria_dicts,
                     # 并发下「前置章节标题」取大纲静态切片，避免依赖完成顺序
                     prior_titles=outline_titles[:idx],
@@ -881,15 +986,19 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
                 ): idx
                 for idx, item in enumerate(outline)
             }
-            companion_futures = _submit_companion_tasks(
-                pool,
-                tutorial_id=tutorial.id,
-                goal_id=goal.id,
-                job_id=job_id,
-                outline=outline,
-                materials_text=materials_text,
-                want_cheatsheet=True,
-                want_extra=bool(goal.generate_extra_exercises),
+            companion_futures = (
+                {}
+                if suppress_companions
+                else _submit_companion_tasks(
+                    pool,
+                    tutorial_id=tutorial.id,
+                    goal_id=goal.id,
+                    job_id=job_id,
+                    outline=outline,
+                    materials_text=materials_text,
+                    want_cheatsheet=True,
+                    want_extra=bool(goal.generate_extra_exercises),
+                )
             )
             for future in as_completed(futures):
                 idx = futures[future]
@@ -905,7 +1014,14 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
                 draft.completion_tokens = usage["completion_tokens"]
                 draft.total_tokens = usage["total_tokens"]
                 draft.usage_source = usage["usage_source"]
-                draft.content_json = jdump({"outline": outline, "sections": sections})
+                draft.content_json = jdump(
+                    {
+                        "teaching_plan": teaching_plan,
+                        "outline": outline,
+                        "sections": sections,
+                        **({"delivery_contract": contract} if contract else {}),
+                    }
+                )
                 job = db.get(GenerationJob, job_id)
                 if job is not None:
                     job.progress = min(85, 5 + int(80 * done / total))
@@ -936,6 +1052,8 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         db.commit()
         sections = [results[i]["section"] for i in sorted(results)]
         new_content = {"teaching_plan": teaching_plan, "outline": outline, "sections": sections}
+        if contract:
+            new_content["delivery_contract"] = contract
         quality = check_structure(new_content, criteria_dicts)
         draft.quality_report = jdump(quality)
         tutorial.status = "drafted" if quality.get("passed") else "drafted_with_issues"
@@ -1025,6 +1143,10 @@ def regenerate_section(db: Session, tutorial_id: str, section_id: str, ai: AISer
         raise HTTPException(status_code=404, detail={"code": "section_not_found", "message": "章节不存在"})
     item = outline[target_idx] if target_idx < len(outline) else {"title": sections[target_idx].get("title", ""), "criteria_ids": sections[target_idx].get("mapping_criteria", [])}
     item = {**item, "_teaching_plan": content.get("teaching_plan") or normalize_teaching_plan({})}
+    contract_items = (content.get("delivery_contract") or {}).get("items") or []
+    if target_idx < len(contract_items):
+        # 契约模式下重写章节也要继续按「成品」而不是「讲解章节」生成
+        item["_deliverable"] = contract_items[target_idx]
     mapped = [criteria_by_id[cid] for cid in item.get("criteria_ids", []) if cid in criteria_by_id]
     ai.tutorial_id = tutorial.id
     ai.section_id = section_id
@@ -1036,11 +1158,15 @@ def regenerate_section(db: Session, tutorial_id: str, section_id: str, ai: AISer
     except AIServiceError as exc:
         raise HTTPException(status_code=502, detail={"code": "llm_error", "message": str(exc)}) from exc
     usage = dict(ai.usage_last)
-    section_data = _normalize_section_raw(raw)
+    section_data = _with_rule_check(_normalize_section_raw(raw), raw)
     section_data.update(
         {
             "id": section_id,
-            "title": section_data["title"] or item.get("title", sections[target_idx].get("title", "")),
+            "title": (
+                item.get("title", "")
+                if item.get("_deliverable")
+                else (section_data["title"] or item.get("title", sections[target_idx].get("title", "")))
+            ),
             "mapping_criteria": list(item.get("criteria_ids", [])),
             "token_usage": usage,
         }
@@ -1338,30 +1464,18 @@ def _tutorial_base_name(goal) -> str:
 
 
 def export_markdown(db: Session, tutorial_id: str) -> tuple[str, str]:
-    """导出聚焦学习的 Markdown；任务元数据放 YAML，内部验收与质量报告不进正文。"""
+    """导出聚焦学习的 Markdown；内部验收与质量报告不进正文。"""
     tutorial = _get_tutorial(db, tutorial_id)
     goal = _goal_for(db, tutorial.goal_id)
     version = _current_version(db, tutorial)
     if version is None:
         raise HTTPException(status_code=409, detail={"code": "no_content", "message": "教程尚无内容"})
     content = jload(version.content_json, {"outline": [], "sections": []})
-    profile = get_profile(goal.domain_key)
     crit_by_id = {}
     cheatsheet = content.get("cheatsheet") or {}
     exercises_file = content.get("extra_exercises") or {}
 
     lines: list[str] = []
-    lines.append("---")
-    lines.append(f"title: {tutorial.title}")
-    lines.append("ai_edu:")
-    lines.append(f"  tutorial_id: {tutorial.id}")
-    lines.append(f"  goal_id: {goal.id}")
-    lines.append(f"  version: {version.version}")
-    lines.append(f"  generation_tier: {normalize_tier(getattr(goal, 'generation_tier', None))}")
-    lines.append(f"  generated_at: {version.created_at or ''}")
-    lines.append(f"  discipline: {profile.display_name}")
-    lines.append("---")
-    lines.append("")
     lines.append(f"# {tutorial.title}")
     lines.append("")
 

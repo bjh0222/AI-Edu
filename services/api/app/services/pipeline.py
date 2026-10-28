@@ -14,6 +14,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from ..learning.generation_tiers import normalize_tier
+from ..learning.teaching_profile import delivery_contract_for
 
 from ..llm.service import AIService
 from ..models import GenerationJob, GoalAssessment, LearningGoal
@@ -70,7 +71,7 @@ def _run_parallel_initial_tasks(goal_id: str, kinds: list[str]) -> None:
     串行时白白多等 2 次模型往返。与章节 / 配套任务同款模式：
     每个任务独立 Session + 独立 AIService（并发安全），SQLite 短事务尽快释放写锁。
     并行度由 tutorials_service.MAX_SECTION_WORKERS 统一控制（AIEDU_LLM_CONCURRENCY）：
-    串行端点（默认 1）时退化为顺序执行，防止排队超时。
+    托管 API（默认 9 路）可全并行；单卡串行端点须设 AIEDU_LLM_CONCURRENCY=1 退化为顺序执行，防止排队超时。
     任一失败整体抛出（已成功的成果已各自落库，幂等：重试时按 reused 跳过）。
     注意：诊断结果可能在计划 / 标准生成完成后才判定「暂停」，暂停场景会多花 2 次调用——
     属于用罕见场景的小成本换取常见路径的提速。
@@ -248,6 +249,7 @@ def quickstart(db: Session, goal_id: str, ai: AIService, pause_action: str | Non
     # ⑥ 全部章节 + 配套文件
     content = (tutorial.get("current_version") or {}).get("content") or {}
     sections = content.get("sections") or []
+    contract = content.get("delivery_contract") or delivery_contract_for(goal)
     job_id: str | None = None
     if sections:
         steps.append(_step("sections", "全部章节", "reused", f"已生成 {len(sections)} 节"))
@@ -272,7 +274,12 @@ def quickstart(db: Session, goal_id: str, ai: AIService, pause_action: str | Non
                 )
             )
         else:
-            steps.append(_step("companions", "配套文件", "reused", "知识速查与额外练习已齐备"))
+            note = (
+                "按画像硬性约束只交付清单内容，不生成配套文件"
+                if contract
+                else "知识速查与额外练习已齐备"
+            )
+            steps.append(_step("companions", "配套文件", "reused", note))
         tutorial = tutorials_service.get_tutorial(db, tutorial["id"])
     else:
         active = _active_sections_job(db, goal.id)
@@ -282,7 +289,16 @@ def quickstart(db: Session, goal_id: str, ai: AIService, pause_action: str | Non
         else:
             started = tutorials_service.start_sections(db, tutorial["id"], ai)
             job_id = started["job"].id
-            steps.append(_step("sections", "全部章节", "created", "已提交后台生成任务（含知识速查与额外练习）"))
+            steps.append(
+                _step(
+                    "sections",
+                    "全部章节",
+                    "created",
+                    "已提交后台生成任务（按交付契约生成，不含配套文件）"
+                    if contract
+                    else "已提交后台生成任务（含知识速查与额外练习）",
+                )
+            )
 
     tutorial = tutorials_service.get_tutorial(db, tutorial["id"])
     return {
@@ -315,6 +331,7 @@ def create_and_quickstart(db: Session, payload, ai: AIService) -> dict:
             application_context=application_context,
             current_level=payload.current_level.strip(),
             time_budget=payload.time_budget.strip(),
+            hard_constraints=(payload.hard_constraints or "").strip(),
             capability_level=payload.capability_level,
             generate_extra_exercises=bool(payload.generate_extra_exercises),
             generation_tier=normalize_tier(payload.generation_tier),

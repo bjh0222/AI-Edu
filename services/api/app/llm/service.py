@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from ..model_settings import runtime_settings
 from ..learning import demo
+from ..learning.teaching_profile import check_rule_compliance, parse_teaching_profile
 from ..models import ModelCallLog, TrainingRecord
 from . import prompts
 from .provider import LLMError, OpenAICompatibleProvider
@@ -55,6 +56,72 @@ def estimate_usage(prompt_text: str, output_text: str) -> dict[str, Any]:
     }
 
 
+def _section_check_text(data: dict) -> str:
+    """抽取章节输出里可核验的正文文本（不含 sources 的 url/note）。"""
+    parts: list[str] = []
+    for block in data.get("content") or []:
+        if isinstance(block, dict):
+            parts.append(str(block.get("title", "")))
+            parts.append(str(block.get("body", "")))
+    for key in ("key_takeaways", "exercises", "prerequisite_refs"):
+        for item in data.get(key) or []:
+            parts.append(str(item))
+    for item in data.get("common_errors") or []:
+        if isinstance(item, dict):
+            parts.extend(str(item.get(field, "")) for field in ("error", "cause", "diagnose"))
+    return "\n".join(parts)
+
+
+def _sections_check_text(data: dict) -> str:
+    """抽取「小节列表」型输出（知识速查）的可核验文本。"""
+    parts: list[str] = []
+    for item in data.get("sections") or []:
+        if isinstance(item, dict):
+            parts.append(str(item.get("heading", "")))
+            parts.append(str(item.get("body", "")))
+    return "\n".join(parts)
+
+
+def _exercises_check_text(data: dict) -> str:
+    """抽取「练习列表」型输出（额外练习）的可核验文本。"""
+    parts: list[str] = [str(data.get("intro", "")), str(data.get("answers_note", ""))]
+    for item in data.get("exercises") or []:
+        if isinstance(item, dict):
+            parts.extend(
+                str(item.get(field, ""))
+                for field in ("task", "requirements", "hint", "solution")
+            )
+    return "\n".join(parts)
+
+
+def _rule_checked(produce, text_of) -> dict:
+    """生成 → 核验硬性禁止类约束 → 命中则定向重写一次 → 如实标注。
+
+    `produce(violations)` 用给定违规清单重新生成（violations 为 None 表示首稿），
+    `text_of(data)` 从输出里抽出可核验文本。所有注入画像的阶段都走同一条流水线，
+    避免「某些阶段的硬约束只停留在提示词里、没人核验」。
+    """
+    rules = parse_teaching_profile()["rules"]
+    data = produce(None)
+    violations = check_rule_compliance(text_of(data), rules)
+    if not violations:
+        return data
+    retry = produce([violation["rule"] for violation in violations])
+    if not check_rule_compliance(text_of(retry), rules):
+        # 定向重写后通过：交付重写稿，并记录「修过」
+        retry["rule_check"] = {
+            "repaired": True,
+            "violations": [violation["reason"] for violation in violations],
+        }
+        return retry
+    # 仍未通过：保留原稿（不交付可能更差的稿），如实标注违规
+    data["rule_check"] = {
+        "repaired": False,
+        "violations": [f"{v['rule']}（{v['reason']}）" for v in violations],
+    }
+    return data
+
+
 def _add_usage(total: dict[str, Any], usage: dict[str, Any]) -> dict[str, Any]:
     merged = dict(total)
     for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
@@ -75,6 +142,7 @@ def goal_context_text(goal) -> str:
         ("应用场景", getattr(goal, "application_context", "")),
         ("当前基础", getattr(goal, "current_level", "")),
         ("可投入总时间", getattr(goal, "time_budget", "")),
+        ("硬性约束", str(getattr(goal, "hard_constraints", "") or "").replace("\n", "；")),
     ]
     return "\n".join(f"{name}：{value}" for name, value in fields if value)
 
@@ -259,6 +327,28 @@ class AIService:
             raise AIServiceError("模型输出缺少有效大纲")
         return data
 
+    def _section_payload(
+        self, goal, discipline, item, criteria_list, prior_titles, materials_text: str,
+        companion_names: list[str] | None, retry_violations: list[str] | None = None,
+    ) -> dict:
+        system, user = prompts.section(
+            goal, discipline, item, criteria_list, prior_titles, materials_text, companion_names,
+            retry_violations,
+        )
+        data = self._real_json(
+            "section", system, user,
+            ("title", "content", "mapping_criteria"),
+            goal,
+        )
+        # 可选内容块允许缺失/非法：归一化，不因没有例题或易错点而判定生成失败
+        for key in (
+            "content", "key_takeaways", "common_errors", "prerequisite_refs",
+            "exercises", "sources", "mapping_criteria",
+        ):
+            if not isinstance(data.get(key), list):
+                data[key] = []
+        return data
+
     def section(
         self, goal, discipline, item, criteria_list, prior_titles, materials_text: str = "",
         companion_names: list[str] | None = None,
@@ -268,62 +358,58 @@ class AIService:
             return self._demo(
                 "section", demo.section(goal, discipline, item, by_id), goal, materials_text
             )
-        system, user = prompts.section(
-            goal, discipline, item, criteria_list, prior_titles, materials_text, companion_names
+        # 硬性禁止类约束做一次确定性核验：命中即定向重写一次，避免规则只停留在提示词里。
+        return _rule_checked(
+            lambda violations: self._section_payload(
+                goal, discipline, item, criteria_list, prior_titles, materials_text,
+                companion_names, violations,
+            ),
+            _section_check_text,
         )
-        data = self._real_json(
-            "section", system, user,
-            ("title", "content", "mapping_criteria"),
-            goal,
-        )
-        # 可选内容块允许缺失/非法：归一化，不因没有例题或易错点而判定生成失败
-        if not isinstance(data.get("content"), list):
-            data["content"] = []
-        if not isinstance(data.get("key_takeaways"), list):
-            data["key_takeaways"] = []
-        if not isinstance(data.get("common_errors"), list):
-            data["common_errors"] = []
-        if not isinstance(data.get("prerequisite_refs"), list):
-            data["prerequisite_refs"] = []
-        if not isinstance(data.get("exercises"), list):
-            data["exercises"] = []
-        if not isinstance(data.get("sources"), list):
-            data["sources"] = []
-        if not isinstance(data.get("mapping_criteria"), list):
-            data["mapping_criteria"] = []
-        return data
 
     def cheatsheet(self, goal, discipline, outline_items, materials_text: str = "") -> dict:
         """知识速查文件（教程配套，总是生成）。失败抛 AIServiceError，由调用方兜底。"""
         if self.is_demo:
             return self._demo("cheatsheet", demo.cheatsheet(goal, discipline, outline_items), goal)
-        system, user = prompts.cheatsheet(goal, discipline, outline_items, materials_text)
-        data = self._real_json("cheatsheet", system, user, ("sections",), goal)
-        data["sections"] = [
-            {"heading": str(s.get("heading", "") or ""), "body": str(s.get("body", "") or "")}
-            for s in data.get("sections", []) or []
-            if isinstance(s, dict) and str(s.get("body", "")).strip()
-        ]
-        return data
+
+        def produce(violations):
+            system, user = prompts.cheatsheet(
+                goal, discipline, outline_items, materials_text, violations
+            )
+            data = self._real_json("cheatsheet", system, user, ("sections",), goal)
+            data["sections"] = [
+                {"heading": str(s.get("heading", "") or ""), "body": str(s.get("body", "") or "")}
+                for s in data.get("sections", []) or []
+                if isinstance(s, dict) and str(s.get("body", "")).strip()
+            ]
+            return data
+
+        return _rule_checked(produce, _sections_check_text)
 
     def extra_exercises(self, goal, discipline, outline_items, materials_text: str = "") -> dict:
         """独立额外练习文件（仅在用户开启选项时生成）。失败抛 AIServiceError，由调用方兜底。"""
         if self.is_demo:
             return self._demo("extra_exercises", demo.extra_exercises(goal, discipline, outline_items), goal)
-        system, user = prompts.extra_exercises(goal, discipline, outline_items, materials_text)
-        data = self._real_json("extra_exercises", system, user, ("exercises",), goal)
-        data["exercises"] = [
-            {
-                "number": int(e.get("number") or idx + 1),
-                "task": str(e.get("task", "") or ""),
-                "requirements": str(e.get("requirements", "") or ""),
-                "hint": str(e.get("hint", "") or ""),
-                "solution": str(e.get("solution", "") or ""),
-            }
-            for idx, e in enumerate(data.get("exercises", []) or [])
-            if isinstance(e, dict) and str(e.get("task", "")).strip()
-        ]
-        return data
+
+        def produce(violations):
+            system, user = prompts.extra_exercises(
+                goal, discipline, outline_items, materials_text, violations
+            )
+            data = self._real_json("extra_exercises", system, user, ("exercises",), goal)
+            data["exercises"] = [
+                {
+                    "number": int(e.get("number") or idx + 1),
+                    "task": str(e.get("task", "") or ""),
+                    "requirements": str(e.get("requirements", "") or ""),
+                    "hint": str(e.get("hint", "") or ""),
+                    "solution": str(e.get("solution", "") or ""),
+                }
+                for idx, e in enumerate(data.get("exercises", []) or [])
+                if isinstance(e, dict) and str(e.get("task", "")).strip()
+            ]
+            return data
+
+        return _rule_checked(produce, _exercises_check_text)
 
     def feedback(self, goal, criteria_list, task, attempt) -> dict:
         if self.is_demo:

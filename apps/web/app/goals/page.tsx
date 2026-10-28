@@ -67,6 +67,7 @@ export default function GoalsPage() {
     application_context: "",
     current_level: "",
     time_budget: "共 10 小时",
+    hard_constraints: "",
     capability_level: "L2" as Goal["capability_level"],
     generate_extra_exercises: false,
     generation_tier: "standard" as GenerationTier,
@@ -85,7 +86,7 @@ export default function GoalsPage() {
         // eslint-disable-next-line react-hooks/set-state-in-effect
         setForm(previous => {
           const next = { ...previous };
-          for (const key of ["title", "motivation", "application_context", "current_level", "time_budget"] as const) {
+          for (const key of ["title", "motivation", "application_context", "current_level", "time_budget", "hard_constraints"] as const) {
             if (typeof draft[key] === "string") next[key] = draft[key];
           }
           if (DOMAINS.some(d => d.key === draft.domain_key)) next.domain_key = draft.domain_key;
@@ -104,7 +105,7 @@ export default function GoalsPage() {
     if (!draftReady) return;
     const timer = setTimeout(() => {
       try {
-        if (form.title || form.motivation || form.application_context || form.current_level) {
+        if (form.title || form.motivation || form.application_context || form.current_level || form.hard_constraints) {
           localStorage.setItem("aiedu-goal-draft", JSON.stringify(form));
           setDraftStatus("草稿已自动保存到此浏览器");
         } else { localStorage.removeItem("aiedu-goal-draft"); setDraftStatus(""); }
@@ -144,6 +145,7 @@ export default function GoalsPage() {
       motivation: "",
       application_context: "",
       current_level: "",
+      hard_constraints: "",
       generate_extra_exercises: false,
       generation_tier: "standard",
     }));
@@ -228,6 +230,7 @@ export default function GoalsPage() {
               application_context: form.application_context || requirement,
               current_level: form.current_level,
               time_budget: form.time_budget,
+              hard_constraints: form.hard_constraints,
               capability_level: form.capability_level,
               generate_extra_exercises: form.generate_extra_exercises,
               generation_tier: form.generation_tier,
@@ -274,6 +277,7 @@ export default function GoalsPage() {
         application_context: form.application_context,
         current_level: form.current_level,
         time_budget: form.time_budget,
+        hard_constraints: form.hard_constraints,
         capability_level: form.capability_level,
         generate_extra_exercises: form.generate_extra_exercises,
         generation_tier: form.generation_tier,
@@ -535,6 +539,19 @@ export default function GoalsPage() {
               onChange={(e) => setForm({ ...form, current_level: e.target.value })}
               placeholder="你已经会什么、卡在哪里？"
             />
+          </Field>
+          <Field label="硬性约束（可选）">
+            <textarea
+              className={inputCls}
+              rows={2}
+              value={form.hard_constraints}
+              onChange={(e) => setForm({ ...form, hard_constraints: e.target.value })}
+              placeholder={"生成内容必须满足的强制要求，每行一条。例如：\n不安排任何日程\n所有命令示例同时给出 Linux 与 Windows 写法"}
+            />
+            <span className="text-[10px] leading-relaxed text-muted">
+              填写后会注入价值判断、计划、验收标准、教程与配套文件的全部生成提示词；
+              生成内容必须逐条满足，违反任一条即视为本次交付不合格
+            </span>
           </Field>
           <Field label="可投入总时间">
             <input

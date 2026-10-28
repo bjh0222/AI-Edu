@@ -30,6 +30,7 @@ def create_goal(db: Session, payload) -> dict:
         application_context=payload.application_context,
         current_level=payload.current_level,
         time_budget=payload.time_budget,
+        hard_constraints=getattr(payload, "hard_constraints", "") or "",
         capability_level=normalize_level(getattr(payload, "capability_level", None)),
         generate_extra_exercises=bool(getattr(payload, "generate_extra_exercises", False)),
         generation_tier=normalize_tier(getattr(payload, "generation_tier", None)),
@@ -259,7 +260,7 @@ def get_goal(db: Session, goal_id: str) -> dict:
 
 def patch_goal(db: Session, goal_id: str, payload) -> dict:
     goal = _get_goal(db, goal_id)
-    for field in ("title", "motivation", "application_context", "current_level", "time_budget", "status", "user_notes"):
+    for field in ("title", "motivation", "application_context", "current_level", "time_budget", "hard_constraints", "status", "user_notes"):
         value = getattr(payload, field, None)
         if value is not None:
             setattr(goal, field, value)

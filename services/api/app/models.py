@@ -35,6 +35,8 @@ class LearningGoal(Base, TimestampMixin):
     application_context = Column(Text, default="")
     current_level = Column(Text, default="")
     time_budget = Column(String(100), default="")
+    # 用户针对本次目标填写的硬性约束：注入所有生成阶段 prompt，违反任一条即视为交付不合格
+    hard_constraints = Column(Text, default="")
     # 能力层级：L1 基础理解 / L2 独立应用 / L3 深入掌握与迁移（旧数据回退 L2）
     capability_level = Column(String(10), default=CAPABILITY_DEFAULT)
     # 是否生成独立的额外练习文件（默认关闭；教程内的必要练习不受此开关影响）

@@ -29,6 +29,7 @@ export interface Goal {
   application_context: string;
   current_level: string;
   time_budget: string;
+  hard_constraints: string;
   capability_level: CapabilityLevel;
   generate_extra_exercises: boolean;
   generation_tier: GenerationTier;
@@ -132,6 +133,12 @@ export interface CommonErrorItem {
   diagnose: string;
 }
 
+/** 用户画像硬性约束的核验结果：repaired=true 表示首稿违规、定向重写后已通过。 */
+export interface RuleCheck {
+  repaired: boolean;
+  violations: string[];
+}
+
 export interface Section {
   id: string;
   title: string;
@@ -145,6 +152,7 @@ export interface Section {
   exercises?: string[];
   sources?: { title: string; url: string; note: string }[];
   mapping_criteria: string[];
+  rule_check?: RuleCheck;
   // ---- v1 结构（旧版本数据兼容）
   goal_statement?: string;
   prerequisites?: string[];
@@ -164,6 +172,7 @@ export interface Cheatsheet {
   filename?: string;
   title: string;
   sections: CheatsheetSection[];
+  rule_check?: RuleCheck;
 }
 
 export interface ExtraExerciseItem {
@@ -180,6 +189,7 @@ export interface ExtraExercises {
   intro?: string;
   exercises: ExtraExerciseItem[];
   answers_note?: string;
+  rule_check?: RuleCheck;
 }
 
 export interface SectionDetail extends Section {

@@ -76,8 +76,8 @@ def test_one_shot_fast_generation_and_focused_export(client):
     export = client.get(f"/api/tutorials/{tutorial['id']}/export")
     assert export.status_code == 200, export.text
     markdown = export.text
-    assert markdown.startswith("---")
-    assert "generation_tier: fast" in markdown
+    assert markdown.startswith("#")
+    assert "ai_edu:" not in markdown
     assert "## 目录" in markdown
     assert "## 验收标准" not in markdown
     assert "## 质量报告" not in markdown

@@ -96,6 +96,9 @@ def test_sections_generate_runs_three_way_concurrent(client, monkeypatch):
                 state["active"] -= 1
 
     monkeypatch.setattr(AIService, "section", fake_section)
+    # 路数按用例钉死成 3：既保证 Barrier(3) 一定能等到 3 个线程，也让
+    # 「最大并发 == 3」的断言不被默认值（9）或大纲节数影响。
+    monkeypatch.setattr(tutorials_service, "MAX_SECTION_WORKERS", 3)
     body = _start_sections(client, tutorial["id"])
     job = _poll_job(client, body["job_id"])
     assert job["status"] == "done", job
@@ -196,6 +199,8 @@ def test_companions_generate_in_parallel(client, monkeypatch):
 
     monkeypatch.setattr(AIService, "cheatsheet", make_patch("cheatsheet"))
     monkeypatch.setattr(AIService, "extra_exercises", make_patch("extra_exercises"))
+    # 配套文件要并行：路数钉死成 3，与章节用例保持一致的可控前提。
+    monkeypatch.setattr(tutorials_service, "MAX_SECTION_WORKERS", 3)
 
     body = _start_sections(client, tutorial["id"])
     job = _poll_job(client, body["job_id"])
@@ -265,6 +270,24 @@ def _extract_calls(goal_id: str) -> int:
         db.close()
 
 
+def _wait_knowledge_settled(timeout: float = 15.0) -> None:
+    """等后台知识提取线程全部结束。
+
+    提取是 fire-and-forget：大纲/章节完成后先标记 job done，再启动提取线程。
+    所以「job done」不等于「提取已跑完」，直接断言调用次数或 quality_report 打标
+    会随机读到中间态。连续两次读到 0 才算收尾，避免撞上「刚 done、线程尚未登记」的窗口。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if tutorials_service.pending_knowledge_extractions() == 0:
+            time.sleep(0.05)
+            if tutorials_service.pending_knowledge_extractions() == 0:
+                return
+            continue
+        time.sleep(0.02)
+    raise AssertionError("后台知识提取未在预期时间内结束")
+
+
 def test_context_fingerprint_ignores_random_section_ids():
     """D：指纹只认语义内容，不认每次重新生成都会变的随机 id。"""
     base = {
@@ -292,6 +315,7 @@ def test_outline_regeneration_skips_unchanged_knowledge_extraction(client):
     body = _quickstart(client, goal["id"])
     job = _poll_job(client, body["job_id"])
     assert job["status"] == "done", job
+    _wait_knowledge_settled()
 
     calls_after_quickstart = _extract_calls(goal["id"])
     concepts_before = len(client.get("/api/knowledge").json()["concepts"])
@@ -304,6 +328,7 @@ def test_outline_regeneration_skips_unchanged_knowledge_extraction(client):
     new_tutorial = regen.json()["tutorial"]
     # 注：quality_report 的响应模型只暴露 passed/checks/issues/coverage，
     # 内部打标（knowledge_extracted / knowledge_fingerprint）要读库确认。
+    _wait_knowledge_settled()
     from app.db import SessionLocal
     from app.models import TutorialVersion
 
