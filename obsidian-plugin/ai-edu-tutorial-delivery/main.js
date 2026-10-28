@@ -67,6 +67,86 @@ const GENERATION_TIERS = [
   { key: "deep", name: "深度", description: "复杂主题、项目实践或需要严格验证的主题。" },
 ];
 
+// 与 services/api/app/services/materials.py 的 ALLOWED_EXTENSIONS / KIND_LABELS 保持一致；
+// 后端 /api/materials/limits 不可达时作为上传校验的兜底
+const MATERIAL_FALLBACK_LIMITS = {
+  max_bytes: 20 * 1024 * 1024,
+  allowed_extensions: [
+    ".pdf",
+    ".docx",
+    ".txt",
+    ".md",
+    ".markdown",
+    ".csv",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".gif",
+  ],
+  kinds: [
+    { key: "reference", label: "参考资料" },
+    { key: "example_source", label: "例题来源" },
+  ],
+};
+
+function formatSize(bytes) {
+  const value = Number(bytes || 0);
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function materialExtensionsText(limits) {
+  return (limits.allowed_extensions || []).map((ext) => String(ext).replace(".", "")).join(" / ");
+}
+
+// 与后端 save_upload 同规则的客户端预校验；返回错误文案，空串表示通过。
+function validateMaterialFile(file, limits) {
+  const name = String(file.name || "");
+  const dot = name.lastIndexOf(".");
+  const ext = dot >= 0 ? name.slice(dot).toLowerCase() : "";
+  if (!(limits.allowed_extensions || []).includes(ext)) {
+    return `不支持的类型「${ext || "无扩展名"}」，仅支持 ${materialExtensionsText(limits)}`;
+  }
+  if (file.size > limits.max_bytes) {
+    return `文件过大（${formatSize(file.size)}），单文件上限 ${formatSize(limits.max_bytes)}`;
+  }
+  if (file.size === 0) return "文件为空";
+  return "";
+}
+
+/**
+ * 手工构造 multipart/form-data（Obsidian 的 requestUrl 只接受字符串 / ArrayBuffer，
+ * 不支持 FormData）。文件名同时给出 ASCII 兜底和 RFC 2231 的 filename*，保证中文名不乱码。
+ */
+async function buildMultipartBody(file, kind) {
+  const boundary = `----AIEduBoundary${Date.now().toString(36)}${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+  const encoder = new TextEncoder();
+  const asciiName = String(file.name || "upload")
+    .replace(/[^\x20-\x7E]/g, "_")
+    .replace(/["\\]/g, "_");
+  const contentType = /^[!-~]+$/.test(file.type || "") ? file.type : "application/octet-stream";
+  const head = encoder.encode(
+    `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="kind"\r\n\r\n${kind}\r\n` +
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="file"; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(
+        file.name
+      )}\r\n` +
+      `Content-Type: ${contentType}\r\n\r\n`
+  );
+  const tail = encoder.encode(`\r\n--${boundary}--\r\n`);
+  const fileBytes = new Uint8Array(await file.arrayBuffer());
+  const body = new Uint8Array(head.length + fileBytes.length + tail.length);
+  body.set(head, 0);
+  body.set(fileBytes, head.length);
+  body.set(tail, head.length + fileBytes.length);
+  return { body: body.buffer, contentType: `multipart/form-data; boundary=${boundary}` };
+}
+
 function safeName(value) {
   const cleaned = String(value || "AI Edu 教程")
     .replace(/\.md$/i, "")
@@ -168,6 +248,12 @@ class AIEduModal extends Modal {
     this.closed = false;
     this.lastForm = null;
     this.brokenLinks = [];
+    // 暂存式「参考资料 / 例题来源」：目标创建成功后才真正上传
+    this.pendingMaterials = [];
+    this.materialLimits = MATERIAL_FALLBACK_LIMITS;
+    this.materialKind = "reference";
+    this.createdGoal = null;
+    this.materialMessage = "";
   }
 
   onOpen() {
@@ -275,6 +361,10 @@ class AIEduModal extends Modal {
       text: "开启后会随教程生成一份 Markdown 练习集并在教程中建立双链；教程内的必要练习不受影响",
     });
 
+    // 参考资料 / 例题来源（可选）：暂存式上传区
+    this.createMaterialsSection(form);
+    void this.loadMaterialLimits();
+
     this.statusEl = contentEl.createDiv("ai-edu-status");
     this.statusEl.setText("需要先启动本地 AI Edu 后端（默认 http://127.0.0.1:8000）。");
 
@@ -340,6 +430,224 @@ class AIEduModal extends Modal {
     return wrap;
   }
 
+  createMaterialsSection(parent) {
+    const field = this.createField(parent, "参考资料 / 例题来源（可选）");
+    this.materialsBoxEl = field.createDiv("ai-edu-materials");
+    this.renderMaterialsSection();
+  }
+
+  renderMaterialsSection() {
+    const box = this.materialsBoxEl;
+    if (!box) return;
+    const limits = this.materialLimits || MATERIAL_FALLBACK_LIMITS;
+    box.empty();
+
+    const head = box.createDiv("ai-edu-materials-head");
+    head.createEl("span", { cls: "ai-edu-materials-caption", text: "上传分类" });
+    const kindGroup = head.createDiv("ai-edu-kind-group");
+    kindGroup.setAttribute("role", "radiogroup");
+    kindGroup.setAttribute("aria-label", "材料分类");
+    limits.kinds.forEach((item) => {
+      const active = item.key === this.materialKind;
+      const btn = kindGroup.createEl("button", {
+        cls: `ai-edu-kind-btn${active ? " is-active" : ""}`,
+        text: item.label,
+        attr: { type: "button", role: "radio", "aria-checked": active ? "true" : "false" },
+      });
+      btn.addEventListener("click", () => {
+        if (this.busy || this.materialKind === item.key) return;
+        this.materialKind = item.key;
+        this.renderMaterialsSection();
+      });
+    });
+
+    const pick = head.createEl("button", {
+      cls: "ai-edu-material-pick",
+      text: "选择文件（可多选）",
+      attr: { type: "button" },
+    });
+    this.materialPickEl = pick;
+    pick.disabled = this.busy;
+    pick.addEventListener("click", () => {
+      if (!this.busy && this.materialInputEl) this.materialInputEl.click();
+    });
+
+    const input = box.createEl("input", {
+      cls: "ai-edu-material-input",
+      attr: {
+        type: "file",
+        multiple: "multiple",
+        accept: limits.allowed_extensions.join(","),
+        "aria-label": "选择参考资料或例题来源文件",
+      },
+    });
+    this.materialInputEl = input;
+    input.addEventListener("change", () => {
+      if (input.files && input.files.length) this.addPendingMaterials(Array.from(input.files));
+      input.value = "";
+    });
+
+    box.createEl("div", {
+      cls: "ai-edu-hint",
+      text: `支持 ${materialExtensionsText(limits)}；单文件上限 ${formatSize(limits.max_bytes)}；提交时先创建学习目标，再把这些文件上传到该目标并注入生成依据。`,
+    });
+
+    this.materialMessageEl = box.createDiv("ai-edu-material-message");
+    if (this.materialMessage) this.materialMessageEl.setText(this.materialMessage);
+    else this.materialMessageEl.style.display = "none";
+
+    this.materialListEl = box.createDiv("ai-edu-material-list");
+    this.renderMaterialList();
+
+    box.createEl("p", {
+      cls: "ai-edu-hint",
+      text: "文件先暂存在本地，点击下方按钮提交时才上传；关闭弹窗会丢弃这些文件。",
+    });
+  }
+
+  renderMaterialList() {
+    if (!this.materialListEl) return;
+    this.materialListEl.empty();
+    this.pendingMaterials.forEach((row) => this.renderMaterialRow(row));
+  }
+
+  renderMaterialRow(row) {
+    const limits = this.materialLimits || MATERIAL_FALLBACK_LIMITS;
+    const kind = limits.kinds.find((item) => item.key === row.kind);
+    const item = this.materialListEl.createDiv("ai-edu-material-row");
+    const line = item.createDiv("ai-edu-material-line");
+    line.createEl("span", {
+      cls: "ai-edu-material-kind",
+      text: (kind && kind.label) || row.kind,
+    });
+    line.createEl("span", {
+      cls: "ai-edu-material-name",
+      text: row.file.name,
+      attr: { title: row.file.name },
+    });
+    line.createEl("span", { cls: "ai-edu-material-size", text: formatSize(row.file.size) });
+    line.createEl("span", {
+      cls: `ai-edu-material-status is-${row.status}`,
+      text:
+        row.status === "uploading"
+          ? "上传中…"
+          : row.status === "done"
+            ? "已上传"
+            : row.status === "error"
+              ? "失败"
+              : "待上传",
+    });
+    const remove = line.createEl("button", {
+      cls: "ai-edu-material-remove",
+      text: "移除",
+      attr: { type: "button" },
+    });
+    remove.disabled = this.busy || row.status === "uploading";
+    remove.addEventListener("click", () => this.removePendingMaterial(row.key));
+    if (row.status === "uploading") {
+      item.createDiv("ai-edu-material-bar").createDiv("ai-edu-material-bar-fill");
+    }
+    if (row.status === "error" && row.error) {
+      item.createDiv({ cls: "ai-edu-material-error", text: row.error });
+    }
+  }
+
+  addPendingMaterials(files) {
+    if (this.busy || !files.length) return;
+    const limits = this.materialLimits || MATERIAL_FALLBACK_LIMITS;
+    const rejected = [];
+    files.forEach((file) => {
+      const problem = validateMaterialFile(file, limits);
+      if (problem) rejected.push(`${file.name}：${problem}`);
+      else {
+        this.pendingMaterials.push({
+          key: `${Date.now()}-${this.pendingMaterials.length}-${file.name}`,
+          file,
+          kind: this.materialKind,
+          status: "pending",
+          error: "",
+        });
+      }
+    });
+    this.touched = true;
+    this.materialMessage = rejected.join("；");
+    this.renderMaterialList();
+    if (this.materialMessageEl) {
+      if (this.materialMessage) this.materialMessageEl.setText(this.materialMessage);
+      else this.materialMessageEl.style.display = "none";
+    }
+  }
+
+  removePendingMaterial(key) {
+    if (this.busy) return;
+    this.pendingMaterials = this.pendingMaterials.filter((row) => row.key !== key);
+    this.renderMaterialList();
+  }
+
+  patchPendingMaterial(key, patch) {
+    this.pendingMaterials = this.pendingMaterials.map((row) =>
+      row.key === key ? { ...row, ...patch } : row
+    );
+    this.renderMaterialList();
+  }
+
+  /** 拉取上传限制（扩展名 / 单文件上限 / 分类），失败时保留内置默认值。 */
+  async loadMaterialLimits() {
+    try {
+      const response = await requestUrl({
+        url: `${this.plugin.apiBase()}/api/materials/limits`,
+        method: "GET",
+      });
+      const data = await readJson(response);
+      if (
+        response.status >= 300 ||
+        !data ||
+        !Array.isArray(data.allowed_extensions) ||
+        !data.allowed_extensions.length
+      ) {
+        return;
+      }
+      const limits = {
+        max_bytes: Number(data.max_bytes) > 0 ? Number(data.max_bytes) : MATERIAL_FALLBACK_LIMITS.max_bytes,
+        allowed_extensions: data.allowed_extensions,
+        kinds: Array.isArray(data.kinds) && data.kinds.length ? data.kinds : MATERIAL_FALLBACK_LIMITS.kinds,
+      };
+      if (JSON.stringify(limits) === JSON.stringify(this.materialLimits)) return;
+      this.materialLimits = limits;
+      this.renderMaterialsSection();
+    } catch (_) {
+      // 后端不可达时保留内置默认限制
+    }
+  }
+
+  /** 逐个上传暂存材料：成功的行标记 done（重试时跳过），失败的保留错误信息并返回列表。 */
+  async uploadPendingMaterials(goalId) {
+    const failed = [];
+    for (const row of this.pendingMaterials) {
+      if (row.status === "done") continue;
+      this.patchPendingMaterial(row.key, { status: "uploading", error: "" });
+      try {
+        const { body, contentType } = await buildMultipartBody(row.file, row.kind);
+        const response = await requestUrl({
+          url: `${this.plugin.apiBase()}/api/goals/${goalId}/materials`,
+          method: "POST",
+          headers: { "Content-Type": contentType },
+          body,
+        });
+        const data = await readJson(response);
+        if (response.status >= 300) {
+          throw new Error(requestErrorMessage(data, response));
+        }
+        this.patchPendingMaterial(row.key, { status: "done", error: "" });
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error);
+        this.patchPendingMaterial(row.key, { status: "error", error: message });
+        failed.push(`${row.file.name}：${message}`);
+      }
+    }
+    return failed;
+  }
+
   readForm() {
     return {
       title: this.titleInputEl.value.trim(),
@@ -372,6 +680,8 @@ class AIEduModal extends Modal {
     this.submitEl.disabled = busy;
     this.createOnlyEl.disabled = busy;
     this.submitEl.setText(busy ? "自动生成中…" : "创建并生成教程");
+    if (this.materialPickEl) this.materialPickEl.disabled = busy;
+    if (this.materialListEl) this.renderMaterialList();
   }
 
   async submit() {
@@ -385,6 +695,13 @@ class AIEduModal extends Modal {
     this.lastForm = form;
     this.plugin.settings.generationTier = form.generation_tier;
     await this.plugin.saveSettings();
+
+    // 带参考材料的提交流程：材料接口挂在目标下（/api/goals/{goal_id}/materials），
+    // 所以先创建目标 → 上传材料 → 再触发生成，AI 才能把这些材料注入 prompt。
+    if (this.pendingMaterials.length > 0) {
+      await this.submitWithMaterials(form, true);
+      return;
+    }
 
     this.setBusy(true);
     this.statusEl.setText("正在提交生成任务…");
@@ -438,6 +755,11 @@ class AIEduModal extends Modal {
     this.plugin.settings.generationTier = form.generation_tier;
     await this.plugin.saveSettings();
 
+    if (this.pendingMaterials.length > 0) {
+      await this.submitWithMaterials(form, false);
+      return;
+    }
+
     this.setBusy(true);
     this.statusEl.setText("正在创建学习目标…");
     try {
@@ -458,6 +780,102 @@ class AIEduModal extends Modal {
     } catch (error) {
       this.statusEl.setText(`创建失败：${error.message}`);
       this.setBusy(false);
+    }
+  }
+
+  /**
+   * 带参考材料的两步提交：
+   * ① POST /api/goals 创建目标（失败不会误传材料）；
+   * ② 逐个上传暂存材料到 /api/goals/{id}/materials；
+   * ③ autoGenerate 时再 POST /api/goals/{id}/tutorials/quickstart 触发生成。
+   * 上传失败时不重复建目标：已创建的目标记在 this.createdGoal，重试只补传材料。
+   */
+  async submitWithMaterials(form, autoGenerate) {
+    const requirement = this.buildRequirement(form);
+    this.setBusy(true);
+    this.statusEl.setText(this.createdGoal ? "正在上传参考材料…" : "正在创建学习目标…");
+    try {
+      let goal = this.createdGoal;
+      if (!goal) {
+        const response = await requestUrl({
+          url: `${this.plugin.apiBase()}/api/goals`,
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(
+            autoGenerate
+              ? {
+                  // 与后端 /api/goals/quickstart（create_and_quickstart）的字段处理保持一致
+                  title: form.title,
+                  domain_key: form.domain_key,
+                  motivation: form.motivation || "完成用户提出的学习需求",
+                  application_context: form.application_context || requirement,
+                  current_level: form.current_level,
+                  time_budget: form.time_budget,
+                  capability_level: form.capability_level,
+                  generate_extra_exercises: form.generate_extra_exercises,
+                  generation_tier: form.generation_tier,
+                  user_notes: requirement,
+                }
+              : { ...form, user_notes: requirement }
+          ),
+        });
+        goal = await readJson(response);
+        if (response.status >= 300 || !goal) {
+          throw new GenerationError(requestErrorMessage(goal, response));
+        }
+        this.createdGoal = goal;
+      }
+
+      const failed = await this.uploadPendingMaterials(goal.id);
+      if (failed.length > 0) {
+        this.setBusy(false);
+        this.statusEl.setText(
+          `材料上传失败：${failed.join("；")}。目标「${goal.title}」已创建但尚未生成；` +
+            "可移除失败文件后重新提交，不会重复创建目标。"
+        );
+        return;
+      }
+
+      if (!autoGenerate) {
+        this.completed = true;
+        this.clearDraft();
+        if (!this.closed) this.close();
+        new Notice(`已创建学习目标：${goal.title}`, 5000);
+        return;
+      }
+
+      this.statusEl.setText("参考材料已上传，正在提交生成任务…");
+      const response = await requestUrl({
+        url: `${this.plugin.apiBase()}/api/goals/${goal.id}/tutorials/quickstart`,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const started = await readJson(response);
+      if (response.status === 409 && started?.detail?.code === "generation_paused") {
+        // 目标与材料都已就位，暂停面板里的续跑会复用同一个目标
+        this.setBusy(false);
+        this.showPausedOptions(started.detail);
+        return;
+      }
+      if (response.status >= 300 || !started || !started.tutorial) {
+        throw new GenerationError(requestErrorMessage(started, response));
+      }
+      this.tutorial = started.tutorial;
+      this.jobId = started.job_id || null;
+      if (this.jobId) {
+        await this.pollJob();
+      }
+      this.statusEl.setText("教程已生成，正在获取 Markdown 与配套文件…");
+      await this.loadAndDeliver();
+    } catch (error) {
+      this.setBusy(false);
+      const phase = error instanceof GenerationError ? error.phase : "generation";
+      const prefix = phase === "delivery" ? "交付失败" : "生成失败";
+      this.statusEl.setText(`${prefix}：${error.message}`);
+      if (phase === "delivery" && this.markdown && this.tutorial) {
+        this.showRetryDelivery();
+      }
     }
   }
 

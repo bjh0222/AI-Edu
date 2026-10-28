@@ -29,6 +29,8 @@ if ($busy) {
     Write-Host "[提示] 端口 8000 已有进程在监听（可能是已启动的后端）。" -ForegroundColor Yellow
 } else {
     Write-Host "启动后端（新窗口“AI Edu 后端”，端口 8000）..." -ForegroundColor Cyan
+    # 端点并发上限：DeepSeek 等云端 API 可开多路（9）；自建单卡端点请改回 "1"
+    $env:AIEDU_LLM_CONCURRENCY = "9"
     Start-Process -FilePath "cmd.exe" `
         -ArgumentList "/k", "title AI Edu 后端 && .venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000" `
         -WorkingDirectory $backendDir

@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
@@ -58,6 +60,71 @@ def _usable_tutorial(tutorials: list[dict]) -> dict | None:
     return None
 
 
+_INITIAL_TASK_LABELS = {"diagnose": "价值诊断", "plan": "学习计划", "criteria": "验收标准"}
+
+
+def _run_parallel_initial_tasks(goal_id: str, kinds: list[str]) -> None:
+    """价值诊断 / 学习计划 / 验收标准互不依赖 → 并行生成。
+
+    三者都只依赖 goal+学科+材料，彼此不引用输出（见 goals_service 各生成函数），
+    串行时白白多等 2 次模型往返。与章节 / 配套任务同款模式：
+    每个任务独立 Session + 独立 AIService（并发安全），SQLite 短事务尽快释放写锁。
+    并行度由 tutorials_service.MAX_SECTION_WORKERS 统一控制（AIEDU_LLM_CONCURRENCY）：
+    串行端点（默认 1）时退化为顺序执行，防止排队超时。
+    任一失败整体抛出（已成功的成果已各自落库，幂等：重试时按 reused 跳过）。
+    注意：诊断结果可能在计划 / 标准生成完成后才判定「暂停」，暂停场景会多花 2 次调用——
+    属于用罕见场景的小成本换取常见路径的提速。
+    """
+    from ..db import SessionLocal
+    from ..models import LearningGoal
+
+    def _run(kind: str) -> None:
+        db = SessionLocal()
+        try:
+            if db.get(LearningGoal, goal_id) is None:
+                raise HTTPException(status_code=404, detail={"code": "goal_not_found", "message": "学习目标不存在"})
+            task_ai = AIService(db, goal_id=goal_id)
+            if kind == "diagnose":
+                goals_service.diagnose_goal(db, goal_id, task_ai)
+            elif kind == "plan":
+                goals_service.generate_plan(db, goal_id, task_ai)
+            elif kind == "criteria":
+                goals_service.generate_criteria(db, goal_id, task_ai)
+            else:  # pragma: no cover
+                raise ValueError(f"unknown initial task: {kind}")
+            db.commit()  # 生成函数内部各自提交，这里兜底结束事务
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    # 诊断 / 计划 / 验收标准互不依赖 → 缺哪个补哪个；并行度跟随章节并发上限
+    # （串行端点下 max_workers=1 退化为顺序执行，避免排队把单次请求耗到超时）
+    with ThreadPoolExecutor(
+        max_workers=max(1, min(len(kinds), tutorials_service.MAX_SECTION_WORKERS)),
+        thread_name_prefix="quickstart",
+    ) as pool:
+        futures = {pool.submit(_run, kind): kind for kind in kinds}
+        failures: list[tuple[str, Exception]] = []
+        for future in as_completed(futures):
+            kind = futures[future]
+            try:
+                future.result()
+            except Exception as exc:  # noqa: BLE001  收齐全部结果后统一抛出，避免掩盖并发错误
+                failures.append((kind, exc))
+        if failures:
+            first_kind, first_exc = failures[0]
+            if isinstance(first_exc, HTTPException):
+                raise first_exc  # 保留原始状态码与错误码（如 goal_not_found），不改写分类
+            detail = "；".join(
+                f"{_INITIAL_TASK_LABELS[kind]}生成失败：{str(exc)[:120]}" for kind, exc in failures
+            )
+            raise HTTPException(
+                status_code=502, detail={"code": "llm_error", "message": detail}
+            ) from first_exc  # 串联根因异常，保留排查链路
+
+
 def quickstart(db: Session, goal_id: str, ai: AIService, pause_action: str | None = None) -> dict:
     goal = db.get(LearningGoal, goal_id)
     if goal is None or goal.archived:
@@ -65,21 +132,40 @@ def quickstart(db: Session, goal_id: str, ai: AIService, pause_action: str | Non
 
     steps: list[dict] = []
 
-    # ① 价值诊断
+    # ①③④ 价值诊断 / 学习计划 / 验收标准：缺哪个补哪个，可并行的并行生成
+    # （三者互不依赖；下方先查现状做幂等判断，再交给后台线程池并行补齐）
     assessment = (
         db.query(GoalAssessment)
         .filter(GoalAssessment.goal_id == goal.id)
         .order_by(GoalAssessment.created_at.desc())
         .first()
     )
+    plan = goals_service.get_plan(db, goal.id)
+    criteria = goals_service.list_criteria(db, goal.id)
+
+    wanted = [
+        kind
+        for kind, need in (
+            ("diagnose", assessment is None),
+            ("plan", plan is None),
+            ("criteria", not criteria),
+        )
+        if need
+    ]
+    if wanted:
+        _run_parallel_initial_tasks(goal.id, wanted)
+        db.commit()  # 结束当前只读事务，确保后续读到并行任务刚提交的数据
+    created_steps = set(wanted)
+
+    # ① 价值诊断（并行任务已完成或此前已存在）
     if assessment is None:
-        goals_service.diagnose_goal(db, goal.id, ai)
         assessment = (
             db.query(GoalAssessment)
             .filter(GoalAssessment.goal_id == goal.id)
             .order_by(GoalAssessment.created_at.desc())
             .first()
         )
+    if "diagnose" in created_steps:
         steps.append(_step("diagnose", "价值诊断", "created", "已生成诊断与建议"))
     else:
         steps.append(_step("diagnose", "价值诊断", "reused", "沿用已有诊断"))
@@ -126,21 +212,16 @@ def quickstart(db: Session, goal_id: str, ai: AIService, pause_action: str | Non
             steps.append(_step("decision", "你的决定", "created", "已按建议选择「继续」"))
     else:
         steps.append(_step("decision", "你的决定", "reused", "无诊断结果"))
-    # ③ 学习计划
+    # ③ 学习计划（并行任务已完成或此前已存在）
     plan = goals_service.get_plan(db, goal.id)
-    if plan is None:
-        plan = goals_service.generate_plan(db, goal.id, ai)
-        steps.append(_step("plan", "学习计划", "created", f"{len(plan.get('steps', []))} 个阶段"))
+    if "plan" in created_steps:
+        steps.append(_step("plan", "学习计划", "created", f"{len((plan or {}).get('steps', []))} 个阶段"))
     else:
-        steps.append(_step("plan", "学习计划", "reused", f"沿用 v{plan.get('version', 1)}"))
+        steps.append(_step("plan", "学习计划", "reused", f"沿用 v{(plan or {}).get('version', 1)}"))
 
-    # ④ 验收标准 + 一键同意
+    # ④ 验收标准 + 一键同意（并行任务已完成或此前已存在）
     criteria = goals_service.list_criteria(db, goal.id)
-    if not criteria:
-        criteria = goals_service.generate_criteria(db, goal.id, ai)
-        generated_note = f"新生成 {len(criteria)} 条"
-    else:
-        generated_note = f"沿用 {len(criteria)} 条"
+    generated_note = f"新生成 {len(criteria)} 条" if "criteria" in created_steps else f"沿用 {len(criteria)} 条"
     result = goals_service.confirm_all_criteria(db, goal.id)
     criteria = result["criteria"]
     steps.append(

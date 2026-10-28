@@ -1,15 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { api, ApiError } from "@/lib/api";
+import { api, ApiError, uploadFile } from "@/lib/api";
 import type { Goal, GenerationTier, OneShotGenerateResult, QuickStartResult } from "@/lib/types";
 import { CAPABILITY_LEVELS, GENERATION_TIERS } from "@/lib/types";
 import { PHASE_LABELS } from "@/lib/goal-phases";
 import { Badge, Button, Card, Empty, Field, inputCls } from "@/components/ui";
 import { GoalExamples } from "@/components/goals/GoalExamples";
 import { PausedGenerationPanel, type PauseResumeAction } from "@/components/PausedGeneration";
+import { PendingMaterialsPanel, type PendingMaterial } from "@/components/goals/PendingMaterialsPanel";
 
 const STATUS_LABEL = PHASE_LABELS;
 
@@ -70,6 +71,10 @@ export default function GoalsPage() {
     generate_extra_exercises: false,
     generation_tier: "standard" as GenerationTier,
   });
+  // 「创建并生成教程」里暂存的参考材料：目标创建成功后才真正上传
+  const [pendingMaterials, setPendingMaterials] = useState<PendingMaterial[]>([]);
+  // 同一次提交里已创建的目标（材料上传中途失败重试时复用，避免重复建目标）
+  const createdGoalRef = useRef<Goal | null>(null);
 
   useEffect(() => {
     try {
@@ -145,6 +150,57 @@ export default function GoalsPage() {
     try { localStorage.removeItem("aiedu-goal-draft"); } catch { /* Draft cleanup is best effort. */ }
   };
 
+  const addPendingMaterials = useCallback((files: File[], kind: string) => {
+    setPendingMaterials((prev) => [
+      ...prev,
+      ...files.map((file, index) => ({
+        key: `${Date.now()}-${prev.length + index}-${file.name}`,
+        file,
+        kind,
+        status: "pending" as PendingMaterial["status"],
+        progress: 0,
+        error: "",
+      })),
+    ]);
+  }, []);
+
+  const removePendingMaterial = (key: string) => {
+    setPendingMaterials((prev) => prev.filter((row) => row.key !== key));
+  };
+
+  const patchPendingMaterial = (key: string, patch: Partial<PendingMaterial>) => {
+    setPendingMaterials((prev) => prev.map((row) => (row.key === key ? { ...row, ...patch } : row)));
+  };
+
+  /** 逐个上传暂存材料：成功的行标记 done（重试时跳过），失败的保留错误信息并返回列表。 */
+  const uploadPendingMaterials = async (goalId: string): Promise<string[]> => {
+    const failed: string[] = [];
+    for (const row of pendingMaterials) {
+      if (row.status === "done") continue;
+      patchPendingMaterial(row.key, { status: "uploading", progress: 0, error: "" });
+      try {
+        const upload = new FormData();
+        upload.append("file", row.file, row.file.name);
+        upload.append("kind", row.kind);
+        await uploadFile(`/api/goals/${goalId}/materials`, upload, (percent) => {
+          patchPendingMaterial(row.key, { progress: percent });
+        });
+        patchPendingMaterial(row.key, { status: "done", progress: 100, error: "" });
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        patchPendingMaterial(row.key, { status: "error", progress: 0, error: message });
+        failed.push(`${row.file.name}：${message}`);
+      }
+    }
+    return failed;
+  };
+
+  const resetAll = () => {
+    resetDraft();
+    setPendingMaterials([]);
+    createdGoalRef.current = null;
+  };
+
   const create = async (autoGenerate = true) => {
     if (!form.title.trim()) {
       setError("请填写目标名称");
@@ -153,6 +209,55 @@ export default function GoalsPage() {
     setBusy(true);
     setError("");
     try {
+      const requirement = [
+        form.application_context,
+        form.motivation,
+        form.current_level ? `当前基础：${form.current_level}` : "",
+        form.time_budget ? `可投入时间：${form.time_budget}` : "",
+      ].filter(Boolean).join("\n") || form.title;
+
+      // 带参考材料的提交流程：材料接口挂在目标下（/api/goals/{goal_id}/materials），
+      // 所以先创建目标 → 上传材料 → 再触发生成，AI 才能把这些材料注入 prompt。
+      if (pendingMaterials.length > 0) {
+        const goal = createdGoalRef.current ?? (await api.post<Goal>("/api/goals", autoGenerate
+          ? {
+              // 与后端 /api/goals/quickstart（create_and_quickstart）的字段处理保持一致
+              title: form.title,
+              domain_key: form.domain_key,
+              motivation: form.motivation || "完成用户提出的学习需求",
+              application_context: form.application_context || requirement,
+              current_level: form.current_level,
+              time_budget: form.time_budget,
+              capability_level: form.capability_level,
+              generate_extra_exercises: form.generate_extra_exercises,
+              generation_tier: form.generation_tier,
+              user_notes: requirement,
+            }
+          : { ...form, user_notes: requirement }));
+        createdGoalRef.current = goal;
+        const failed = await uploadPendingMaterials(goal.id);
+        if (failed.length > 0) {
+          await load();
+          setError(
+            `材料上传失败：${failed.join("；")}。目标「${goal.title}」已创建但尚未生成；` +
+            "可移除失败文件后重新提交，不会重复创建目标。"
+          );
+          return;
+        }
+        if (!autoGenerate) {
+          resetAll();
+          await load();
+          router.push(`/goals/${goal.id}`);
+          return;
+        }
+        const result = await api.post<QuickStartResult>(`/api/goals/${goal.id}/tutorials/quickstart`, {});
+        resetAll();
+        setPaused(null);
+        await load();
+        router.push(`/tutorials/${result.tutorial.id}`);
+        return;
+      }
+
       if (!autoGenerate) {
         const goal = await api.post<Goal>("/api/goals", form);
         resetDraft();
@@ -161,12 +266,6 @@ export default function GoalsPage() {
         return;
       }
 
-      const requirement = [
-        form.application_context,
-        form.motivation,
-        form.current_level ? `当前基础：${form.current_level}` : "",
-        form.time_budget ? `可投入时间：${form.time_budget}` : "",
-      ].filter(Boolean).join("\n") || form.title;
       const result = await api.post<OneShotGenerateResult>("/api/goals/quickstart", {
         title: form.title,
         requirement,
@@ -495,6 +594,15 @@ export default function GoalsPage() {
               开启后会随教程生成一份 Markdown 练习集并在教程中建立双链；教程内的必要练习不受影响
             </span>
           </Field>
+          <div className="mb-3 grid gap-1.5">
+            <span className="text-[12px] font-semibold text-ink">参考资料 / 例题来源（可选）</span>
+            <PendingMaterialsPanel
+              files={pendingMaterials}
+              busy={busy}
+              onAdd={addPendingMaterials}
+              onRemove={removePendingMaterial}
+            />
+          </div>
           <div className="flex flex-wrap gap-2">
             <Button onClick={() => void create(true)} disabled={busy}>
               {busy ? "自动生成中…" : "创建并自动生成教程"}

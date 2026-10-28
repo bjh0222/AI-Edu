@@ -104,3 +104,168 @@ textarea.ai-edu-input {
 .ai-edu-paused .ai-edu-actions {
   margin-top: 0;
 }
+
+/* 参考资料 / 例题来源（可选）：暂存式上传区 */
+.ai-edu-materials {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m, 8px);
+  background: var(--background-secondary);
+}
+
+.ai-edu-materials-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-edu-materials-caption {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.ai-edu-kind-group {
+  display: flex;
+  gap: 4px;
+}
+
+.ai-edu-kind-btn {
+  padding: 2px 10px;
+  font-size: 11px;
+  border-radius: var(--radius-s, 6px);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.ai-edu-kind-btn:hover {
+  border-color: var(--interactive-accent);
+}
+
+.ai-edu-kind-btn.is-active {
+  border-color: var(--interactive-accent);
+  background: hsla(var(--interactive-accent-hsl), 0.12);
+  color: var(--interactive-accent);
+  font-weight: 600;
+}
+
+.ai-edu-material-pick {
+  margin-left: auto;
+  font-size: 11px;
+}
+
+.ai-edu-material-input {
+  display: none;
+}
+
+.ai-edu-material-message {
+  padding: 4px 8px;
+  border-radius: var(--radius-s, 6px);
+  background: var(--background-modifier-error);
+  color: var(--text-error);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.ai-edu-material-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ai-edu-material-row {
+  padding: 6px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 6px);
+  background: var(--background-primary);
+}
+
+.ai-edu-material-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.ai-edu-material-kind {
+  padding: 1px 6px;
+  border-radius: var(--radius-s, 6px);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.ai-edu-material-name {
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.ai-edu-material-size {
+  color: var(--text-faint);
+}
+
+.ai-edu-material-status {
+  margin-left: auto;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.ai-edu-material-status.is-done {
+  color: var(--text-success, var(--text-normal));
+}
+
+.ai-edu-material-status.is-error {
+  color: var(--text-error);
+}
+
+.ai-edu-material-remove {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.ai-edu-material-remove:hover {
+  color: var(--text-error);
+}
+
+.ai-edu-material-bar {
+  height: 4px;
+  margin-top: 5px;
+  border-radius: 999px;
+  background: var(--background-modifier-border);
+  overflow: hidden;
+}
+
+.ai-edu-material-bar-fill {
+  height: 100%;
+  width: 100%;
+  border-radius: 999px;
+  background: var(--interactive-accent);
+  animation: ai-edu-material-progress 1.2s ease-in-out infinite alternate;
+}
+
+@keyframes ai-edu-material-progress {
+  from {
+    width: 15%;
+  }
+  to {
+    width: 85%;
+  }
+}
+
+.ai-edu-material-error {
+  margin-top: 4px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-error);
+}

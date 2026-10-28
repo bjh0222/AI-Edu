@@ -1,6 +1,8 @@
 """教程服务：大纲 → 分节生成 → 质量检查 → 版本管理。"""
 from __future__ import annotations
 
+import logging
+import os
 import re
 import threading
 import time
@@ -32,8 +34,15 @@ from .utils import (
 )
 
 MAX_SECTIONS_HINT = 8  # 安全上限：防止异常输出撑爆成本；正常章节数由目标范围决定
-# 章节并发生成上限：3 路是「模型限流 / SQLite 写锁 / 墙钟收益」的折中（8 节串行约 8 次往返）
-MAX_SECTION_WORKERS = 3
+# 章节并发生成上限：默认 1 路（串行）。实测自建端点（单卡）按队列串行处理请求：
+# 单节约 385s，3 路并发时第 2/3 个请求排队超过超时上限必然超时→重试再排队→永追不上。
+# 端点支持真并发时可用环境变量 AIEDU_LLM_CONCURRENCY 提高（如 3）。
+MAX_SECTION_WORKERS = max(1, int(os.environ.get("AIEDU_LLM_CONCURRENCY", "1")))
+
+logger = logging.getLogger(__name__)
+# 知识网络提取全局串行锁：提取已是后台锦上添花，串行化零性能损失；
+# 避免大纲提取线程与章节 draft 提取线程并发「查-插」产生同名重复概念节点
+_KNOWLEDGE_EXTRACTION_LOCK = threading.Lock()
 
 VALID_CONTENT_TYPES = {"concept", "method", "tool", "fact", "application", "mixed"}
 
@@ -261,29 +270,24 @@ def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
         db.flush()
         tutorial.current_version_id = version.id
         set_status_at_least(goal, "learning")
-        # 教程生成即更新知识网络：大纲阶段先写入概念级结构（失败不阻断教程）
-        _update_job(db, job_id=job.id, progress=92, stage="更新知识网络")
-        db.commit()
-        try:
-            knowledge_service.extract_from_tutorial(db, goal, tutorial, version, ai)
-        except Exception as exc:  # noqa: BLE001  知识提取失败只记录，不影响教程交付
-            job = db.get(GenerationJob, job.id)
-            if job is not None:
-                job.stage = f"大纲完成（知识网络更新失败：{str(exc)[:80]}）"
+        # 教程生成即更新知识网络：改为后台线程执行，大纲响应不再多等 1 次模型往返
+        # （失败不阻断教程交付；提取内部有指纹去重，重复触发不会重复烧钱）
         job = db.get(GenerationJob, job.id)
         if job is not None:
             job.status = "done"
             job.progress = 100
-            job.stage = "大纲完成，知识网络已更新"
+            job.stage = "大纲完成（知识网络后台更新中）"
             job.prompt_tokens = usage.get("prompt_tokens", 0)
             job.completion_tokens = usage.get("completion_tokens", 0)
             job.total_tokens = usage.get("total_tokens", 0)
             job.usage_source = usage.get("usage_source", "")
-        db.commit()
+        db.commit()  # 先提交并结束本事务，后台提取线程才能读到刚写入的版本
+        _extract_knowledge_async(goal.id, tutorial.id, version.id)
         return {"tutorial": tutorial_dict(db, tutorial), "job": job, "demo": ai.is_demo}
     except AIServiceError as exc:
         job.status = "failed"
         job.error_code = "llm_error"
+        job.error_message = str(exc)[:2000]  # 把根因（如模型请求超时）留给前端展示与排查
         db.commit()
         # 清理本次未产出任何版本的「空壳教程」，避免列表出现空教程
         try:
@@ -376,6 +380,74 @@ def _companion_task(
         db.close()
 
 
+def _submit_companion_tasks(
+    pool: ThreadPoolExecutor,
+    *,
+    tutorial_id: str,
+    goal_id: str,
+    job_id: str,
+    outline: list,
+    materials_text: str,
+    want_cheatsheet: bool,
+    want_extra: bool,
+) -> dict:
+    """把配套文件任务提交到给定线程池（复用池子 = 不抬高模型并发峰值），返回 future→kind。"""
+    wanted = [kind for kind, flag in (("cheatsheet", want_cheatsheet), ("extra_exercises", want_extra)) if flag]
+    return {
+        pool.submit(
+            _companion_task,
+            kind,
+            tutorial_id=tutorial_id,
+            goal_id=goal_id,
+            job_id=job_id,
+            outline=outline,
+            materials_text=materials_text,
+        ): kind
+        for kind in wanted
+    }
+
+
+def _collect_companion_results(futures: dict, *, goal_title: str) -> dict:
+    """等待配套任务完成并合并结果；单个失败只留痕，不拖垮另一个。"""
+    result: dict = {
+        "cheatsheet": None,
+        "extra_exercises": None,
+        "usage": token_usage_dict(),
+        "errors": [],
+    }
+    payloads: dict[str, dict] = {}
+    for future in as_completed(futures):
+        kind = futures[future]
+        try:
+            _, payload, usage = future.result()
+        except Exception as exc:  # noqa: BLE001  单文件失败不影响另一个
+            result["errors"].append(f"{_COMPANION_LABELS[kind]}生成失败：{str(exc)[:80]}")
+            continue
+        payloads[kind] = payload
+        add_usage(
+            result["usage"],
+            usage.get("prompt_tokens"),
+            usage.get("completion_tokens"),
+            usage.get("total_tokens"),
+        )
+        if usage.get("usage_source") == "provider":
+            result["usage"]["usage_source"] = "provider"
+        elif usage.get("usage_source") == "estimated" and result["usage"]["usage_source"] != "provider":
+            result["usage"]["usage_source"] = "estimated"
+
+    if "cheatsheet" in payloads:
+        result["cheatsheet"] = {
+            "filename": f"{_safe_filename(goal_title)}-知识速查",
+            **payloads["cheatsheet"],
+        }
+    if "extra_exercises" in payloads:
+        result["extra_exercises"] = {
+            "filename": f"{_safe_filename(goal_title)}-额外练习",
+            **payloads["extra_exercises"],
+        }
+    return result
+
+
 def _generate_companions(
     *,
     tutorial_id: str,
@@ -389,59 +461,21 @@ def _generate_companions(
 ) -> dict:
     """知识速查与额外练习互不依赖 → 并行生成；单个失败只留痕，不拖垮另一个。"""
     wanted = [kind for kind, flag in (("cheatsheet", want_cheatsheet), ("extra_exercises", want_extra)) if flag]
-    result: dict = {
-        "cheatsheet": None,
-        "extra_exercises": None,
-        "usage": token_usage_dict(),
-        "errors": [],
-    }
     if not wanted:
-        return result
+        return {"cheatsheet": None, "extra_exercises": None, "usage": token_usage_dict(), "errors": []}
 
-    payloads: dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=len(wanted), thread_name_prefix="companion") as pool:
-        futures = {
-            pool.submit(
-                _companion_task,
-                kind,
-                tutorial_id=tutorial_id,
-                goal_id=goal_id,
-                job_id=job_id,
-                outline=outline,
-                materials_text=materials_text,
-            ): kind
-            for kind in wanted
-        }
-        for future in as_completed(futures):
-            kind = futures[future]
-            try:
-                _, payload, usage = future.result()
-            except Exception as exc:  # noqa: BLE001  单文件失败不影响另一个
-                result["errors"].append(f"{_COMPANION_LABELS[kind]}生成失败：{str(exc)[:80]}")
-                continue
-            payloads[kind] = payload
-            add_usage(
-                result["usage"],
-                usage.get("prompt_tokens"),
-                usage.get("completion_tokens"),
-                usage.get("total_tokens"),
-            )
-            if usage.get("usage_source") == "provider":
-                result["usage"]["usage_source"] = "provider"
-            elif usage.get("usage_source") == "estimated" and result["usage"]["usage_source"] != "provider":
-                result["usage"]["usage_source"] = "estimated"
-
-    if "cheatsheet" in payloads:
-        result["cheatsheet"] = {
-            "filename": f"{_safe_filename(goal_title)}-知识速查",
-            **payloads["cheatsheet"],
-        }
-    if "extra_exercises" in payloads:
-        result["extra_exercises"] = {
-            "filename": f"{_safe_filename(goal_title)}-额外练习",
-            **payloads["extra_exercises"],
-        }
-    return result
+        futures = _submit_companion_tasks(
+            pool,
+            tutorial_id=tutorial_id,
+            goal_id=goal_id,
+            job_id=job_id,
+            outline=outline,
+            materials_text=materials_text,
+            want_cheatsheet=want_cheatsheet,
+            want_extra=want_extra,
+        )
+        return _collect_companion_results(futures, goal_title=goal_title)
 
 
 def ensure_companions(db: Session, tutorial_id: str, ai: AIService, *, strict: bool = True) -> dict:
@@ -576,6 +610,50 @@ def start_companions(db: Session, tutorial_id: str, ai: AIService) -> dict:
     thread = threading.Thread(target=_companions_worker, args=(tutorial.id, job.id), daemon=True)
     thread.start()
     return {"tutorial": tutorial_dict(db, tutorial), "job": job, "demo": ai.is_demo, "reused": False}
+
+
+def _knowledge_extraction_worker(goal_id: str, tutorial_id: str, version_id: str) -> None:
+    """后台线程：教程完成后的知识网络提取（独立会话 + 独立 AIService）。
+
+    提取只服务知识图谱，不阻塞教程内容交付；挪到后台后，大纲响应与章节 job
+    都不必再多等 1 次完整模型往返。失败只留痕不重试；提取内部有指纹去重，
+    重复触发不会重复烧钱。
+    """
+    from ..db import SessionLocal
+    from ..models import LearningGoal
+
+    db = SessionLocal()
+    try:
+        goal = db.get(LearningGoal, goal_id)
+        tutorial = db.get(Tutorial, tutorial_id)
+        version = db.get(TutorialVersion, version_id) if version_id else None
+        if goal is None or tutorial is None:
+            return
+        ai = AIService(db, goal_id=goal_id, tutorial_id=tutorial_id)
+        with _KNOWLEDGE_EXTRACTION_LOCK:
+            knowledge_service.extract_from_tutorial(db, goal, tutorial, version, ai)
+        db.commit()
+    except Exception:  # noqa: BLE001  提取失败不影响教程交付（原语义：失败只留痕不阻断）
+        db.rollback()
+        # 后台化后 job.stage 无法再承载失败原因，这里必须落服务日志留痕
+        logger.warning(
+            "知识网络提取失败（goal=%s tutorial=%s version=%s）",
+            goal_id,
+            tutorial_id,
+            version_id,
+            exc_info=True,
+        )
+    finally:
+        db.close()
+
+
+def _extract_knowledge_async(goal_id: str, tutorial_id: str, version_id: str) -> None:
+    threading.Thread(
+        target=_knowledge_extraction_worker,
+        args=(goal_id, tutorial_id, version_id),
+        name="knowledge-extract",
+        daemon=True,
+    ).start()
 
 
 def _update_job(
@@ -782,6 +860,9 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         db.commit()
 
         done = 0
+        # 配套文件只依赖大纲，不依赖章节 → 与章节同池并行：
+        # 章节先入队占满工作线程，配套任务随后排队接档，消除「全部章节完成后
+        # 再串行等 1-2 次模型往返」的尾巴；复用同一个池子，模型峰值并发仍 ≤ 3 路。
         with ThreadPoolExecutor(
             max_workers=min(MAX_SECTION_WORKERS, total), thread_name_prefix="section"
         ) as pool:
@@ -800,6 +881,16 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
                 ): idx
                 for idx, item in enumerate(outline)
             }
+            companion_futures = _submit_companion_tasks(
+                pool,
+                tutorial_id=tutorial.id,
+                goal_id=goal.id,
+                job_id=job_id,
+                outline=outline,
+                materials_text=materials_text,
+                want_cheatsheet=True,
+                want_extra=bool(goal.generate_extra_exercises),
+            )
             for future in as_completed(futures):
                 idx = futures[future]
                 try:
@@ -828,6 +919,9 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
                 db.commit()
 
         if failures:
+            # 章节已失败：取消仍在排队的配套任务（正在跑的等它自然结束），省 token 也省限流额度
+            for companion_future in companion_futures:
+                companion_future.cancel()
             db.commit()  # 保住已完成草稿，再判定整体失败
             idx, exc = failures[0]
             message = (
@@ -846,19 +940,11 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         draft.quality_report = jdump(quality)
         tutorial.status = "drafted" if quality.get("passed") else "drafted_with_issues"
 
-        # 配套文件：知识速查与额外练习互不依赖 → 并行生成；失败只留痕，不阻断正文交付
-        _update_job(db, job_id, progress=92, stage="并行生成配套文件（知识速查 / 额外练习）")
+        # 配套文件已在上面与章节并行生成：这里只收尾等待（通常已完成或接近完成）；
+        # 单个失败只留痕，不阻断正文交付
+        _update_job(db, job_id, progress=92, stage="等待配套文件完成（知识速查 / 额外练习）")
         db.commit()
-        companions = _generate_companions(
-            tutorial_id=tutorial.id,
-            goal_id=goal.id,
-            goal_title=goal.title,
-            job_id=job_id,
-            outline=outline,
-            materials_text=materials_text,
-            want_cheatsheet=True,
-            want_extra=bool(goal.generate_extra_exercises),
-        )
+        companions = _collect_companion_results(companion_futures, goal_title=goal.title)
         new_content["cheatsheet"] = companions["cheatsheet"]
         if bool(goal.generate_extra_exercises):
             new_content["extra_exercises"] = companions["extra_exercises"]
@@ -870,24 +956,11 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
 
         # 实践任务与「实践」环节已移除：教程内的必要练习即练习载体
         # （配套文件已在上面写入 new_content）
-        # 全部章节完成：提取概念与关系写入知识网络（失败不阻断教程交付，job.stage 留痕）
-        _update_job(db, job_id, progress=94, stage="更新知识网络")
-        db.commit()
-        extraction_error = ""
-        # 提取阶段已退出线程池，回到单线程：用一个绑定主会话的 AIService 记账即可
-        ai = AIService(db, goal_id=goal.id, tutorial_id=tutorial.id, job_id=job_id)
-        try:
-            knowledge_service.extract_from_tutorial(db, goal, tutorial, draft, ai)
-        except Exception as exc:  # noqa: BLE001
-            extraction_error = f"{exc.__class__.__name__}: {str(exc)[:120]}"
-        _update_job(
-            db,
-            job_id,
-            status="done",
-            progress=100,
-            stage="完成，知识网络已更新" if not extraction_error else f"完成（知识网络更新失败：{extraction_error[:80]}）",
-        )
-        db.commit()
+        # 全部章节完成：知识网络提取挪到后台线程，job 不再多等 1 次模型往返才标完成
+        # （失败不阻断教程交付；提取内部有指纹去重，重复触发不会重复烧钱）
+        _update_job(db, job_id, status="done", progress=100, stage="完成（知识网络后台更新中）")
+        db.commit()  # 先提交并结束本事务，后台提取线程才能读到刚写入的最终版本
+        _extract_knowledge_async(goal.id, tutorial.id, draft.id)
     except AIServiceError as exc:
         _fail_job(db, job_id, "llm_error", str(exc))
     except Exception as exc:  # noqa: BLE001

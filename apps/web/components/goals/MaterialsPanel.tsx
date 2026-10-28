@@ -55,6 +55,41 @@ interface QueueItem {
   error: string;
 }
 
+/** 拉取上传限制（扩展名 / 单文件上限 / 分类），失败时退回内置默认值。 */
+export function useMaterialLimits(): MaterialLimits {
+  const [limits, setLimits] = useState<MaterialLimits>(FALLBACK_LIMITS);
+  useEffect(() => {
+    api
+      .get<MaterialLimits>("/api/materials/limits")
+      .then((data) => setLimits(data))
+      .catch(() => setLimits(FALLBACK_LIMITS));
+  }, []);
+  return limits;
+}
+
+export function materialExtensionsText(limits: MaterialLimits): string {
+  return limits.allowed_extensions.map((ext) => ext.replace(".", "")).join(" / ");
+}
+
+/** 与后端 save_upload 同规则的客户端预校验；返回错误文案，空串表示通过。 */
+export function validateMaterialFile(file: File, limits: MaterialLimits): string {
+  const dot = file.name.lastIndexOf(".");
+  const ext = dot >= 0 ? file.name.slice(dot).toLowerCase() : "";
+  if (!limits.allowed_extensions.includes(ext)) {
+    return `不支持的类型「${ext || "无扩展名"}」，仅支持 ${materialExtensionsText(limits)}`;
+  }
+  if (file.size > limits.max_bytes) {
+    return `文件过大（${formatSize(file.size)}），单文件上限 ${formatSize(limits.max_bytes)}`;
+  }
+  if (file.size === 0) return "文件为空";
+  return "";
+}
+
+export const KIND_FALLBACK_LABELS: Record<string, string> = {
+  reference: "参考资料",
+  example_source: "例题来源",
+};
+
 /**
  * 参考资料 / 例题来源上传区：
  * 多文件选择或拖拽、类型与大小校验、逐文件进度、删除、失败重试。
@@ -71,7 +106,7 @@ export function MaterialsPanel({
   onChanged: () => Promise<void> | void;
   hint?: string;
 }) {
-  const [limits, setLimits] = useState<MaterialLimits>(FALLBACK_LIMITS);
+  const limits = useMaterialLimits();
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [kind, setKind] = useState("reference");
   const [dragging, setDragging] = useState(false);
@@ -82,36 +117,12 @@ export function MaterialsPanel({
   const busyRef = useRef(false);
 
   useEffect(() => {
-    api
-      .get<MaterialLimits>("/api/materials/limits")
-      .then((data) => setLimits(data))
-      .catch(() => setLimits(FALLBACK_LIMITS));
-  }, []);
-
-  useEffect(() => {
     queueRef.current = queue;
   }, [queue]);
 
-  const allowedText = useMemo(
-    () => limits.allowed_extensions.map((ext) => ext.replace(".", "")).join(" / "),
-    [limits.allowed_extensions]
-  );
+  const allowedText = useMemo(() => materialExtensionsText(limits), [limits]);
 
-  const validate = useCallback(
-    (file: File): string => {
-      const dot = file.name.lastIndexOf(".");
-      const ext = dot >= 0 ? file.name.slice(dot).toLowerCase() : "";
-      if (!limits.allowed_extensions.includes(ext)) {
-        return `不支持的类型「${ext || "无扩展名"}」，仅支持 ${allowedText}`;
-      }
-      if (file.size > limits.max_bytes) {
-        return `文件过大（${formatSize(file.size)}），单文件上限 ${formatSize(limits.max_bytes)}`;
-      }
-      if (file.size === 0) return "文件为空";
-      return "";
-    },
-    [allowedText, limits]
-  );
+  const validate = useCallback((file: File) => validateMaterialFile(file, limits), [limits]);
 
   const setRow = useCallback((key: string, patch: Partial<QueueItem>) => {
     setQueue((prev) => prev.map((row) => (row.key === key ? { ...row, ...patch } : row)));
