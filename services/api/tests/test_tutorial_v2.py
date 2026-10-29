@@ -199,6 +199,98 @@ def test_normalize_section_raw_defaults():
     assert data["mapping_criteria"] == []
 
 
+def test_section_payload_does_not_require_mapping_criteria(monkeypatch):
+    """章节提示词并不要求模型输出 mapping_criteria：缺这个字段不能判失败、更不能触发整章重试。
+
+    章节落库时 mapping_criteria 一律由大纲的 criteria_ids 覆盖（tutorials.py 的章节写入处），
+    所以这里同时验证：模型漏输出时退回大纲已声明的映射，不丢验收标准覆盖关系。
+    """
+    from app.llm.service import AIService
+
+    ai = AIService(None)
+    monkeypatch.setattr(type(ai), "is_demo", property(lambda self: False))
+    required_seen: list[tuple] = []
+
+    def fake_real_json(feature, system, user, required, goal=None):
+        required_seen.append(required)
+        # 模型严格按提示词输出：只有 title / content，没有 mapping_criteria
+        return {
+            "title": "管道的用法",
+            "content": [{"type": "text", "title": "管道", "body": "把前一个命令的输出接到下一个"}],
+        }
+
+    monkeypatch.setattr(ai, "_real_json", fake_real_json)
+
+    goal = type(
+        "G",
+        (),
+        {
+            "title": "掌握命令行管道",
+            "motivation": "",
+            "application_context": "",
+            "current_level": "",
+            "time_budget": "",
+            "capability_level": "L2",
+            "user_notes": "",
+        },
+    )()
+    discipline = type("D", (), {"display_name": "计算机/命令行"})()
+    item = {"title": "管道的用法", "criteria_ids": ["c1", "c2"]}
+
+    data = ai.section(goal, discipline, item, [], [])
+
+    assert "mapping_criteria" not in required_seen[0], "模型漏输出这项是可接受的，不能列为必填"
+    assert data["mapping_criteria"] == ["c1", "c2"], "应退回大纲已声明的验收标准 id"
+
+
+def test_section_retries_with_compression_hint_when_truncated(monkeypatch):
+    """输出被长度上限截断时不能原样重发：要带「压缩篇幅」要求重试一次。
+
+    原样重试几乎必然再次截断，会白烧 N 次完整模型往返（单章动辄上万 token）后才失败。
+    """
+    from app.llm.service import AIService, AIServiceError
+
+    ai = AIService(None)
+    monkeypatch.setattr(type(ai), "is_demo", property(lambda self: False))
+    seen: list[str] = []
+
+    def fake_real_json(feature, system, user, required, goal=None):
+        seen.append(user)
+        if len(seen) == 1:
+            raise AIServiceError(
+                "模型输出被截断（finish_reason=length）：单次输出超出上限，可重试或拆小章节"
+            )
+        return {
+            "title": "管道的用法",
+            "content": [{"type": "text", "title": "管道", "body": "把前一个命令的输出接到下一个"}],
+        }
+
+    monkeypatch.setattr(ai, "_real_json", fake_real_json)
+
+    goal = type(
+        "G",
+        (),
+        {
+            "title": "掌握命令行管道",
+            "motivation": "",
+            "application_context": "",
+            "current_level": "",
+            "time_budget": "",
+            "capability_level": "L2",
+            "user_notes": "",
+        },
+    )()
+    discipline = type("D", (), {"display_name": "计算机/命令行"})()
+    item = {"title": "管道的用法", "criteria_ids": ["c1"]}
+
+    data = ai.section(goal, discipline, item, [], [])
+
+    assert len(seen) == 2, "截断后只应重试一次"
+    assert "被截断" in seen[1], "第二次请求必须告诉模型上一稿被截断了"
+    assert "12000 字以内" in seen[1], "必须给出明确的压缩目标"
+    assert data["title"] == "管道的用法"
+
+
 def test_normalize_outline_items():
     items = _normalize_outline_items(
         [

@@ -26,6 +26,7 @@ from ..learning.teaching_profile import (
 from ..llm.service import AIService, AIServiceError
 from ..models import GenerationJob, ModelCallLog, Tutorial, TutorialVersion
 from . import goals as goals_service
+from . import format_specs as format_specs_service
 from . import knowledge as knowledge_service
 from . import materials as materials_service
 from .utils import (
@@ -34,6 +35,7 @@ from .utils import (
     jdump,
     jload,
     set_status_at_least,
+    safe_obsidian_filename as _safe_filename,
     token_usage_dict,
     tutorial_version_dict,
 )
@@ -292,11 +294,18 @@ def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
         teaching_plan = normalize_teaching_plan(
             data.get("teaching_plan"), parse_teaching_profile(context_text=goal_context_text(goal))
         )
-        # 交付契约（如「目标里出现输出试卷时只交付试卷」）：模型大纲不采信，直接按清单定死结构
-        contract = delivery_contract_for(goal)
+        # 格式规范快照先转换成现有交付契约；画像硬性约束继续并行生效。
+        snapshot = jload(goal.format_spec_snapshot or "", {})
+        if snapshot:
+            snapshot = format_specs_service.apply_task_overrides(snapshot, goal_context_text(goal))
+            goal.format_spec_snapshot = jdump(snapshot)
+        contract = (
+            format_specs_service.delivery_contract_for_snapshot(snapshot)
+            or delivery_contract_for(goal)
+        )
         if contract:
             outline = _contract_outline(contract, criteria)
-        content = {"teaching_plan": teaching_plan, "outline": outline, "sections": []}
+        content = {"format_spec": snapshot, "teaching_plan": teaching_plan, "outline": outline, "sections": []}
         if contract:
             content["delivery_contract"] = contract
         usage = dict(ai.usage_last)
@@ -363,6 +372,21 @@ def start_sections(db: Session, tutorial_id: str, ai: AIService) -> dict:
     if not content.get("outline"):
         raise HTTPException(status_code=409, detail={"code": "no_outline", "message": "教程尚无大纲"})
 
+    # 幂等保护：同一目标已有排队 / 进行中的章节任务时直接复用。
+    # 「一键生成自动续跑」与手动按钮并发提交时不会开出两路重复生成任务。
+    active = (
+        db.query(GenerationJob)
+        .filter(
+            GenerationJob.goal_id == goal.id,
+            GenerationJob.job_type == "tutorial_sections",
+            GenerationJob.status.in_(("queued", "running")),
+        )
+        .order_by(GenerationJob.created_at.desc())
+        .first()
+    )
+    if active is not None:
+        return {"tutorial": tutorial_dict(db, tutorial), "job": active, "demo": ai.is_demo, "reused": True}
+
     job = GenerationJob(goal_id=goal.id, job_type="tutorial_sections", status="queued", progress=0, stage="排队")
     db.add(job)
     db.commit()  # 释放写锁后再启动后台线程
@@ -377,7 +401,10 @@ def _companions_missing(content: dict, goal) -> dict:
 
     交付契约（「内容只包括…不要其它内容」）已把配套文件排除在外时，一律视为不缺。
     """
-    if content.get("delivery_contract") or delivery_contract_for(goal):
+    spec_contract = format_specs_service.delivery_contract_for_snapshot(
+        jload(getattr(goal, "format_spec_snapshot", "") or "", {})
+    )
+    if content.get("delivery_contract") or spec_contract or delivery_contract_for(goal):
         return {"cheatsheet": False, "extra_exercises": False}
     return {
         "cheatsheet": not content.get("cheatsheet"),
@@ -641,7 +668,11 @@ def start_companions(db: Session, tutorial_id: str, ai: AIService) -> dict:
     if not (content.get("sections") or []):
         raise HTTPException(status_code=409, detail={"code": "no_content", "message": "教程尚无章节内容"})
     # 交付契约明确排除配套文件时直接拒绝，避免排一个什么都不做的后台任务
-    if content.get("delivery_contract") or delivery_contract_for(goal):
+    if (
+        content.get("delivery_contract")
+        or format_specs_service.delivery_contract_for_snapshot(jload(goal.format_spec_snapshot or "", {}))
+        or delivery_contract_for(goal)
+    ):
         raise HTTPException(
             status_code=409,
             detail={"code": "no_companions", "message": "本次交付按画像硬性约束只交付指定内容，不生成配套文件"},
@@ -910,10 +941,18 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         if not contract:
             # 旧版本教程：画像现在要求「只交付清单内容」时重建结构。
             # 已生成的讲解大纲不会自己变对，必须按契约整章重生成，否则重跑仍是那份跑偏的教程。
-            contract = delivery_contract_for(goal)
+            contract = format_specs_service.delivery_contract_for_snapshot(
+                jload(goal.format_spec_snapshot or "", {})
+            ) or delivery_contract_for(goal)
             if contract:
                 outline = _contract_outline(contract, criteria_dicts)
-                content = {**content, "delivery_contract": contract, "outline": outline, "sections": []}
+                content = {
+                    **content,
+                    "format_spec": jload(goal.format_spec_snapshot or "", {}),
+                    "delivery_contract": contract,
+                    "outline": outline,
+                    "sections": [],
+                }
         contract_items = (contract or {}).get("items") or []
         # 配套文件是否生成：新旧版本都按画像判断（「不要其它内容」与章节结构无关）
         suppress_companions = bool(contract) or delivery_contract_for(goal) is not None
@@ -929,6 +968,7 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
             version=base_version + 1,
             content_json=jdump(
                 {
+                    "format_spec": content.get("format_spec") or jload(goal.format_spec_snapshot or "", {}),
                     "teaching_plan": teaching_plan,
                     "outline": outline,
                     "sections": [],
@@ -1016,6 +1056,7 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
                 draft.usage_source = usage["usage_source"]
                 draft.content_json = jdump(
                     {
+                        "format_spec": content.get("format_spec") or jload(goal.format_spec_snapshot or "", {}),
                         "teaching_plan": teaching_plan,
                         "outline": outline,
                         "sections": sections,
@@ -1051,10 +1092,20 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         _update_job(db, job_id, progress=90, stage="质量检查")
         db.commit()
         sections = [results[i]["section"] for i in sorted(results)]
-        new_content = {"teaching_plan": teaching_plan, "outline": outline, "sections": sections}
+        new_content = {
+            "format_spec": content.get("format_spec") or jload(goal.format_spec_snapshot or "", {}),
+            "teaching_plan": teaching_plan,
+            "outline": outline,
+            "sections": sections,
+        }
         if contract:
             new_content["delivery_contract"] = contract
         quality = check_structure(new_content, criteria_dicts)
+        quality["issues"] = quality.get("issues", []) + format_specs_service.check_snapshot_delivery(
+            content.get("format_spec") or jload(goal.format_spec_snapshot or "", {}),
+            new_content,
+        )
+        quality["passed"] = bool(quality.get("passed")) and not quality["issues"]
         draft.quality_report = jdump(quality)
         tutorial.status = "drafted" if quality.get("passed") else "drafted_with_issues"
 
@@ -1237,12 +1288,6 @@ def restore_version(db: Session, tutorial_id: str, version_number: int) -> dict:
     return tutorial_dict(db, tutorial)
 
 
-def _safe_filename(name: str) -> str:
-    # 含 Obsidian 不允许/易冲突的字符（# ^ [ ] |）一并清理，保证双链文件名可用
-    cleaned = re.sub(r'[\\/:*?"<>|#^\[\]\r\n]+', " ", name).strip()
-    return cleaned or "tutorial"
-
-
 # 双链与标签的导出归一化：模型可能写出 [[...]]、[[笔记名]] 这类占位链接，
 # 也可能在正文里写 #标签。交付到 Vault 前统一处理：
 # - 指向本次配套文件的 [[文件名]] 原样保留（这些文件由插件同时写入）；
@@ -1340,7 +1385,7 @@ def _render_block(block: dict, lines: list[str]) -> None:
     lines.append("")
 
 
-def _render_section_v2(s: dict, crit_by_id: dict, lines: list[str]) -> None:
+def _render_section_v2(s: dict, lines: list[str]) -> None:
     if s.get("purpose"):
         lines.append(f"> {s['purpose']}")
         lines.append("")
@@ -1371,26 +1416,9 @@ def _render_section_v2(s: dict, crit_by_id: dict, lines: list[str]) -> None:
         for e in s["exercises"]:
             lines.append(f"- [ ] {e}")
         lines.append("")
-    mapped = s.get("mapping_criteria", [])
-    if mapped:
-        lines.append("### 对应验收标准")
-        lines.append("")
-        for cid in mapped:
-            stmt = crit_by_id.get(cid, {}).get("statement", cid)
-            lines.append(f"- {stmt}")
-        lines.append("")
-    sources = s.get("sources", [])
-    if sources:
-        lines.append("### 来源")
-        lines.append("")
-        for src in sources:
-            url = f"（{src.get('url', '')}）" if src.get("url") else ""
-            note = f" — {src.get('note', '')}" if src.get("note") else ""
-            lines.append(f"- {src.get('title', '')}{url}{note}")
-        lines.append("")
 
 
-def _render_section_v1(s: dict, crit_by_id: dict, lines: list[str]) -> None:
+def _render_section_v1(s: dict, lines: list[str]) -> None:
     """旧结构（explanation/steps/examples/...）渲染，保持历史版本可导出。"""
     if s.get("goal_statement"):
         lines.append(f"> {s['goal_statement']}")
@@ -1440,23 +1468,6 @@ def _render_section_v1(s: dict, crit_by_id: dict, lines: list[str]) -> None:
         for e in s["common_errors"]:
             lines.append(f"- **{e.get('error', '')}** — 原因：{e.get('cause', '')}；排查：{e.get('diagnose', '')}")
         lines.append("")
-    mapped = s.get("mapping_criteria", [])
-    if mapped:
-        lines.append("### 对应验收标准")
-        lines.append("")
-        for cid in mapped:
-            stmt = crit_by_id.get(cid, {}).get("statement", cid)
-            lines.append(f"- {stmt}")
-        lines.append("")
-    sources = s.get("sources", [])
-    if sources:
-        lines.append("### 来源与可信度")
-        lines.append("")
-        for src in sources:
-            url = f"（{src['url']}）" if src.get("url") else ""
-            note = f" — {src['note']}" if src.get("note") else ""
-            lines.append(f"- {src.get('title', '')}{url}{note}")
-        lines.append("")
 
 
 def _tutorial_base_name(goal) -> str:
@@ -1471,7 +1482,6 @@ def export_markdown(db: Session, tutorial_id: str) -> tuple[str, str]:
     if version is None:
         raise HTTPException(status_code=409, detail={"code": "no_content", "message": "教程尚无内容"})
     content = jload(version.content_json, {"outline": [], "sections": []})
-    crit_by_id = {}
     cheatsheet = content.get("cheatsheet") or {}
     exercises_file = content.get("extra_exercises") or {}
 
@@ -1507,9 +1517,9 @@ def export_markdown(db: Session, tutorial_id: str) -> tuple[str, str]:
         lines.append(f"## 第 {idx} 节：{section.get('title', '')}")
         lines.append("")
         if section.get("content"):
-            _render_section_v2(section, crit_by_id, lines)
+            _render_section_v2(section, lines)
         else:
-            _render_section_v1(section, crit_by_id, lines)
+            _render_section_v1(section, lines)
 
     allowed_links = {_tutorial_base_name(goal)}
     if cheatsheet.get("sections"):

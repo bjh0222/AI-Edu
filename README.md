@@ -81,6 +81,27 @@ cd services/api
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
+### 5. 故障排查
+
+**后端一启动就报 `ImportError: DLL load failed while importing _row_cy`（或每个请求 500）**
+Windows 11 的「智能应用控制」(Smart App Control) 会拦截没有信誉的本地编译扩展（Win32 错误码 4551「应用程序控制策略已阻止此文件」），SQLAlchemy 的 C 扩展首当其冲。让 Python 回退到内置的纯 Python 实现即可（功能不变，略慢）：
+
+```powershell
+cd services/api
+.\.venv\Scripts\python.exe scripts\disable_blocked_native_extensions.py
+```
+
+脚本只改名、不删除，且只处理「加载失败且存在同名 .py 回退实现」的文件；重新安装/升级依赖会带回 `.pyd`，届时重跑一次即可。要根治可在「Windows 安全中心 → 应用和浏览器控制 → 智能应用控制」关闭（注意：关闭后无法再直接开启）。
+
+**报 `sqlite3.OperationalError: unable to open database file`**
+数据库、材料、备份目录现在都锚定到 `services/api/`（不再依赖启动时的工作目录），所以从仓库根或任何目录启动都指向同一份数据。启动日志会打印实际使用的库路径：
+
+```
+INFO:     [aiedu] 数据库：sqlite:///D:/.../services/api/data/aiedu.db
+```
+
+若该路径不符合预期，用 `DATABASE_URL` 显式指定（绝对路径）。
+
 ## 核心闭环
 
 **目标定义 → 价值诊断 → 学习计划 → 验收标准 → 教程学习（终点）**

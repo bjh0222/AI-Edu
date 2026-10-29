@@ -16,6 +16,13 @@ from .db import init_db
 from .llm.service import AIServiceError
 
 logger = logging.getLogger("aiedu")
+if not logger.handlers:
+    # uvicorn 只配置自己的 logger，应用日志默认落到未配置的 root（INFO 会被丢弃）。
+    # 显式挂一个 handler：启动时的库路径、后台线程失败原因才看得见。
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(levelname)s:     [%(name)s] %(message)s"))
+    logger.addHandler(_handler)
+    logger.setLevel(logging.INFO)
 
 
 def _log_unhandled(exc: BaseException) -> None:
@@ -56,9 +63,23 @@ def _sweep_stale_jobs() -> None:
         db.close()
 
 
+def _ensure_format_specs() -> None:
+    from .db import SessionLocal
+    from .services.format_specs import ensure_builtin_specs
+
+    db = SessionLocal()
+    try:
+        ensure_builtin_specs(db)
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    _ensure_format_specs()
+    # 把实际使用的库路径打进日志：从不同目录启动时不会再悄悄换库
+    logger.info("数据库：%s", settings.database_url)
     _sweep_stale_jobs()
     yield
 

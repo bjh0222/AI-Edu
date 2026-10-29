@@ -19,6 +19,22 @@ def _create_goal(client, title="掌握命令行管道与重定向", domain_key="
     return resp.json()
 
 
+def _wait_knowledge_extractions(timeout: float = 15.0) -> None:
+    """等后台知识提取线程全部结束。
+
+    教程完成后的知识网络提取是 fire-and-forget 后台线程，job 状态与 HTTP 响应都不
+    反映它是否跑完。不等就直接断言（「已提取」「概念数不变」）会随机踩到提取还没
+    落库的时间窗，表现为偶发失败。有界等待：真出问题时是明确的超时断言而非挂死。
+    """
+    from app.services.tutorials import pending_knowledge_extractions
+
+    deadline = time.time() + timeout
+    while pending_knowledge_extractions() > 0:
+        if time.time() > deadline:
+            raise AssertionError("后台知识提取超时未结束")
+        time.sleep(0.02)
+
+
 def _generate_tutorial(client, goal_id: str) -> str:
     """演示模式一键补齐到教程完成，返回 tutorial_id。"""
     resp = client.post(f"/api/goals/{goal_id}/diagnose")
@@ -40,6 +56,7 @@ def _generate_tutorial(client, goal_id: str) -> str:
         job = client.get(f"/api/generation-jobs/{job_id}").json()
         if job["status"] in ("done", "failed"):
             assert job["status"] == "done", job
+            _wait_knowledge_extractions()
             return tutorial_id
         time.sleep(0.05)
     raise AssertionError("章节生成超时")

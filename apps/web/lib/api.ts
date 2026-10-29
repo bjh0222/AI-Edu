@@ -100,6 +100,20 @@ export function uploadFile<T>(
 
 export const API_BASE = BASE;
 
+function filenameFromDisposition(header: string | null): string | null {
+  if (!header) return null;
+  const utf8 = header.match(/filename\*=(?:UTF-8'')?([^;]+)/i);
+  if (utf8) {
+    try {
+      return decodeURIComponent(utf8[1].replace(/^"|"$/g, "")).trim() || null;
+    } catch {
+      /* fall through to plain filename */
+    }
+  }
+  const plain = header.match(/filename="?([^";]+)"?/i);
+  return plain?.[1]?.trim() || null;
+}
+
 /** 下载文件（如教程 Markdown 导出）：同源请求，返回 Blob 后触发浏览器下载。 */
 export async function downloadFile(path: string, fallbackName: string): Promise<void> {
   const res = await fetch(`${BASE}${path}`, { cache: "no-store" });
@@ -117,7 +131,7 @@ export async function downloadFile(path: string, fallbackName: string): Promise<
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = fallbackName;
+  a.download = filenameFromDisposition(res.headers.get("content-disposition")) ?? fallbackName;
   a.click();
   URL.revokeObjectURL(url);
 }

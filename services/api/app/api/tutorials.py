@@ -66,7 +66,13 @@ def quickstart_tutorial(
     ai: AIService = Depends(get_ai),
 ):
     """一键生成教材：诊断 → 计划 → 验收标准（一键同意）→ 大纲 → 全部章节。"""
-    return pipeline_service.quickstart(db, goal_id, ai, payload.pause_action if payload else None)
+    return pipeline_service.quickstart(
+        db,
+        goal_id,
+        ai,
+        payload.pause_action if payload else None,
+        payload.format_spec_id if payload else None,
+    )
 
 
 @router.post("/goals/quickstart", response_model=OneShotGenerateOut, tags=["tutorials"])

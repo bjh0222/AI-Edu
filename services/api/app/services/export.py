@@ -16,6 +16,7 @@ from ..models import (
     ChatMessage,
     Concept,
     ConceptRelation,
+    FormatSpec,
     GenerationJob,
     GoalAssessment,
     GoalMaterial,
@@ -36,6 +37,7 @@ EXPORT_VERSION = 1
 
 # 插入顺序（父表在前）；删除时倒序
 TABLES = [
+    ("format_specs", FormatSpec),
     ("learning_goals", LearningGoal),
     ("goal_assessments", GoalAssessment),
     ("goal_materials", GoalMaterial),

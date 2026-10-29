@@ -330,14 +330,19 @@ class AIService:
     def _section_payload(
         self, goal, discipline, item, criteria_list, prior_titles, materials_text: str,
         companion_names: list[str] | None, retry_violations: list[str] | None = None,
+        truncated: bool = False,
     ) -> dict:
         system, user = prompts.section(
             goal, discipline, item, criteria_list, prior_titles, materials_text, companion_names,
-            retry_violations,
+            retry_violations, truncated=truncated,
         )
         data = self._real_json(
             "section", system, user,
-            ("title", "content", "mapping_criteria"),
+            # mapping_criteria 不作必填：章节里这一项落库时一律由大纲已声明的 criteria_ids
+            # 覆盖（见 tutorials.py 的章节写入处），而章节提示词本身并不要求模型输出它。
+            # 若把它列为必填，模型严格按提示词输出时必然「缺字段」→ 整章重试 → 白烧 N 次
+            # 完整模型往返（每次上万 token），却仍然失败。
+            ("title", "content"),
             goal,
         )
         # 可选内容块允许缺失/非法：归一化，不因没有例题或易错点而判定生成失败
@@ -347,6 +352,9 @@ class AIService:
         ):
             if not isinstance(data.get(key), list):
                 data[key] = []
+        # 模型没给映射就退回大纲里已经声明好的验收标准 id，语义等价且不丢覆盖关系
+        if not data["mapping_criteria"] and isinstance(item, dict):
+            data["mapping_criteria"] = [str(cid) for cid in (item.get("criteria_ids") or [])]
         return data
 
     def section(
@@ -359,13 +367,22 @@ class AIService:
                 "section", demo.section(goal, discipline, item, by_id), goal, materials_text
             )
         # 硬性禁止类约束做一次确定性核验：命中即定向重写一次，避免规则只停留在提示词里。
-        return _rule_checked(
-            lambda violations: self._section_payload(
+        def produce(violations, truncated: bool = False):
+            return self._section_payload(
                 goal, discipline, item, criteria_list, prior_titles, materials_text,
-                companion_names, violations,
-            ),
-            _section_check_text,
-        )
+                companion_names, violations, truncated,
+            )
+
+        try:
+            return _rule_checked(lambda violations: produce(violations), _section_check_text)
+        except AIServiceError as exc:
+            if "截断" not in str(exc):
+                raise
+            # 输出超长被截断（finish_reason=length）：JSON 不完整、原样重发几乎必然再截断，
+            # 所以要带「压缩篇幅、保证字段完整」的要求重试一次，而不是白烧一次完整往返。
+            return _rule_checked(
+                lambda violations: produce(violations, truncated=True), _section_check_text
+            )
 
     def cheatsheet(self, goal, discipline, outline_items, materials_text: str = "") -> dict:
         """知识速查文件（教程配套，总是生成）。失败抛 AIServiceError，由调用方兜底。"""
@@ -410,6 +427,13 @@ class AIService:
             return data
 
         return _rule_checked(produce, _exercises_check_text)
+
+    def format_spec_match(self, requirement: str, candidates: list[dict]) -> dict:
+        """少量候选规范的语义匹配；失败由 format_specs 服务回退默认规范。"""
+        if self.is_demo:
+            return {"format_spec_id": "", "confidence": 0, "reason": "演示模式不提供语义识别"}
+        system, user = prompts.format_spec_match(requirement, candidates)
+        return self._real_json("format_spec_match", system, user, (), None)
 
     def feedback(self, goal, criteria_list, task, attempt) -> dict:
         if self.is_demo:

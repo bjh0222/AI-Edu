@@ -71,6 +71,10 @@ class GoalOut(BaseModel):
     hard_constraints: str = ""
     capability_level: str = "L2"
     generate_extra_exercises: bool = False
+    format_spec_id: str = ""
+    format_spec_source: str = ""
+    format_spec_match_note: str = ""
+    format_spec_snapshot: dict[str, Any] = {}
     # 生成挡位：快速 / 标准 / 深度
     generation_tier: Literal["fast", "standard", "deep"] = "standard"
     status: str
@@ -80,6 +84,63 @@ class GoalOut(BaseModel):
     completed_at: str = ""
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+
+
+class FormatSpecDeliverable(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = ""
+    status: Literal["required", "optional", "on_request", "forbidden"] = "optional"
+    primary: bool = True
+    order: int = 1
+    allow_override: bool = True
+
+
+class FormatSpecIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = ""
+    scene: str = Field(default="", max_length=80)
+    is_builtin: bool = False
+    is_default: bool = False
+    applicable_tasks: str = ""
+    applicable_intents: list[str] = []
+    excluded_scenarios: list[str] = []
+    excluded_intents: list[str] = []
+    trigger_keywords: list[str] = []
+    excluded_keywords: list[str] = []
+    allow_keyword_trigger: bool = True
+    allow_semantic_recommendation: bool = True
+    allow_explicit_selection: bool = True
+    target_reader: str = ""
+    output_goal: str = ""
+    deliverables: list[FormatSpecDeliverable] = []
+    content_structure: str = ""
+    format_rules: str = ""
+    required_rules: str = ""
+    forbidden_rules: str = ""
+    suggested_rules: str = ""
+    flexible_rules: str = ""
+    acceptance_criteria: str = ""
+    reference_examples: str = ""
+    custom_markdown: str = ""
+
+
+class FormatSpecOut(FormatSpecIn):
+    id: str
+    version: int
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class FormatSpecMatchIn(BaseModel):
+    requirement: str = Field(min_length=1)
+    manual_spec_id: Optional[str] = None
+
+
+class FormatSpecMatchOut(BaseModel):
+    source: str
+    note: str
+    spec: Optional[FormatSpecOut] = None
+    snapshot: dict[str, Any] = {}
 
 
 class GoalAssessmentOut(BaseModel):
@@ -337,12 +398,18 @@ class DeliveryContract(BaseModel):
     exclusive: bool = False
     suppress_companions: bool = False
     rule: str = ""
+    source: str = ""
+    format_spec_id: str = ""
+    format_spec_version: str = ""
+    forbidden_deliverables: list[str] = []
+    task_overrides: list[str] = []
 
 
 class TutorialContent(BaseModel):
     outline: list[OutlineItem] = []
     sections: list[SectionOut] = []
     teaching_plan: dict[str, Any] = Field(default_factory=dict)
+    format_spec: Optional[dict[str, Any]] = None
     # 交付契约（仅当画像里存在「只包括…」这类组成约束时出现）
     delivery_contract: Optional[DeliveryContract] = None
     # 配套文件（可能为 None：速查未生成 / 用户未开启额外练习）
@@ -855,6 +922,8 @@ class QuickStartRequest(BaseModel):
     """一键生成续跑参数；仅在 AI 暂停后由用户选择是否继续。"""
 
     pause_action: Optional[Literal["proceed", "adopt"]] = None
+    # None 自动匹配；空串表示不使用特殊规范；其他值为手动选择
+    format_spec_id: Optional[str] = None
 
 class OneShotGenerateIn(BaseModel):
     """统一生成入口：一段需求 + 一个挡位即可创建任务并自动规划。"""
@@ -871,6 +940,7 @@ class OneShotGenerateIn(BaseModel):
     capability_level: Literal["L1", "L2", "L3"] = "L2"
     generate_extra_exercises: bool = False
     user_notes: str = ""
+    format_spec_id: Optional[str] = None
 
 
 class OneShotGenerateOut(BaseModel):

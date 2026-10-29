@@ -21,6 +21,7 @@ import { OutlineList, SectionContent, TokenLine } from "@/components/tutorial";
 import { FeedbackForm } from "@/components/FeedbackForm";
 import { Badge, Button, Card, DemoNotice, Empty, inputCls } from "@/components/ui";
 import { GOAL_PHASES } from "@/lib/goal-phases";
+import { markOutlineOnlyGoal, outlineOnlyChosen, clearOutlineOnlyGoal, outlineOnlyRecently, markAutoResumeTried, autoResumeTried, clearAutoResumeTried } from "@/lib/tutorial-continue";
 import { GoalMaterialsCard } from "@/components/goals/GoalMaterialsCard";
 import { PausedGenerationPanel, type PauseResumeAction } from "@/components/PausedGeneration";
 
@@ -160,13 +161,17 @@ function GoalWorkspace() {
     });
   };
 
-  const startSections = async () => {
-    if (!tutorial || busy) return;
+  const startSections = async (targetId?: string, options?: { force?: boolean }) => {
+    const tid = targetId ?? tutorial?.id;
+    // force：调用方自己已经在忙（例如一键生成刚返回），此时不再被 busy 挡住
+    if (!tid || (busy && !options?.force)) return;
     setBusy("sections");
     setError("");
     setNotice("");
+    clearOutlineOnlyGoal(goalId); // 明确要全部章节，覆盖之前「只生成大纲」的选择
+    clearAutoResumeTried(goalId); // 显式重试后重新允许自动续跑
     try {
-      const resp = await api.post<{ job_id: string }>(`/api/tutorials/${tutorial.id}/sections/generate`);
+      const resp = await api.post<{ job_id: string }>(`/api/tutorials/${tid}/sections/generate`);
       setGen({ stage: "已提交，等待模型返回…", progress: 0, tokens: 0 });
       pollJob(resp.job_id);
     } catch (e) {
@@ -175,12 +180,37 @@ function GoalWorkspace() {
     }
   };
 
+  // 一键生成默认不停在大纲：页面加载后发现「30 分钟内生成的大纲还没有章节」，
+  // 自动续跑全部章节（每次挂载最多触发一次；后端对重复提交幂等，不会开出重复任务）。
+  const autoResumed = useRef(false);
+  useEffect(() => {
+    if (autoResumed.current || busy || gen) return;
+    if (!tutorial || !outlineOnlyRecently(tutorial)) return;
+    // 用户主动选过「只生成大纲」时不自动续跑，尊重他的选择
+    if (outlineOnlyChosen(goalId)) return;
+    // 已经自动续跑过一次就不再重复：任务失败时页面仍只有大纲，无限重试会反复烧钱
+    if (autoResumeTried(goalId)) return;
+    const tutorialId = tutorial.id;
+    // 推迟到本轮渲染结束后再改状态、提交任务，避免 effect 内同步 setState 触发级联渲染
+    const timer = setTimeout(() => {
+      autoResumed.current = true;
+      setNotice("检测到上次一键生成停在大纲，正在继续生成全部章节…");
+      void startSections(tutorialId);
+      markAutoResumeTried(goalId); // startSections 内部会重置闸门，这里在其后重新标记
+    }, 0);
+    return () => clearTimeout(timer);
+    // startSections 每次渲染都是新函数，不放进依赖以免重复触发（用 autoResumed 保证只跑一次）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tutorial, busy, gen]);
+
   const startQuickstart = async (pauseAction?: PauseResumeAction) => {
     if (busy) return;
     setBusy("quickstart");
     setError("");
     setNotice("");
     setQuickSteps([]);
+    clearOutlineOnlyGoal(goalId); // 一键生成 = 要到全部章节，清掉「只生成大纲」的旧选择
+    clearAutoResumeTried(goalId); // 用户重新点了一键生成：允许后续中断再自动续跑
     try {
       const resp = await api.post<QuickStartResult>(
         `/api/goals/${goalId}/tutorials/quickstart`,
@@ -193,6 +223,10 @@ function GoalWorkspace() {
         // 可能是章节任务，也可能是「只差配套文件」的后台任务，进度文案交给 job.stage
         setGen({ stage: "任务已提交，等待模型返回…", progress: 0, tokens: 0 });
         pollJob(resp.job_id);
+      } else if (outlineOnlyRecently(resp.tutorial)) {
+        // 一键生成的最后一步默认到「全部章节」：本次没有提交章节任务但大纲还是新的 → 自动续跑
+        // （进度由 gen 面板呈现，startSections 内部会清空 notice）
+        await startSections(resp.tutorial.id, { force: true });
       } else {
         setBusy("");
         setNotice("教材已是最新状态：没有重复生成。");
@@ -523,7 +557,11 @@ function GoalWorkspace() {
                   </Button>
                   <Button
                     variant="secondary"
-                    onClick={() => run("outline", async () => { await api.post(`/api/goals/${goalId}/tutorials/generate`); }, "教程大纲已生成")}
+                    onClick={() => {
+                      // 记住「这次只看大纲」，避免自动续跑把选择推翻
+                      markOutlineOnlyGoal(goalId);
+                      void run("outline", async () => { await api.post(`/api/goals/${goalId}/tutorials/generate`); }, "教程大纲已生成");
+                    }}
                     disabled={busy === "outline" || confirmedCount === 0}
                   >
                     {busy === "outline" ? "生成中…" : "只生成大纲"}

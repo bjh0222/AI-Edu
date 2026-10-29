@@ -167,6 +167,58 @@ def test_materials_context_truncates_and_labels(client):
         db.close()
 
 
+def test_materials_context_injects_raw_text_file(client):
+    """纯文本材料注入文件原文：超过旧摘录上限的内容也完整进入 prompt，且不做空白归一化。"""
+    from app.db import SessionLocal
+    from app.models import GoalMaterial
+
+    goal = _create_goal(client)
+    goal_id = goal["id"]
+    head = "开头标记：管道。\n\n\n\n行A。"
+    tail = "".join(f"第{i}步：过滤日志。\n" for i in range(700))  # 约 8300 字
+    long_text = head + tail  # 超过旧 8000 字入库上限，低于新默认单份注入上限（1.2 万字）
+    assert _upload(client, goal_id, "全文笔记.txt", long_text.encode("utf-8")).status_code == 200
+
+    db = SessionLocal()
+    try:
+        context = materials_service.materials_context(db, goal_id)
+        row = db.query(GoalMaterial).filter(GoalMaterial.goal_id == goal_id).one()
+    finally:
+        db.close()
+
+    assert "全文笔记.txt" in context
+    assert "开头标记：管道。" in context
+    assert "第699步：过滤日志。" in context  # 旧实现（8000 字摘录 + 1500 字注入）必然截掉
+    assert "\n\n\n\n行A。" in context  # 文件原文逐字注入，未做归一化
+    assert row.char_count == len(long_text.strip())  # 库内正文已自愈为文件原文（仅去首尾空白）
+
+
+def test_materials_context_self_heals_truncated_excerpt(client):
+    """旧数据正文被截断入库时，注入会重新读文件原文并回写补全。"""
+    from app.db import SessionLocal
+    from app.models import GoalMaterial
+
+    goal = _create_goal(client)
+    goal_id = goal["id"]
+    full = "".join(f"知识点{i}。" for i in range(1000))  # 约 6500 字
+    assert _upload(client, goal_id, "旧数据.md", full.encode("utf-8")).status_code == 200
+
+    db = SessionLocal()
+    try:
+        row = db.query(GoalMaterial).filter(GoalMaterial.goal_id == goal_id).one()
+        row.text_excerpt = full[:100]  # 模拟旧版本截断入库
+        row.char_count = 100
+        db.commit()
+
+        context = materials_service.materials_context(db, goal_id)
+        db.refresh(row)
+    finally:
+        db.close()
+
+    assert "知识点999。" in context
+    assert row.char_count == len(full)
+
+
 def test_prompt_includes_materials_only_when_present(client):
     goal_obj = type(
         "G",

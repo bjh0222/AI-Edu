@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from ..learning.disciplines import get_profile
@@ -36,6 +37,12 @@ def set_status_at_least(goal, phase: str) -> None:
         goal.status = phase
 
 
+def safe_obsidian_filename(name: str) -> str:
+    """清理 Obsidian 文件名中不允许或易冲突的字符。"""
+    cleaned = re.sub(r'[\\/:*?"<>|#^\[\]\r\n]+', " ", name).strip()
+    return cleaned or "tutorial"
+
+
 def goal_dict(goal) -> dict:
     profile = get_profile(goal.domain_key)
     return {
@@ -52,6 +59,10 @@ def goal_dict(goal) -> dict:
         "capability_level": normalize_level(getattr(goal, "capability_level", None)),
         "generate_extra_exercises": bool(getattr(goal, "generate_extra_exercises", False)),
         "generation_tier": normalize_tier(getattr(goal, "generation_tier", None)),
+        "format_spec_id": getattr(goal, "format_spec_id", "") or "",
+        "format_spec_source": getattr(goal, "format_spec_source", "") or "",
+        "format_spec_match_note": getattr(goal, "format_spec_match_note", "") or "",
+        "format_spec_snapshot": jload(getattr(goal, "format_spec_snapshot", "") or "", {}),
         "status": goal.status,
         "user_notes": goal.user_notes or "",
         "archived": bool(goal.archived),

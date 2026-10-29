@@ -99,7 +99,7 @@ export function MaterialsPanel({
   goalId,
   materials,
   onChanged,
-  hint = "已上传的材料会作为依据注入「价值诊断 / 学习计划 / 教程生成」的 prompt（超长自动截断）。",
+  hint = "已上传的材料会以全文形式注入「价值诊断 / 学习计划 / 教程生成」的 prompt（超出上限时才截断，上限可在服务端配置）。",
 }: {
   goalId: string;
   materials: Material[];

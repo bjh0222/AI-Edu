@@ -2,12 +2,15 @@
 
 设计要点：
 - 文件本体落在 ``settings.materials_dir/{goal_id}/`` 下（默认 ``data/materials``），
-  元数据与正文摘录落库（表 ``goal_materials``），因此列表与注入不依赖文件系统扫描；
+  元数据与抽取正文全文落库（表 ``goal_materials``），因此列表与注入不依赖文件系统扫描；
 - 只接受白名单扩展名，大小上限 ``settings.material_max_bytes``（默认 20MB），
   校验在「读入前」和「边写边计数」两处做，超限立即中止并删除半成品文件；
 - 文本抽取完全零第三方依赖：txt/md/csv 直接解码，docx 解 zip 读 word/document.xml，
   pdf 用 zlib 解压内容流后粗提取字面量字符串（抽不到时状态标记为 empty，不编造内容）；
-  图片只登记来源，不做 OCR（状态 unsupported）。
+  图片只登记来源，不做 OCR（状态 unsupported）；
+- 注入 prompt 时：纯文本材料（txt/md/csv）直接逐字读文件原文交给模型
+  （上限可配，默认单份 1.2 万字 / 全部 4.8 万字），原文比库内摘录长时回写自愈旧数据；
+  其他类型或文件丢失时退回库内摘录。
 """
 from __future__ import annotations
 
@@ -54,9 +57,10 @@ EXTRACT_LABELS: dict[str, str] = {
     "pending": "待抽取",
 }
 
-MAX_EXCERPT_CHARS = 8000  # 入库摘录上限，避免整本书撑爆数据库
-PROMPT_PER_FILE_CHARS = 1500  # 单份材料注入 prompt 的上限
-PROMPT_TOTAL_CHARS = 6000  # 全部材料注入 prompt 的总上限
+MAX_EXCERPT_CHARS = settings.material_max_text_chars  # 入库正文上限（默认 20 万字，可配），仅防极端文件
+PROMPT_PER_FILE_CHARS = settings.material_prompt_per_file_chars  # 单份材料注入 prompt 的上限（可配）
+PROMPT_TOTAL_CHARS = settings.material_prompt_total_chars  # 全部材料注入 prompt 的总上限（可配）
+PDF_MAX_PAGES = 500  # PDF 抽取的页数保险丝，防极端大文件拖死请求
 CHUNK_SIZE = 1024 * 256
 
 
@@ -202,7 +206,7 @@ def _pdf_text(path: Path) -> str:
     if pypdf is not None:
         try:
             reader = pypdf.PdfReader(str(path))
-            pages = [page.extract_text() or "" for page in reader.pages[:40]]
+            pages = [page.extract_text() or "" for page in reader.pages[:PDF_MAX_PAGES]]
             text = _normalize("\n".join(pages))
             if text:
                 return text
@@ -354,6 +358,39 @@ def delete_material(db: Session, material_id: str) -> dict:
 # ------------------------------------------------------------------ prompt 注入
 
 
+def _material_body(db: Session, row: GoalMaterial) -> str:
+    """取材料的注入正文：纯文本文件直接读文件原文交给模型，其余退回库内摘录。
+
+    txt/md/csv 是「文本文件的内容即文件本身」，因此注入时逐字读取文件原文，
+    不经过抽取 / 归一化；旧数据入库时正文被截断为 8000 字摘录，原文比摘录长时
+    回写自愈。文件丢失或读取失败时退回库内摘录，保证注入不因单份材料中断。
+    """
+    stored_text = (row.text_excerpt or "").strip()
+    if not row.stored_name:
+        return stored_text
+    path = _goal_dir(row.goal_id) / row.stored_name
+    if not path.exists():
+        return stored_text
+    if (row.ext or "") not in TEXT_EXTENSIONS:
+        return stored_text  # 非纯文本（图片等）仅作来源标注，不注正文
+    try:
+        text = _decode_text(path.read_bytes())
+    except OSError:
+        return stored_text
+    text = text.strip()[:MAX_EXCERPT_CHARS]
+    if not text:
+        return stored_text
+    if len(text) > len(stored_text):
+        row.text_excerpt = text
+        row.char_count = len(text)
+        row.extract_status = "ok"
+        try:
+            db.commit()
+        except Exception:  # noqa: BLE001  回写失败不影响本次注入
+            db.rollback()
+    return text
+
+
 def materials_context(
     db: Session,
     goal_id: str,
@@ -361,7 +398,7 @@ def materials_context(
     per_file_chars: int = PROMPT_PER_FILE_CHARS,
     total_chars: int = PROMPT_TOTAL_CHARS,
 ) -> str:
-    """把该目标的材料压缩成一段可注入 prompt 的文本（超长截断，标注来源与截断）。"""
+    """把该目标的材料正文注入 prompt（纯文本材料为文件原文，超长截断并标注，上限可配）。"""
     rows = (
         db.query(GoalMaterial)
         .filter(GoalMaterial.goal_id == goal_id, GoalMaterial.status == "ready")
@@ -379,7 +416,7 @@ def materials_context(
             f"[材料 {index}] {row.filename}（{label}，{_human_size(int(row.size or 0))}，"
             f"正文{'已抽取' if row.extract_status == 'ok' else '未抽取'}）"
         )
-        body = (row.text_excerpt or "").strip()
+        body = _material_body(db, row)
         if body:
             truncated = len(body) > per_file_chars
             snippet = body[:per_file_chars]

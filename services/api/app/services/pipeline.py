@@ -18,7 +18,9 @@ from ..learning.teaching_profile import delivery_contract_for
 
 from ..llm.service import AIService
 from ..models import GenerationJob, GoalAssessment, LearningGoal
+from ..services.utils import jdump, jload
 from . import goals as goals_service
+from . import format_specs as format_specs_service
 from . import tutorials as tutorials_service
 
 
@@ -126,12 +128,43 @@ def _run_parallel_initial_tasks(goal_id: str, kinds: list[str]) -> None:
             ) from first_exc  # 串联根因异常，保留排查链路
 
 
-def quickstart(db: Session, goal_id: str, ai: AIService, pause_action: str | None = None) -> dict:
+def quickstart(
+    db: Session,
+    goal_id: str,
+    ai: AIService,
+    pause_action: str | None = None,
+    format_spec_id: str | None = None,
+) -> dict:
     goal = db.get(LearningGoal, goal_id)
     if goal is None or goal.archived:
         raise HTTPException(status_code=404, detail={"code": "goal_not_found", "message": "学习目标不存在"})
 
     steps: list[dict] = []
+
+    # 大纲前选定并冻结规范：manual_spec_id=None 表示自动匹配，"" 表示本次不使用特殊规范。
+    task_text = "\n".join([goal.application_context or "", goal.user_notes or ""]).strip()
+    if format_spec_id is not None or not goal.format_spec_snapshot:
+        resolved = format_specs_service.resolve_spec(
+            db, task_text, ai=ai, manual_spec_id=format_spec_id
+        )
+        snapshot = format_specs_service.apply_task_overrides(resolved["snapshot"], task_text)
+        goal.format_spec_id = resolved["selected_spec"].id if resolved["selected_spec"] is not None else ""
+        goal.format_spec_source = resolved["source"]
+        goal.format_spec_match_note = resolved["note"]
+        goal.format_spec_snapshot = jdump(snapshot)
+        db.commit()
+    else:
+        snapshot = jload(goal.format_spec_snapshot, {})
+    spec_name = str((snapshot or {}).get("name", "")).strip()
+    source_label = format_specs_service.SOURCE_LABELS.get(goal.format_spec_source, "默认规范")
+    steps.append(
+        _step(
+            "format_spec",
+            "格式规范",
+            "created" if format_spec_id is not None or not goal.format_spec_snapshot else "reused",
+            f"{spec_name or '本次不使用特殊规范'}（{source_label}）",
+        )
+    )
 
     # ①③④ 价值诊断 / 学习计划 / 验收标准：缺哪个补哪个，可并行的并行生成
     # （三者互不依赖；下方先查现状做幂等判断，再交给后台线程池并行补齐）
@@ -249,7 +282,11 @@ def quickstart(db: Session, goal_id: str, ai: AIService, pause_action: str | Non
     # ⑥ 全部章节 + 配套文件
     content = (tutorial.get("current_version") or {}).get("content") or {}
     sections = content.get("sections") or []
-    contract = content.get("delivery_contract") or delivery_contract_for(goal)
+    contract = (
+        content.get("delivery_contract")
+        or format_specs_service.delivery_contract_for_snapshot(snapshot)
+        or delivery_contract_for(goal)
+    )
     job_id: str | None = None
     if sections:
         steps.append(_step("sections", "全部章节", "reused", f"已生成 {len(sections)} 节"))
@@ -338,6 +375,6 @@ def create_and_quickstart(db: Session, payload, ai: AIService) -> dict:
             user_notes=requirement,
         ),
     )
-    result = quickstart(db, goal["id"], ai)
-    result["goal"] = goal
+    result = quickstart(db, goal["id"], ai, format_spec_id=getattr(payload, "format_spec_id", None))
+    result["goal"] = goals_service.get_goal(db, goal["id"])
     return result

@@ -7,6 +7,7 @@ import { api, ApiError, downloadFile } from "@/lib/api";
 import type { Criterion, Goal, GoalUsage, Tutorial } from "@/lib/types";
 import { featureLabel, fmtTokens, usageSourceLabel } from "@/lib/format";
 import { OutlineList, SectionContent, TeachingPlanNotice, TokenLine } from "@/components/tutorial";
+import { continueAllSections, clearOutlineOnlyGoal, outlineOnlyChosen, outlineOnlyRecently, markAutoResumeTried, autoResumeTried, clearAutoResumeTried } from "@/lib/tutorial-continue";
 import { FeedbackForm } from "@/components/FeedbackForm";
 import { Badge, Button, Card, DemoNotice, Empty } from "@/components/ui";
 
@@ -83,6 +84,46 @@ function TutorialDetail() {
     return () => clearInterval(timer);
   }, [sectionsPending, sectionCount, load]);
 
+  // 一键生成默认不停在大纲：新大纲还没有章节时，进入本页自动续跑全部章节
+  // （每次挂载最多触发一次；后端对重复提交幂等——已有进行中的章节任务会直接复用）。
+  const autoResumed = useRef(false);
+  useEffect(() => {
+    if (autoResumed.current || busy || !tutorial) return;
+    if (!outlineOnlyRecently(tutorial)) return;
+    // 用户主动选过「只生成大纲」时不自动续跑，尊重他的选择
+    if (outlineOnlyChosen(tutorial.goal_id)) return;
+    // 已经自动续跑过一次就不再重复：章节任务失败时本页仍只有大纲，无限重试会反复烧钱
+    if (autoResumeTried(tutorial.goal_id)) return;
+    // 推迟到本轮渲染结束后再改状态、提交任务，避免 effect 内同步 setState 触发级联渲染
+    const timer = setTimeout(() => {
+      autoResumed.current = true;
+      setNotice("教程章节正在生成中，完成后本页会自动刷新…");
+      continueAllSections(tutorialId)
+        .then(() => load())
+        .catch((e) => setError(errMsg(e)));
+      markAutoResumeTried(tutorial.goal_id);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [tutorial, busy, tutorialId, load]);
+
+  // 空状态下的默认动作：不跳回学习目标页，直接在本页一键生成全部章节
+  const startAllSections = () => {
+    setBusy("sections");
+    setError("");
+    setNotice("");
+    if (tutorial) {
+      clearOutlineOnlyGoal(tutorial.goal_id); // 明确要全部章节
+      clearAutoResumeTried(tutorial.goal_id); // 显式重试后重新允许自动续跑
+    }
+    continueAllSections(tutorialId)
+      .then(() => {
+        setNotice("已提交全部章节生成任务，生成完成后本页会自动刷新。");
+        return load();
+      })
+      .catch((e) => setError(errMsg(e)))
+      .finally(() => setBusy(""));
+  };
+
   const run = async (key: string, fn: () => Promise<void>, msg = "完成") => {
     setBusy(key);
     setError("");
@@ -121,6 +162,7 @@ function TutorialDetail() {
 
   const version = tutorial.current_version;
   const content = version?.content;
+  const formatSpec = content?.format_spec;
   const outline = content?.outline ?? [];
   const sections = content?.sections ?? [];
   const cheatsheet = content?.cheatsheet ?? null;
@@ -149,6 +191,11 @@ function TutorialDetail() {
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <h1 className="text-[24px] font-bold tracking-tight">{tutorial.title}</h1>
           <Badge tone="active">v{version?.version ?? 1}</Badge>
+          {formatSpec?.name && (
+            <Badge tone={formatSpec.scene === "exam_paper" ? "warn" : "neutral"}>
+              {formatSpec.name} · {formatSpec.scene === "exam_paper" ? "试卷规范" : "格式规范"}
+            </Badge>
+          )}
           <Badge tone={report.passed ? "done" : "warn"}>
             质量{report.passed ? "通过" : "待改进"}
           </Badge>
@@ -267,7 +314,14 @@ function TutorialDetail() {
             </div>
 
             {sections.length === 0 ? (
-              <Empty>章节尚未生成。回到学习目标点击「一键生成全部章节」。</Empty>
+              <div className="grid gap-2">
+                <Empty>章节尚未生成。大纲已就绪，可直接一键生成全部章节。</Empty>
+                <div>
+                  <Button onClick={startAllSections} disabled={busy === "sections"}>
+                    {busy === "sections" ? "生成中…" : "一键生成全部章节"}
+                  </Button>
+                </div>
+              </div>
             ) : (
               <div className="grid gap-3">
                 {sections.map((section, index) => (

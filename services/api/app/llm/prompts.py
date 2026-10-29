@@ -13,6 +13,7 @@ import json
 
 from ..learning.generation_tiers import tier_prompt_block, tier_system
 from ..learning.levels import level_prompt_block
+from ..services.utils import jload, safe_obsidian_filename
 from ..learning.teaching_profile import (
     RULE_LABELS,
     delivery_contract,
@@ -38,7 +39,7 @@ SYSTEM = (
     "7. 因材施教：根据知识性质选择教学方式，不为所有知识点套用统一栏目；空缺的栏目允许留空（[] 或空串），不要编造。\n"
     "8. 用户会在 Obsidian 中阅读教程：正文 Markdown 中的标题层级、表格、代码块、数学公式、Mermaid 图必须语法正确。\n"
     "9. 不要添加 Obsidian 笔记属性：正文和配套文件里不得出现用于分类的 #标签（如 #命令行 #基础），"
-    "也不得输出 frontmatter 的 tags 字段；需要分类或索引时用标题层级、目录或配套文件双链表达。"
+    "也不得输出 frontmatter 的 tags 字段；需要分类或索引时用标题层级或配套文件双链表达。"
     "只有教学内容本身需要举例说明标签语法时，才可以在行内代码或代码块中提及 #标签，"
     "且不得在正文末尾堆叠标签。"
 )
@@ -49,6 +50,7 @@ SYSTEM = (
 WIKILINK_RULE = (
     "Obsidian 双链使用规则（严格）：\n"
     "- 只有本次同时生成的配套文件才能作为双链目标，且只能写 [[文件名]] 这一种形式；\n"
+    "- 文件名以提示词列出的「统一文件名」为准，逐字符复制；不要根据标题、学习教程、知识速查自行命名；\n"
     "- 文件名必须与配套文件名完全一致：保留中文括号与大小写，不加 .md、不加路径、不加别名；\n"
     "- 不得出现占位或虚构链接，例如 [[...]]、[[目标]]、[[B]]、[[笔记名]]；\n"
     "- 不得使用 [[文件#标题]]、[[文件|别名]]、![[文件]] 等扩展形式；\n"
@@ -209,6 +211,46 @@ def _materials_section(materials_text: str) -> str:
     )
 
 
+def _format_spec_block(stage: str, goal) -> str:
+    """按阶段注入格式规范；不把自由 Markdown 和全部模板重复塞进每次调用。"""
+    spec = jload(getattr(goal, "format_spec_snapshot", "") or "", {})
+    if not isinstance(spec, dict) or not spec.get("name"):
+        return ""
+
+    lines = [f"本次格式规范（冻结快照）：{spec.get('name', '')}"]
+    if stage in {"plan", "outline", "criteria"}:
+        if spec.get("output_goal"):
+            lines.append(f"输出目标：{spec['output_goal']}")
+        if spec.get("deliverables"):
+            rows = []
+            for item in spec["deliverables"]:
+                status = {
+                    "required": "必须",
+                    "on_request": "用户明确要求时",
+                    "optional": "可选",
+                    "forbidden": "禁止",
+                }.get(item.get("status"), item.get("status"))
+                rows.append(f"- {item.get('name', '')}（{status}）")
+            lines.append("交付物清单（结构性边界）：\n" + "\n".join(rows))
+        if spec.get("task_overrides"):
+            lines.append("本次任务覆盖项：\n- " + "\n- ".join(spec["task_overrides"]))
+    if stage == "criteria" and spec.get("acceptance_criteria"):
+        lines.append(f"规范验收条件：\n{spec['acceptance_criteria']}")
+    if stage == "outline" and spec.get("content_structure"):
+        lines.append(f"内容结构：\n{spec['content_structure']}")
+    if stage == "outline" and spec.get("forbidden_rules"):
+        lines.append(f"禁止内容：\n{spec['forbidden_rules']}")
+    if stage in {"section", "cheatsheet", "extra_exercises"}:
+        if spec.get("target_reader"):
+            lines.append(f"目标受众：{spec['target_reader']}")
+        for key in ("format_rules", "required_rules", "suggested_rules", "flexible_rules"):
+            if spec.get(key):
+                lines.append(f"{key}：\n{spec[key]}")
+        if stage == "section" and spec.get("acceptance_criteria"):
+            lines.append(f"局部验收参照：\n{spec['acceptance_criteria']}")
+    return "\n" + "\n".join(lines) + "\n"
+
+
 # ---------------------------------------------------------------- 目标阶段
 
 def diagnose(goal, discipline, materials_text: str = "") -> tuple[str, str]:
@@ -248,6 +290,7 @@ def criteria(goal, discipline) -> tuple[str, str]:
         f"{_hard_constraints_section(goal)}"
         f"{_tier_prompt_block(goal)}"
         f"{_capability(goal)}\n"
+        f"{_format_spec_block('criteria', goal)}"
         f"评估维度：{discipline.assessment_rubrics}\n\n"
         "输出 JSON：{\"criteria\": [{\"statement\": str, \"conditions\": str, \"evidence_type\": str, "
         "\"pass_rule\": str, \"rationale\": str}]}。\n"
@@ -274,6 +317,7 @@ def outline(goal, discipline, criteria_list, materials_text: str = "") -> tuple[
         f"{_tier_prompt_block(goal)}"
         f"{_capability(goal)}\n"
         f"{_materials_section(materials_text)}\n"
+        f"{_format_spec_block('outline', goal)}"
         f"{_teaching_charter('outline', {'rules': profile_data['rules']}, goal)}"
         f"{_delivery_contract_section(contract)}"
         "\n任务：为教程设计章节大纲。这是一次内部教学规划，请先在心里完成以下判断再输出：\n"
@@ -309,9 +353,13 @@ def _companion_names_section(companion_names: list[str] | None) -> str:
         return ""
     lines = "\n".join(f"- [[{name}]]" for name in names)
     return (
-        "\n本次同时生成的配套文件（双链目标只能是下列文件名；不引用就留空）：\n"
+        "\n本次同时生成的配套文件（统一文件名；双链目标只能是下列文件名，不引用就留空）：\n"
         f"{lines}\n"
     )
+
+
+def _tutorial_file_name(goal) -> str:
+    return f"{safe_obsidian_filename(goal.title)}-教程"
 
 
 def _retry_violation_block(retry_violations: list[str] | None) -> str:
@@ -325,6 +373,19 @@ def _retry_violation_block(retry_violations: list[str] | None) -> str:
         f"{lines}\n"
         "修正要求：只调整违反约束的地方，保留其余内容的教学价值与结构；"
         "输出格式与字段要求不变。\n"
+    )
+
+
+def _truncation_block(truncated: bool) -> str:
+    """上一稿因超出单次输出上限被截断：明确要求压缩篇幅，否则原样重发必然再被截断。"""
+    if not truncated:
+        return ""
+    return (
+        "\n上一稿因超出单次输出长度上限被截断，JSON 不完整、无法解析。本次必须在保证字段"
+        "结构完整的前提下压缩篇幅：\n"
+        "- 正文（content 各块 body）合计控制在 12000 字以内，只留讲解主线；\n"
+        "- 不逐字照抄材料原文，不复述前面已讲过的内容；\n"
+        "- 宁可少放例题、少给表格，也要保证输出被完整生成。\n"
     )
 
 
@@ -375,6 +436,7 @@ def _deliverable_task(deliverable: str) -> str:
 def section(
     goal, discipline, outline_item, criteria_list, prior_titles, materials_text: str = "",
     companion_names: list[str] | None = None, retry_violations: list[str] | None = None,
+    truncated: bool = False,
 ) -> tuple[str, str]:
     plan = outline_item.get("_teaching_plan") if isinstance(outline_item, dict) else None
     if not plan:
@@ -395,10 +457,12 @@ def section(
         f"{_tier_prompt_block(goal)}"
         f"{_capability(goal)}\n"
         f"{_materials_section(materials_text)}\n"
+        f"{_format_spec_block('section', goal)}"
         f"{_teaching_charter('section', plan, goal)}\n"
         f"{_teaching_plan_section(plan)}\n"
         f"{_companion_names_section(companion_names)}"
         f"{_retry_violation_block(retry_violations)}"
+        f"{_truncation_block(truncated)}"
         f"{WIKILINK_RULE}"
         f"{task_block}"
         "输出 JSON：\n"
@@ -413,9 +477,8 @@ def section(
         " \"key_takeaways\": [str],                          # 核心结论；无则 []\n"
         " \"common_errors\": [{\"error\": str, \"cause\": str, \"diagnose\": str}],  # 与本章密切相关的典型错误；无则 []\n"
         " \"prerequisite_refs\": [str],                      # 正文涉及的必要前置知识或速查条目名称；无则 []\n"
-        " \"exercises\": [str],                              # 必要练习；无则 []\n"
-        " \"sources\": [{\"title\": str, \"url\": str, \"note\": str}],  # 仅在确有可靠来源时给出；无则 []\n"
-        " \"mapping_criteria\": [str]}                       # 用给定的验收标准 id\n"
+        " \"exercises\": [str]}                              # 必要练习；无则 []\n"
+        "只输出上述字段；不要输出目录、对应验收标准、来源、引用列表或其他元信息栏。\n"
         "内容块规范：\n"
         "- text：普通解释正文；\n"
         "- key_point：关键结论（简短，用于强调真正重要的结论）；\n"
@@ -446,8 +509,11 @@ def cheatsheet(
         f"{_tier_prompt_block(goal)}"
         f"{_capability(goal)}\n"
         f"{_materials_section(materials_text)}\n"
+        f"{_format_spec_block('cheatsheet', goal)}"
         f"{_teaching_charter('cheatsheet', None, goal)}"
-        f"{_retry_violation_block(retry_violations)}"
+        f"{_retry_violation_block(retry_violations)}\n"
+        f"统一文件名（反向双链只能使用）：[[{_tutorial_file_name(goal)}]]\n"
+        f"{WIKILINK_RULE}"
         "\n任务：为教程生成配套的「知识速查」文件。只放适合集中查阅、有长期复用价值的材料，例如：\n"
         "- 重要公式、定义和规则；\n"
         "- 命令行参数及其用途；\n"
@@ -474,8 +540,11 @@ def extra_exercises(
         f"{_tier_prompt_block(goal)}"
         f"{_capability(goal)}\n"
         f"{_materials_section(materials_text)}\n"
+        f"{_format_spec_block('extra_exercises', goal)}"
         f"{_teaching_charter('extra_exercises', None, goal)}"
-        f"{_retry_violation_block(retry_violations)}"
+        f"{_retry_violation_block(retry_violations)}\n"
+        f"统一文件名（反向双链只能使用）：[[{_tutorial_file_name(goal)}]]\n"
+        f"{WIKILINK_RULE}"
         "\n任务：为教程生成独立的「额外练习」文件，用于强化、巩固、检验和迁移，"
         "不是简单复制教程正文中的例题。\n"
         "要求：\n"
@@ -549,6 +618,21 @@ def suggest_proposals(goal, concepts, relations_hint) -> tuple[str, str]:
         "只提议有依据的关系，不编造；最多 6 条。"
     )
     return SYSTEM, user
+
+
+def format_spec_match(requirement: str, candidates: list[dict]) -> tuple[str, str]:
+    system = (
+        "你是 AI Edu 的格式规范匹配器。只输出 JSON；不输出 JSON 以外的任何文本。"
+        "只判断用户当前任务最适合哪个候选规范；不要考虑候选之外的知识。"
+        "如果没有任何候选显著改变交付物结构，返回空 ID。"
+    )
+    user = (
+        f"用户任务：{requirement}\n"
+        f"候选规范（只含摘要）：{json.dumps(candidates, ensure_ascii=False)}\n\n"
+        "输出 JSON：{\"format_spec_id\": str, \"confidence\": float, \"reason\": str}。"
+        "confidence 0-1；低于 0.6 或任务只是解释/复习且不是生成交付物时，format_spec_id 返回空串。"
+    )
+    return system, user
 
 
 def knowledge_extract(goal, tutorial, context: dict, existing: list) -> tuple[str, str]:

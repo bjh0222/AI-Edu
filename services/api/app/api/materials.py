@@ -36,7 +36,7 @@ def upload_material(
     note: str = Form("", description="可选备注"),
     db: Session = Depends(get_db),
 ):
-    """上传单个材料：校验类型 / 大小 → 落盘 data 目录 → 元数据与正文摘录入库。"""
+    """上传单个材料：校验类型 / 大小 → 落盘 data 目录 → 元数据与抽取正文创库（全文，上限可配）。"""
     return materials_service.save_upload(db, goal_id, file, kind=kind, note=note)
 
 

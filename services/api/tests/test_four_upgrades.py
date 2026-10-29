@@ -205,3 +205,63 @@ def test_training_feedback_validation(client):
         json={"goal_id": goal["id"], "target_type": "general", "rating": 0},
     )
     assert bad_rating.status_code == 422
+
+
+def test_start_sections_reuses_active_job(client, monkeypatch):
+    """章节任务幂等：已有排队 / 进行中的章节任务时再次提交，返回同一个 job。
+
+    「一键生成自动续跑全部章节」与手动按钮并发提交时，不能开出两路重复生成任务。
+    """
+    import app.services.tutorials as tutorials_service
+
+    goal = _goal(client)
+    goal_id = goal["id"]
+    client.post(f"/api/goals/{goal_id}/criteria")
+    confirm = client.post(f"/api/goals/{goal_id}/criteria/confirm-all")
+    assert confirm.status_code == 200, confirm.text
+    outline = client.post(f"/api/goals/{goal_id}/tutorials/generate")
+    assert outline.status_code == 200, outline.text
+    tutorial_id = outline.json()["tutorial"]["id"]
+
+    # 冻结后台线程：任务提交后停留在 queued，模拟「正在生成」
+    class _FrozenThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(tutorials_service.threading, "Thread", _FrozenThread)
+
+    try:
+        first = client.post(f"/api/tutorials/{tutorial_id}/sections/generate")
+        assert first.status_code == 200, first.text
+        second = client.post(f"/api/tutorials/{tutorial_id}/sections/generate")
+        assert second.status_code == 200, second.text
+        assert second.json()["job_id"] == first.json()["job_id"]
+
+        # 队列里只有一个章节任务，不会重复生成
+        jobs = [j for j in _all_jobs(client) if j["job_type"] == "tutorial_sections"]
+        assert len(jobs) == 1
+    finally:
+        # 冻结线程永远不会自己跑完、也就永远不会从在途登记里摘除，留着会污染
+        # pending_knowledge_extractions()（其它测试据此等待「后台提取已结束」）。
+        # 只清理本次冻结出来的假线程，不碰真实在途线程。
+        with tutorials_service._PENDING_EXTRACTIONS_LOCK:
+            for thread in [t for t in tutorials_service._PENDING_EXTRACTIONS if isinstance(t, _FrozenThread)]:
+                tutorials_service._PENDING_EXTRACTIONS.discard(thread)
+
+
+def _all_jobs(client) -> list[dict]:
+    """遍历最近的任务列表（测试辅助：演示数据量小，直接查库不可行，走 API）。"""
+    from app.db import SessionLocal
+    from app.models import GenerationJob
+
+    db = SessionLocal()
+    try:
+        return [
+            {"id": j.id, "job_type": j.job_type, "status": j.status}
+            for j in db.query(GenerationJob).all()
+        ]
+    finally:
+        db.close()

@@ -18,6 +18,7 @@ import { FeedbackForm } from "@/components/FeedbackForm";
 import { Badge, Button, Card, DemoNotice, Empty, inputCls } from "@/components/ui";
 import { GoalPhaseView } from "@/components/goals/GoalPhaseView";
 import { PausedGenerationPanel, type PauseResumeAction } from "@/components/PausedGeneration";
+import { outlineOnlyChosen, markOutlineOnlyGoal, clearOutlineOnlyGoal, outlineOnlyRecently, markAutoResumeTried, autoResumeTried, clearAutoResumeTried } from "@/lib/tutorial-continue";
 import { errMsg, type WorkspaceSlices } from "@/components/goals/useGoalWorkspace";
 
 const PHASE = phase("learning");
@@ -35,6 +36,8 @@ export default function LearningPage() {
   const [gen, setGen] = useState<{ stage: string; progress: number; tokens: number } | null>(null);
   // 轮询取消函数放在页面组件里，渲染回调只负责使用（Hook 不能写在 render prop 内）
   const pollCancel = useRef<(() => void) | null>(null);
+  // 「一键生成不停在大纲」的自动续跑每次挂载最多触发一次（渲染回调里读取）
+  const autoResumed = useRef(false);
   const [paused, setPaused] = useState<{ recommendation: string; plan: string } | null>(null);
   const [pausedBusy, setPausedBusy] = useState(false);
 
@@ -85,6 +88,8 @@ export default function LearningPage() {
           setError("");
           setNotice("");
           setSteps([]);
+          clearOutlineOnlyGoal(goalId); // 一键生成 = 要到全部章节，清掉「只生成大纲」的旧选择
+          clearAutoResumeTried(goalId); // 用户重新点了一键生成：允许后续中断再自动续跑
           try {
             const resp = await api.post<QuickStartResult>(
               `/api/goals/${goalId}/tutorials/quickstart`,
@@ -96,6 +101,10 @@ export default function LearningPage() {
             if (resp.job_id) {
               setGen({ stage: "一键生成已提交，正在生成全部章节…", progress: 0, tokens: 0 });
               pollJob(resp.job_id);
+            } else if (outlineOnlyRecently(resp.tutorial)) {
+              // 一键生成的最后一步默认到「全部章节」：本次没有提交章节任务但大纲还是新的 → 自动续跑
+              // （进度由 gen 面板呈现，startSections 内部会清空 notice）
+              void startSections(resp.tutorial, { force: true });
             } else {
               setBusy("");
               setNotice("教材已是最新状态：没有重复生成。");
@@ -140,10 +149,14 @@ export default function LearningPage() {
           }
         };
 
-        const startSections = async (target: Tutorial) => {
+        const startSections = async (target: Tutorial, options?: { force?: boolean }) => {
+          // force：调用方自己已经在忙（例如一键生成刚返回），此时不再被 busy 挡住
+          if (busy && !options?.force) return;
           setBusy("sections");
           setError("");
           setNotice("");
+          clearOutlineOnlyGoal(goalId); // 明确要全部章节，覆盖之前「只生成大纲」的选择
+          clearAutoResumeTried(goalId); // 显式重试后重新允许自动续跑
           try {
             const resp = await api.post<{ job_id: string }>(`/api/tutorials/${target.id}/sections/generate`);
             setGen({ stage: "已提交，等待模型返回…", progress: 0, tokens: 0 });
@@ -153,6 +166,29 @@ export default function LearningPage() {
             setError(errMsg(e));
           }
         };
+
+        // 一键生成默认不停在大纲：进入页面发现「30 分钟内生成的大纲还没有章节」时自动续跑
+        // 全部章节（每次挂载最多一次）。副作用放在渲染回调里执行会触发跨组件 setState 警告，
+        // 因此用 setTimeout 移出到渲染完成之后；后端对重复提交幂等，不会开出重复任务。
+        // 用户主动选过「只生成大纲」时不自动续跑，尊重他的选择。
+        if (
+          !autoResumed.current &&
+          !busy &&
+          !gen &&
+          tutorial &&
+          outlineOnlyRecently(tutorial) &&
+          !outlineOnlyChosen(goalId) &&
+          !autoResumeTried(goalId)
+        ) {
+          const target = tutorial;
+          setTimeout(() => {
+            if (autoResumed.current) return;
+            autoResumed.current = true;
+            setNotice("检测到上次一键生成停在大纲，正在继续生成全部章节…");
+            void startSections(target);
+            markAutoResumeTried(goalId); // startSections 内部会重置闸门，这里在其后重新标记
+          }, 0);
+        }
 
         return (
           <div className="grid gap-4 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
@@ -202,15 +238,17 @@ export default function LearningPage() {
                       </Button>
                       <Button
                         variant="secondary"
-                        onClick={() =>
-                          run(
+                        onClick={() => {
+                          // 记住「这次只看大纲」，避免自动续跑把选择推翻
+                          markOutlineOnlyGoal(goalId);
+                          void run(
                             "outline",
                             async () => {
                               await api.post(`/api/goals/${goalId}/tutorials/generate`);
                             },
                             "教程大纲已生成"
-                          )
-                        }
+                          );
+                        }}
                         disabled={!!busy || !!gen || confirmedCount === 0}
                       >
                         {busy === "outline" ? "生成中…" : "只生成大纲"}
@@ -247,7 +285,7 @@ export default function LearningPage() {
             </div>
 
             <div className="grid gap-4">
-              <Card title="注入生成的材料" desc="教程大纲与每一节都会带上这些材料的摘录作为依据">
+              <Card title="注入生成的材料" desc="教程大纲与每一节都会带上这些材料的原文作为依据">
                 {data.materials.length === 0 ? (
                   <Empty>没有上传材料。到「价值诊断」页上传讲义或例题来源。</Empty>
                 ) : (

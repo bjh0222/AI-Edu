@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { api, ApiError, uploadFile } from "@/lib/api";
-import type { Goal, GenerationTier, OneShotGenerateResult, QuickStartResult } from "@/lib/types";
+import type { FormatSpec, Goal, GenerationTier, OneShotGenerateResult, QuickStartResult } from "@/lib/types";
 import { CAPABILITY_LEVELS, GENERATION_TIERS } from "@/lib/types";
 import { PHASE_LABELS } from "@/lib/goal-phases";
 import { Badge, Button, Card, Empty, Field, inputCls } from "@/components/ui";
@@ -72,6 +72,8 @@ export default function GoalsPage() {
     generate_extra_exercises: false,
     generation_tier: "standard" as GenerationTier,
   });
+  const [formatSpecs, setFormatSpecs] = useState<FormatSpec[]>([]);
+  const [formatSpecId, setFormatSpecId] = useState<string>("auto");
   // 「创建并生成教程」里暂存的参考材料：目标创建成功后才真正上传
   const [pendingMaterials, setPendingMaterials] = useState<PendingMaterial[]>([]);
   // 同一次提交里已创建的目标（材料上传中途失败重试时复用，避免重复建目标）
@@ -99,6 +101,12 @@ export default function GoalsPage() {
       }
     } catch { setDraftStatus("浏览器无法读取草稿"); }
     setDraftReady(true);
+  }, []);
+
+  useEffect(() => {
+    api.get<FormatSpec[]>("/api/format-specs")
+      .then(setFormatSpecs)
+      .catch(() => setFormatSpecs([]));
   }, []);
 
   useEffect(() => {
@@ -149,6 +157,7 @@ export default function GoalsPage() {
       generate_extra_exercises: false,
       generation_tier: "standard",
     }));
+    setFormatSpecId("auto");
     try { localStorage.removeItem("aiedu-goal-draft"); } catch { /* Draft cleanup is best effort. */ }
   };
 
@@ -253,7 +262,9 @@ export default function GoalsPage() {
           router.push(`/goals/${goal.id}`);
           return;
         }
-        const result = await api.post<QuickStartResult>(`/api/goals/${goal.id}/tutorials/quickstart`, {});
+        const result = await api.post<QuickStartResult>(`/api/goals/${goal.id}/tutorials/quickstart`, {
+          format_spec_id: formatSpecId === "auto" ? null : formatSpecId,
+        });
         resetAll();
         setPaused(null);
         await load();
@@ -281,6 +292,7 @@ export default function GoalsPage() {
         capability_level: form.capability_level,
         generate_extra_exercises: form.generate_extra_exercises,
         generation_tier: form.generation_tier,
+        format_spec_id: formatSpecId === "auto" ? null : formatSpecId,
       });
       resetDraft();
       setPaused(null);
@@ -551,6 +563,24 @@ export default function GoalsPage() {
             <span className="text-[10px] leading-relaxed text-muted">
               填写后会注入价值判断、计划、验收标准、教程与配套文件的全部生成提示词；
               生成内容必须逐条满足，违反任一条即视为本次交付不合格
+            </span>
+          </Field>
+          <Field label="格式规范">
+            <select
+              className={inputCls}
+              value={formatSpecId}
+              onChange={(e) => setFormatSpecId(e.target.value)}
+            >
+              <option value="auto">自动匹配（未命中时使用默认规范）</option>
+              <option value="">本次不使用特殊规范</option>
+              {formatSpecs.map((spec) => (
+                <option key={spec.id} value={spec.id}>
+                  {spec.name}{spec.is_default ? " · 默认" : ""}
+                </option>
+              ))}
+            </select>
+            <span className="text-[10px] leading-relaxed text-muted">
+              手动选择优先于自动匹配；规范会在大纲生成前绑定为本任务快照。
             </span>
           </Field>
           <Field label="可投入总时间">

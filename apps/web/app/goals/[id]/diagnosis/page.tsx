@@ -84,7 +84,7 @@ export default function DiagnosisPage() {
                 <MaterialsPanel goalId={goalId} materials={data.materials} onChanged={reload} />
               </Card>
 
-              <Card title="本次生成的来源标注" desc="注入 prompt 的材料（超长会截断为摘录）">
+              <Card title="本次生成的来源标注" desc="注入 prompt 的材料（纯文本材料直接注入文件原文，超长才截断）">
                 {data.materials.length === 0 ? (
                   <Empty>没有材料：诊断只基于目标描述本身。</Empty>
                 ) : (

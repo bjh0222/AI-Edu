@@ -218,6 +218,8 @@ class OpenAICompatibleProvider:
         self.timeout = settings.llm_timeout
         self.temperature = getattr(settings, "llm_temperature", 0.3)
         self.json_mode = getattr(settings, "llm_json_mode", True)
+        # 0 / 未配置 = 不发送 max_tokens，沿用提供方默认上限
+        self.max_tokens = int(getattr(settings, "llm_max_tokens", 0) or 0)
 
     def _headers(self) -> dict:
         headers = {"Content-Type": "application/json"}
@@ -258,6 +260,8 @@ class OpenAICompatibleProvider:
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
+        if self.max_tokens:
+            payload["max_tokens"] = self.max_tokens
         if json_mode and self.json_mode:
             payload["response_format"] = {"type": "json_object"}
         started = time.monotonic()

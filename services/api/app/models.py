@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, Float, ForeignKey, Index, Integer, String, Text, text
 
 from .db import Base
 
@@ -43,11 +43,61 @@ class LearningGoal(Base, TimestampMixin):
     generate_extra_exercises = Column(Boolean, default=False)
     # 生成挡位：fast / standard / deep；旧数据回退 standard
     generation_tier = Column(String(20), default="standard")
+    # 大纲前选定并冻结的格式规范；后台任务只读快照，不重读可变模板
+    format_spec_id = Column(String(36), default="", index=True)
+    format_spec_source = Column(String(30), default="")
+    format_spec_match_note = Column(Text, default="")
+    format_spec_snapshot = Column(Text, default="")
     status = Column(String(30), default="goal_definition")
     user_notes = Column(Text, default="")
     archived = Column(Boolean, default=False)
     completed = Column(Boolean, default=False)
     completed_at = Column(String(40), default="")
+
+
+class FormatSpec(Base, TimestampMixin):
+    """可复用交付规范：结构化字段与自由 Markdown 补充分开保存。"""
+
+    __tablename__ = "format_specs"
+    __table_args__ = (
+        Index(
+            "uq_format_specs_default",
+            "is_default",
+            unique=True,
+            sqlite_where=text("is_default = 1"),
+        ),
+    )
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    name = Column(String(120), nullable=False)
+    description = Column(Text, default="")
+    scene = Column(String(80), default="")
+    is_builtin = Column(Boolean, default=False)
+    is_default = Column(Boolean, default=False)
+    version = Column(Integer, default=1)
+
+    applicable_tasks = Column(Text, default="")
+    applicable_intents = Column(Text, default="[]")
+    excluded_scenarios = Column(Text, default="[]")
+    excluded_intents = Column(Text, default="[]")
+    trigger_keywords = Column(Text, default="[]")
+    excluded_keywords = Column(Text, default="[]")
+    allow_keyword_trigger = Column(Boolean, default=True)
+    allow_semantic_recommendation = Column(Boolean, default=True)
+    allow_explicit_selection = Column(Boolean, default=True)
+
+    target_reader = Column(Text, default="")
+    output_goal = Column(Text, default="")
+    deliverables = Column(Text, default="[]")
+    content_structure = Column(Text, default="")
+    format_rules = Column(Text, default="")
+    required_rules = Column(Text, default="")
+    forbidden_rules = Column(Text, default="")
+    suggested_rules = Column(Text, default="")
+    flexible_rules = Column(Text, default="")
+    acceptance_criteria = Column(Text, default="")
+    reference_examples = Column(Text, default="")
+    custom_markdown = Column(Text, default="")
 
 
 class GoalAssessment(Base, TimestampMixin):

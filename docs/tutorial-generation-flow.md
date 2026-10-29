@@ -129,7 +129,7 @@ flowchart TD
     S --> P10["定向修正指令（仅重试稿）"]
     S --> P11["双链规则"]
     S --> P12["任务块：教学任务 _TEACHING_TASK<br/>或交付物任务 _deliverable_task（契约模式）"]
-    S --> P13["输出 JSON Schema<br/>content 11 种内容块 + key_takeaways / common_errors<br/>/ prerequisite_refs / exercises / sources / mapping_criteria"]
+    S --> P13["输出 JSON Schema<br/>content 11 种内容块 + key_takeaways / common_errors<br/>/ prerequisite_refs / exercises / sources<br/>（mapping_criteria 不由模型出：落库时用大纲的 criteria_ids）"]
 ```
 
 教学任务块内部还规定了 A/B/C 三级知识（核心讲透 / 支撑讲够 / 扩展克制）、
