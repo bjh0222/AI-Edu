@@ -8,9 +8,11 @@
 - 文本抽取完全零第三方依赖：txt/md/csv 直接解码，docx 解 zip 读 word/document.xml，
   pdf 用 zlib 解压内容流后粗提取字面量字符串（抽不到时状态标记为 empty，不编造内容）；
   图片只登记来源，不做 OCR（状态 unsupported）；
-- 注入 prompt 时：纯文本材料（txt/md/csv）直接逐字读文件原文交给模型
-  （上限可配，默认单份 1.2 万字 / 全部 4.8 万字），原文比库内摘录长时回写自愈旧数据；
-  其他类型或文件丢失时退回库内摘录。
+- 注入 prompt 时：纯文本材料（txt/md/csv）直接逐字读文件原文并默认完整注入，
+  不经过旧摘要 / 摘录窗口；原文比库内摘录长时回写自愈旧数据。
+  PDF/DOCX 使用文本抽取结果，图片仅登记来源。
+- prompt 侧仍保留可选字符预算（默认 0 = 不截断）；显式配置上限时，注入块会明确标注
+  实际注入字数与总字数，避免模型把不完整材料误认为全文。
 """
 from __future__ import annotations
 
@@ -58,8 +60,8 @@ EXTRACT_LABELS: dict[str, str] = {
 }
 
 MAX_EXCERPT_CHARS = settings.material_max_text_chars  # 入库正文上限（默认 20 万字，可配），仅防极端文件
-PROMPT_PER_FILE_CHARS = settings.material_prompt_per_file_chars  # 单份材料注入 prompt 的上限（可配）
-PROMPT_TOTAL_CHARS = settings.material_prompt_total_chars  # 全部材料注入 prompt 的总上限（可配）
+PROMPT_PER_FILE_CHARS = settings.material_prompt_per_file_chars  # 0 = 单份材料不截断
+PROMPT_TOTAL_CHARS = settings.material_prompt_total_chars  # 0 = 全部材料不截断
 PDF_MAX_PAGES = 500  # PDF 抽取的页数保险丝，防极端大文件拖死请求
 CHUNK_SIZE = 1024 * 256
 
@@ -359,11 +361,12 @@ def delete_material(db: Session, material_id: str) -> dict:
 
 
 def _material_body(db: Session, row: GoalMaterial) -> str:
-    """取材料的注入正文：纯文本文件直接读文件原文交给模型，其余退回库内摘录。
+    """取材料的注入正文：纯文本文件直接读原始全文，其余退回库内抽取文本。
 
     txt/md/csv 是「文本文件的内容即文件本身」，因此注入时逐字读取文件原文，
-    不经过抽取 / 归一化；旧数据入库时正文被截断为 8000 字摘录，原文比摘录长时
-    回写自愈。文件丢失或读取失败时退回库内摘录，保证注入不因单份材料中断。
+    不经过抽取 / 归一化，也不在这里施加 prompt 长度上限；旧数据入库时正文被截断，
+    原文比库内正文长时回写自愈。文件丢失或读取失败时退回库内文本，保证注入不因
+    单份材料中断。PDF/DOCX 仍使用上传阶段得到的文本抽取结果。
     """
     stored_text = (row.text_excerpt or "").strip()
     if not row.stored_name:
@@ -377,7 +380,7 @@ def _material_body(db: Session, row: GoalMaterial) -> str:
         text = _decode_text(path.read_bytes())
     except OSError:
         return stored_text
-    text = text.strip()[:MAX_EXCERPT_CHARS]
+    text = text.strip()
     if not text:
         return stored_text
     if len(text) > len(stored_text):
@@ -398,7 +401,11 @@ def materials_context(
     per_file_chars: int = PROMPT_PER_FILE_CHARS,
     total_chars: int = PROMPT_TOTAL_CHARS,
 ) -> str:
-    """把该目标的材料正文注入 prompt（纯文本材料为文件原文，超长截断并标注，上限可配）。"""
+    """把该目标的材料正文注入 prompt。
+
+    默认 ``per_file_chars=0``、``total_chars=0``：不截断，文本材料以原始全文进入
+    prompt。调用方显式传入正数时才执行预算，并在材料块内写明截断状态。
+    """
     rows = (
         db.query(GoalMaterial)
         .filter(GoalMaterial.goal_id == goal_id, GoalMaterial.status == "ready")
@@ -412,21 +419,43 @@ def materials_context(
     used = 0
     for index, row in enumerate(rows, 1):
         label = KIND_LABELS.get(row.kind or "reference", "参考资料")
-        head = (
-            f"[材料 {index}] {row.filename}（{label}，{_human_size(int(row.size or 0))}，"
-            f"正文{'已抽取' if row.extract_status == 'ok' else '未抽取'}）"
-        )
         body = _material_body(db, row)
         if body:
-            truncated = len(body) > per_file_chars
-            snippet = body[:per_file_chars]
+            if (row.ext or "") in TEXT_EXTENSIONS:
+                source = "原始全文"
+            elif (row.ext or "") in {".pdf", ".docx"}:
+                source = "文本抽取"
+            else:
+                source = "已读取正文"
+            head = (
+                f"[材料 {index}] {row.filename}（{label}，{_human_size(int(row.size or 0))}，"
+                f"{source}，{len(body)} 字）"
+            )
+            truncated = bool(per_file_chars and per_file_chars > 0 and len(body) > per_file_chars)
+            snippet = body[:per_file_chars] if truncated else body
             if truncated:
-                snippet += "…（摘录已截断）"
+                snippet += (
+                    f"\n\n【材料内容未完整注入：仅注入前 {per_file_chars} / {len(body)} 字】"
+                )
         else:
+            head = (
+                f"[材料 {index}] {row.filename}（{label}，{_human_size(int(row.size or 0))}，"
+                f"正文未抽取）"
+            )
             snippet = "（未抽取到正文，仅以文件名作为来源标注）"
         block = f"{head}\n{snippet}"
-        if used + len(block) > total_chars:
-            blocks.append(f"（其余 {len(rows) - index + 1} 份材料因长度上限未注入）")
+        if total_chars and total_chars > 0 and used + len(block) > total_chars:
+            remaining = total_chars - used
+            marker = f"\n\n（其余 {len(rows) - index + 1} 份材料因长度上限未注入）"
+            if remaining > len(head) + len(marker) + 100:
+                body_limit = remaining - len(head) - len(marker) - 1
+                partial = body[:body_limit]
+                blocks.append(
+                    f"{head}\n{partial}\n\n"
+                    f"【材料内容未完整注入：仅注入前 {body_limit} / {len(body)} 字】"
+                )
+            else:
+                blocks.append(marker.strip())
             break
         blocks.append(block)
         used += len(block)

@@ -271,12 +271,22 @@ def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
     goal = _goal_for(db, goal_id)
     criteria = _criteria_list(db, goal.id)
     profile = get_profile(goal.domain_key)
+    snapshot = format_specs_service.active_snapshot(goal)
+    authoritative_spec = format_specs_service.authoritative_snapshot(goal)
+    if snapshot:
+        snapshot = format_specs_service.apply_task_overrides(snapshot, goal_context_text(goal))
+        goal.format_spec_snapshot = jdump(snapshot)
 
     job = GenerationJob(goal_id=goal.id, job_type="tutorial_outline", status="running", progress=10, stage="生成大纲")
     db.add(job)
     db.commit()  # 先提交，避免在等待模型返回期间持有写锁
 
-    tutorial = Tutorial(goal_id=goal.id, title=f"{goal.title} · 学习教程", status="outline")
+    tutorial_title = (
+        f"{goal.title} · {authoritative_spec['name']}"
+        if authoritative_spec
+        else f"{goal.title} · 学习教程"
+    )
+    tutorial = Tutorial(goal_id=goal.id, title=tutorial_title, status="outline")
     db.add(tutorial)
     db.commit()  # 先落库，让本次调用的 token / 训练样本能关联到 tutorial_id
     ai.tutorial_id = tutorial.id
@@ -294,15 +304,8 @@ def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
         teaching_plan = normalize_teaching_plan(
             data.get("teaching_plan"), parse_teaching_profile(context_text=goal_context_text(goal))
         )
-        # 格式规范快照先转换成现有交付契约；画像硬性约束继续并行生效。
-        snapshot = jload(goal.format_spec_snapshot or "", {})
-        if snapshot:
-            snapshot = format_specs_service.apply_task_overrides(snapshot, goal_context_text(goal))
-            goal.format_spec_snapshot = jdump(snapshot)
-        contract = (
-            format_specs_service.delivery_contract_for_snapshot(snapshot)
-            or delivery_contract_for(goal)
-        )
+        # 选定规范后独占结构权限；未选规范时才使用旧画像契约。
+        contract = format_specs_service.contract_for_goal(goal)
         if contract:
             outline = _contract_outline(contract, criteria)
         content = {"format_spec": snapshot, "teaching_plan": teaching_plan, "outline": outline, "sections": []}
@@ -401,10 +404,7 @@ def _companions_missing(content: dict, goal) -> dict:
 
     交付契约（「内容只包括…不要其它内容」）已把配套文件排除在外时，一律视为不缺。
     """
-    spec_contract = format_specs_service.delivery_contract_for_snapshot(
-        jload(getattr(goal, "format_spec_snapshot", "") or "", {})
-    )
-    if content.get("delivery_contract") or spec_contract or delivery_contract_for(goal):
+    if content.get("delivery_contract") or format_specs_service.suppress_legacy_companions(goal):
         return {"cheatsheet": False, "extra_exercises": False}
     return {
         "cheatsheet": not content.get("cheatsheet"),
@@ -668,11 +668,7 @@ def start_companions(db: Session, tutorial_id: str, ai: AIService) -> dict:
     if not (content.get("sections") or []):
         raise HTTPException(status_code=409, detail={"code": "no_content", "message": "教程尚无章节内容"})
     # 交付契约明确排除配套文件时直接拒绝，避免排一个什么都不做的后台任务
-    if (
-        content.get("delivery_contract")
-        or format_specs_service.delivery_contract_for_snapshot(jload(goal.format_spec_snapshot or "", {}))
-        or delivery_contract_for(goal)
-    ):
+    if content.get("delivery_contract") or format_specs_service.suppress_legacy_companions(goal):
         raise HTTPException(
             status_code=409,
             detail={"code": "no_companions", "message": "本次交付按画像硬性约束只交付指定内容，不生成配套文件"},
@@ -936,26 +932,22 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         teaching_plan = content.get("teaching_plan") or normalize_teaching_plan(
             {}, parse_teaching_profile(context_text=goal_context_text(goal))
         )
-        # 交付契约决定章节形态
-        contract = content.get("delivery_contract")
-        if not contract:
-            # 旧版本教程：画像现在要求「只交付清单内容」时重建结构。
-            # 已生成的讲解大纲不会自己变对，必须按契约整章重生成，否则重跑仍是那份跑偏的教程。
-            contract = format_specs_service.delivery_contract_for_snapshot(
-                jload(goal.format_spec_snapshot or "", {})
-            ) or delivery_contract_for(goal)
-            if contract:
-                outline = _contract_outline(contract, criteria_dicts)
-                content = {
-                    **content,
-                    "format_spec": jload(goal.format_spec_snapshot or "", {}),
-                    "delivery_contract": contract,
-                    "outline": outline,
-                    "sections": [],
-                }
+        # 交付契约决定章节形态；选定规范后不再把旧画像契约叠加进来。
+        contract = format_specs_service.contract_for_goal(goal, content.get("delivery_contract"))
+        if contract and content.get("delivery_contract") != contract:
+            outline = _contract_outline(contract, criteria_dicts)
+            content = {
+                **content,
+                "format_spec": format_specs_service.active_snapshot(goal),
+                "delivery_contract": contract,
+                "outline": outline,
+                "sections": [],
+            }
         contract_items = (contract or {}).get("items") or []
-        # 配套文件是否生成：新旧版本都按画像判断（「不要其它内容」与章节结构无关）
-        suppress_companions = bool(contract) or delivery_contract_for(goal) is not None
+        # 选定规范时，配套文件只能由当前规范明确要求，不再沿用旧画像的自动配套设置。
+        suppress_companions = (
+            bool(contract) or format_specs_service.suppress_legacy_companions(goal)
+        )
         if not outline:
             _fail_job(db, job_id, "no_outline")
             return
@@ -1418,6 +1410,95 @@ def _render_section_v2(s: dict, lines: list[str]) -> None:
         lines.append("")
 
 
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+_GENERIC_BLOCK_TITLES = {"讲解", "正文", "内容", "说明"}
+
+
+def _dequote_document_body(body: str) -> str:
+    """模型偶尔把整份成品包进引用块；成品的标题和正文不应成为 callout。"""
+    lines = body.splitlines()
+    content_lines = [line for line in lines if line.strip()]
+    if not content_lines or not all(line.lstrip().startswith(">") for line in content_lines):
+        return body
+    dequoted = []
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith("> "):
+            dequoted.append(stripped[2:])
+        elif stripped == ">":
+            dequoted.append("")
+        else:
+            dequoted.append(line)
+    return "\n".join(dequoted)
+
+
+def _normalize_deliverable_body(body: str) -> str:
+    """去掉文档级 H1，并把内部标题降一级，避免与交付物标题同层冲突。"""
+    text = _dequote_document_body(str(body or "")).strip()
+    if not text:
+        return ""
+    lines = text.splitlines()
+    normalized: list[str] = []
+    fence: str | None = None
+    removed_document_title = False
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            marker = stripped[:3]
+            if fence is None:
+                fence = marker
+            elif stripped.startswith(fence):
+                fence = None
+            normalized.append(line)
+            continue
+        if fence is not None:
+            normalized.append(line)
+            continue
+        match = _HEADING_RE.match(line)
+        if not match:
+            normalized.append(line)
+            continue
+        level = len(match.group(1))
+        if level == 1 and not removed_document_title:
+            removed_document_title = True
+            continue
+        new_level = min(6, max(3, level + 1))
+        normalized.append("#" * new_level + " " + match.group(2))
+    while normalized and not normalized[0].strip():
+        normalized.pop(0)
+    while normalized and not normalized[-1].strip():
+        normalized.pop()
+    return "\n".join(normalized)
+
+
+def _render_deliverable_blocks(section: dict, lines: list[str]) -> None:
+    """规范交付物专用渲染：不再追加教程通用栏目或重复块标题。"""
+    for block in section.get("content", []):
+        if not isinstance(block, dict):
+            continue
+        body = _normalize_deliverable_body(str(block.get("body", "") or ""))
+        block_title = str(block.get("title", "") or "").strip()
+        has_heading = any(_HEADING_RE.match(line) for line in body.splitlines())
+        if block_title and block_title not in _GENERIC_BLOCK_TITLES and not has_heading:
+            lines.append(f"### {block_title}")
+            lines.append("")
+        if body:
+            lines.append(body)
+            lines.append("")
+
+
+def _render_format_spec_document(content: dict, goal, sections: list[dict], lines: list[str]) -> None:
+    """按选定规范输出单一文档，不添加教程目录、第 N 节和通用教学栏目。"""
+    lines.append(f"# {goal.title}")
+    lines.append("")
+    for section in sections:
+        title = str(section.get("title", "") or "").strip()
+        if title:
+            lines.append(f"## {title}")
+            lines.append("")
+        _render_deliverable_blocks(section, lines)
+
+
 def _render_section_v1(s: dict, lines: list[str]) -> None:
     """旧结构（explanation/steps/examples/...）渲染，保持历史版本可导出。"""
     if s.get("goal_statement"):
@@ -1484,8 +1565,19 @@ def export_markdown(db: Session, tutorial_id: str) -> tuple[str, str]:
     content = jload(version.content_json, {"outline": [], "sections": []})
     cheatsheet = content.get("cheatsheet") or {}
     exercises_file = content.get("extra_exercises") or {}
+    format_spec = content.get("format_spec") or format_specs_service.active_snapshot(goal)
+    contract = content.get("delivery_contract") or {}
 
     lines: list[str] = []
+    if format_spec and (
+        contract.get("source") == "format_spec" or contract.get("format_spec_id")
+    ):
+        _render_format_spec_document(content, goal, content.get("sections", []), lines)
+        filename = f"{_tutorial_base_name(goal)}.md"
+        return filename, normalize_obsidian_syntax(
+            "\n".join(lines), {_tutorial_base_name(goal)}
+        )
+
     lines.append(f"# {tutorial.title}")
     lines.append("")
 

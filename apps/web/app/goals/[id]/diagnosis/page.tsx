@@ -99,7 +99,7 @@ export default function DiagnosisPage() {
                           {material.kind === "example_source" ? "例题来源" : "参考资料"}
                         </Badge>
                         <span className="text-[10px] text-muted">
-                          {material.extract_status === "ok" ? `${material.char_count} 字摘录` : "未抽取正文"}
+                          {material.extract_status === "ok" ? `${material.char_count} 字正文` : "未抽取正文"}
                         </span>
                       </li>
                     ))}

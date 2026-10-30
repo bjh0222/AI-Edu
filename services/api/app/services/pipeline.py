@@ -282,11 +282,7 @@ def quickstart(
     # ⑥ 全部章节 + 配套文件
     content = (tutorial.get("current_version") or {}).get("content") or {}
     sections = content.get("sections") or []
-    contract = (
-        content.get("delivery_contract")
-        or format_specs_service.delivery_contract_for_snapshot(snapshot)
-        or delivery_contract_for(goal)
-    )
+    contract = format_specs_service.contract_for_goal(goal, content.get("delivery_contract"))
     job_id: str | None = None
     if sections:
         steps.append(_step("sections", "全部章节", "reused", f"已生成 {len(sections)} 节"))
@@ -312,8 +308,8 @@ def quickstart(
             )
         else:
             note = (
-                "按画像硬性约束只交付清单内容，不生成配套文件"
-                if contract
+                "按所选格式规范只交付清单内容，不生成旧模板配套文件"
+                if contract or format_specs_service.suppress_legacy_companions(goal)
                 else "知识速查与额外练习已齐备"
             )
             steps.append(_step("companions", "配套文件", "reused", note))

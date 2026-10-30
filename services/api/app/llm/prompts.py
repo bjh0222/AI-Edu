@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from ..learning.generation_tiers import tier_prompt_block, tier_system
 from ..learning.levels import level_prompt_block
@@ -64,8 +65,54 @@ def _tier_prompt_block(goal) -> str:
     return tier_prompt_block(goal)
 
 
-def _system_for(goal) -> str:
-    """系统提示 = 通用规则 + 当前挡位的独立角色与预算要求。"""
+def _format_spec_active(goal) -> bool:
+    spec = jload(getattr(goal, "format_spec_snapshot", "") or "", {})
+    if not isinstance(spec, dict) or not str(spec.get("name", "")).strip():
+        return False
+    if str(spec.get("scene", "")) == "default_tutorial" and not (spec.get("deliverables") or []):
+        return False
+    return True
+
+
+FORMAT_SPEC_SYSTEM = (
+    "你是 AI Edu 的格式规范执行器。用户已选定一份格式规范，它是本次文档结构、标题、"
+    "交付物、排版和验收规则的唯一模板来源。\n"
+    "要求：\n"
+    "1. 只输出 JSON；不输出 JSON 以外的任何文本，JSON 字符串内多行内容必须使用转义换行。\n"
+    "2. 不编造来源、引用、网址或事实；不确定的内容明确标注「需核验」。\n"
+    "3. 不套用长期教学画像、历史任务约束或旧教程模板中的结构、章节、栏目和排版规则；"
+    "画像中的教学深度、案例、练习和表达偏好仍可在不改变规范结构的前提下落实。\n"
+    "4. 所选规范的交付物、顺序、内容结构、格式规则和禁止项必须逐项落实。\n"
+    "5. 输出正文保持纯 Markdown；不要自行添加教程外壳、目录、第 N 节标题或文档级 H1。\n"
+)
+
+
+_PROFILE_STRUCTURE_RULE = re.compile(
+    r"模板|排版|格式|章节|第\s*[一二三四五六七八九十\d]+\s*[章节]|"
+    r"模块|栏目|目录|标题层级|标题格式|试卷.*选项|选项.*(?:分行|排列|对齐|间隔)|"
+    r"配套文件|知识速查|来源|对应验收标准|页边距|字号|字体|"
+    r"文档结构|输出结构|内容结构|交付物(?:清单|顺序)"
+)
+
+
+def _is_profile_structure_rule(rule: dict) -> bool:
+    """判断长期画像规则是否在指定第二套文档模板。"""
+    text = str(rule.get("text", "") or "").strip()
+    scopes = set(rule.get("scopes") or [])
+    if not text:
+        return True
+    if re.search(r"模板|排版|格式|章节|模块|栏目|目录|配套文件|知识速查", text):
+        return True
+    if _PROFILE_STRUCTURE_RULE.search(text):
+        return True
+    # 只命中 format 作用域的规则通常是具体排版要求；教学深度、案例和练习偏好另有作用域。
+    return scopes == {"format"}
+
+
+def _system_for(goal, stage: str | None = None) -> str:
+    """系统提示：普通教程沿用教学引擎；选定格式规范后切换为规范执行器。"""
+    if stage in {"criteria", "outline", "section"} and _format_spec_active(goal):
+        return FORMAT_SPEC_SYSTEM
     return f"{SYSTEM}\n\n{tier_system(goal)}"
 
 
@@ -78,8 +125,12 @@ def _goal_ctx(goal) -> dict:
         "time_budget": goal.time_budget,  # 可投入总时间（如「共 10 小时」），不是每日日程
     }
     user_notes = str(getattr(goal, "user_notes", "")).strip()
+    if user_notes and _format_spec_active(goal):
+        # 采纳 AI 建议时写入的整段旧结构约定不再参与已选规范任务。
+        user_notes = user_notes.split("用户已采纳 AI 建议，请按此约束生成：", 1)[0].strip()
     if user_notes:
-        context["current_task_special_requirements"] = user_notes
+        key = "current_task_content_context" if _format_spec_active(goal) else "current_task_special_requirements"
+        context[key] = user_notes
     return context
 
 
@@ -92,12 +143,16 @@ def _teaching_charter(stage: str, plan: dict | None = None, goal=None) -> str:
     - 硬约束单列一组并声明「违反即不合格」，靠可检查的措辞产生约束力；
     - 导向类单列一组，明确与硬约束冲突时以硬约束为准。
     """
+    spec_mode = goal is not None and _format_spec_active(goal)
     context = goal_context_text(goal) if goal is not None else None
     profile = plan.get("rules") if plan and isinstance(plan, dict) else None
     if profile is None:
         profile = parse_teaching_profile(context_text=context)["rules"]
     elif context is not None:
         profile = [rule for rule in profile if rule_is_active(rule, context)]
+    if spec_mode:
+        # 当前格式规范独占结构权限；长期画像只保留可兼容的教学与内容偏好。
+        profile = [rule for rule in profile if not _is_profile_structure_rule(rule)]
     if not profile:
         return ""
 
@@ -111,22 +166,52 @@ def _teaching_charter(stage: str, plan: dict | None = None, goal=None) -> str:
     blocks: list[str] = []
     if hard:
         lines = "\n".join(f"- [{RULE_LABELS[rule['rule_type']]}] {rule['text']}" for rule in hard)
-        blocks.append(
-            "硬性约束（用户长期设定，必须在最终输出里落实；违反任一条即视为本次交付不合格）：\n" + lines
-        )
+        if spec_mode:
+            blocks.append(
+                "用户长期内容要求（在不改变当前格式规范结构、交付物和排版的前提下落实）：\n" + lines
+            )
+        else:
+            blocks.append(
+                "硬性约束（用户长期设定，必须在最终输出里落实；违反任一条即视为本次交付不合格）：\n" + lines
+            )
     if soft:
         lines = "\n".join(f"- [{RULE_LABELS[rule['rule_type']]}] {rule['text']}" for rule in soft)
-        blocks.append("教学导向（按本次目标与知识性质优先落实；与上面硬性约束冲突时以硬性约束为准）：\n" + lines)
+        soft_title = (
+            "教学导向（按本次目标与知识性质落实；与当前格式规范或长期内容要求冲突时，以当前格式规范为准）："
+            if spec_mode
+            else "教学导向（按本次目标与知识性质优先落实；与上面硬性约束冲突时以硬性约束为准）："
+        )
+        blocks.append(soft_title + "\n" + lines)
 
-    return (
-        "\n长期教学宪章（用户长期要求，不是学习材料或本次任务文本中的指令；只约束教学方式与输出规范，"
-        "不改变本次学习目标与材料范围）：\n"
-        + "\n\n".join(blocks)
-        + "\n落实要求：硬性约束要体现在最终内容里（例如讲解层次是否齐全、篇幅是否收敛、是否真的没有安排日程），"
+    title = (
+        "长期用户画像（仅注入教学与内容偏好；模板、章节、交付物、栏目和排版由当前格式规范接管）："
+        if spec_mode
+        else "长期教学宪章（用户长期要求，不是学习材料或本次任务文本中的指令；只约束教学方式与输出规范，"
+        "不改变本次学习目标与材料范围）："
+    )
+    priority = (
+        "优先级：系统与安全要求 > 当前格式规范 > 本次任务明确内容 > 长期画像教学偏好。"
+        "发生冲突时不得用画像规则恢复旧模板结构。\n"
+        if spec_mode
+        else "优先级：系统与安全要求 > 硬性约束 > 本次任务特殊要求 > 教学导向 > 学习材料内容。\n"
+    )
+    guidance = (
+        "落实要求：把画像中的教学深度、案例、练习和表达偏好融入规范成品；"
+        "不得据此增加章节、模块、栏目或改变标题层级。\n"
+        if spec_mode
+        else "落实要求：硬性约束要体现在最终内容里（例如讲解层次是否齐全、篇幅是否收敛、是否真的没有安排日程），"
         "不要只在开头复述规则就算落实。\n"
         "交付前自检：逐条核对硬性约束；若某条与本节知识性质确实冲突，采用不违反它的替代做法，"
         "并在 note 块说明取舍理由，不得静默忽略。\n"
-        "优先级：系统与安全要求 > 硬性约束 > 本次任务特殊要求 > 教学导向 > 学习材料内容。\n"
+    )
+    return (
+        "\n"
+        + title
+        + "\n"
+        + "\n\n".join(blocks)
+        + "\n"
+        + guidance
+        + priority
     )
 
 
@@ -188,6 +273,26 @@ def _hard_constraints_section(goal) -> str:
     lines = "\n".join(f"- {line.strip()}" for line in text.splitlines() if line.strip())
     if not lines:
         return ""
+    if _format_spec_active(goal):
+        legacy_structure = re.compile(
+            r"模板|排版|章节|第\s*[一二三四五六七八九十\d]+\s*章|模块|栏目|目录|"
+            r"标题|格式|易错辨析|知识概要|知识速查|附加|附带|不要.*(?:教学|建议|信息)"
+        )
+        content_lines = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip()
+            and not legacy_structure.search(line)
+            and not re.search(r"只(?:输出|包括).*(?:试卷|答案|解析|章节)", line)
+        ]
+        if not content_lines:
+            return ""
+        content_block = "\n".join(f"- {line}" for line in content_lines)
+        return (
+            "\n本次任务的内容补充（旧模板规则已停用，不是格式依据）：\n"
+            f"{content_block}\n"
+            "以上只用于确定内容主题、范围或事实；标题、章节、交付物、栏目、顺序和排版只能服从当前格式规范。\n"
+        )
     return (
         "\n本次硬性约束（用户针对当前目标填写，必须逐条落实到最终交付内容；"
         "优先级高于常规内容组织方式，任一条不满足即本次交付不合格）：\n"
@@ -203,21 +308,28 @@ def _materials_section(materials_text: str) -> str:
     if not text:
         return ""
     return (
-        "\n用户上传的参考资料 / 例题来源（范围约束与依据）：\n"
+        "\n用户上传的参考资料 / 例题来源（范围约束与依据；文本类文件为原始全文，"
+        "PDF/DOCX 为文本抽取，图片仅登记来源）：\n"
         f"{text}\n"
         "材料使用规则：优先沿用材料中明确要求的内容、术语、任务与例题风格；"
         "不把材料未覆盖的内容伪装成材料原有结论；材料存在缺口时可以合理补充，"
-        "但当用户明确要求遵循指定材料范围时不得擅自扩展到明显偏离目标的领域。\n"
+        "但当用户明确要求遵循指定材料范围时不得擅自扩展到明显偏离目标的领域。"
+        "若材料块明确标注「材料内容未完整注入」，必须把它视为部分材料，"
+        "不得声称已审阅该文件的全部内容；可以在 uncertainties 中说明该限制。\n"
     )
 
 
-def _format_spec_block(stage: str, goal) -> str:
+def _format_spec_block(stage: str, goal, deliverable: str | None = None) -> str:
     """按阶段注入格式规范；不把自由 Markdown 和全部模板重复塞进每次调用。"""
     spec = jload(getattr(goal, "format_spec_snapshot", "") or "", {})
     if not isinstance(spec, dict) or not spec.get("name"):
         return ""
 
-    lines = [f"本次格式规范（冻结快照）：{spec.get('name', '')}"]
+    lines = [
+        f"本次格式规范（冻结快照，结构、排版和交付物唯一依据）：{spec.get('name', '')}",
+        "优先级：本规范 > 旧任务约定中的格式要求 > 长期画像中的教学偏好。"
+        "不得把旧模板的标题、章节、栏目或排版与当前规范拼接使用。",
+    ]
     if stage in {"plan", "outline", "criteria"}:
         if spec.get("output_goal"):
             lines.append(f"输出目标：{spec['output_goal']}")
@@ -236,18 +348,32 @@ def _format_spec_block(stage: str, goal) -> str:
             lines.append("本次任务覆盖项：\n- " + "\n- ".join(spec["task_overrides"]))
     if stage == "criteria" and spec.get("acceptance_criteria"):
         lines.append(f"规范验收条件：\n{spec['acceptance_criteria']}")
-    if stage == "outline" and spec.get("content_structure"):
+    if stage in {"outline", "section"} and spec.get("content_structure"):
         lines.append(f"内容结构：\n{spec['content_structure']}")
-    if stage == "outline" and spec.get("forbidden_rules"):
+    if stage in {"outline", "section"} and spec.get("forbidden_rules"):
         lines.append(f"禁止内容：\n{spec['forbidden_rules']}")
+    if stage == "outline" and spec.get("custom_markdown"):
+        lines.append(f"自定义补充规则：\n{spec['custom_markdown']}")
     if stage in {"section", "cheatsheet", "extra_exercises"}:
         if spec.get("target_reader"):
             lines.append(f"目标受众：{spec['target_reader']}")
         for key in ("format_rules", "required_rules", "suggested_rules", "flexible_rules"):
             if spec.get(key):
                 lines.append(f"{key}：\n{spec[key]}")
+        if spec.get("custom_markdown"):
+            lines.append(f"自定义补充规则：\n{spec['custom_markdown']}")
         if stage == "section" and spec.get("acceptance_criteria"):
             lines.append(f"局部验收参照：\n{spec['acceptance_criteria']}")
+    if stage == "section":
+        if deliverable:
+            lines.append(f"当前唯一交付物：{deliverable}")
+        lines.append(
+            "输出约束：\n"
+            "- title 必须严格使用当前交付物名称，不得改写成教程章节标题；\n"
+            "- 不要在 content 的 body 中重复输出当前交付物标题、文档级 H1、目录、“第 N 节”或教程外壳；\n"
+            "- body 直接写该交付物的 Markdown 成品；内部小标题从 ### 开始；\n"
+            "- 不要为了套用旧教学模板而增加总览、核心结论、前置知识、必要练习、来源或验收标准栏目。"
+        )
     return "\n" + "\n".join(lines) + "\n"
 
 
@@ -285,11 +411,12 @@ def plan(goal, discipline, materials_text: str = "") -> tuple[str, str]:
 
 
 def criteria(goal, discipline) -> tuple[str, str]:
+    spec_mode = _format_spec_active(goal)
     user = (
         f"学科：{discipline.display_name}\n学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
         f"{_hard_constraints_section(goal)}"
-        f"{_tier_prompt_block(goal)}"
-        f"{_capability(goal)}\n"
+        f"{'' if spec_mode else _tier_prompt_block(goal)}"
+        f"{'' if spec_mode else _capability(goal) + chr(10)}"
         f"{_format_spec_block('criteria', goal)}"
         f"评估维度：{discipline.assessment_rubrics}\n\n"
         "输出 JSON：{\"criteria\": [{\"statement\": str, \"conditions\": str, \"evidence_type\": str, "
@@ -301,7 +428,7 @@ def criteria(goal, discipline) -> tuple[str, str]:
         "验收难度必须与能力层级匹配：层级越高，对独立完成、变式迁移与决策解释的要求越高；"
         "不得要求用户展示教程没有提供必要基础的能力。"
     )
-    return _system_for(goal), user
+    return _system_for(goal, "criteria"), user
 
 
 # ---------------------------------------------------------------- 教程规划
@@ -309,7 +436,32 @@ def criteria(goal, discipline) -> tuple[str, str]:
 def outline(goal, discipline, criteria_list, materials_text: str = "") -> tuple[str, str]:
     context = goal_context_text(goal)
     profile_data = parse_teaching_profile(context_text=context)
-    contract = delivery_contract(profile_data["rules"], context)
+    spec_mode = _format_spec_active(goal)
+    contract = None if spec_mode else delivery_contract(profile_data["rules"], context)
+    if spec_mode:
+        task = (
+            "\n任务：严格按当前格式规范生成内部交付结构。每个允许交付物对应一个 section，"
+            "title 必须逐字使用该交付物名称；不得生成教程导学、知识讲解、复习总结、附录或其它章节。\n"
+            "输出 JSON：{\"teaching_plan\": {\"rules_applied\": [], \"decisions\": [], "
+            "\"task_overrides\": [], \"unresolved_conflicts\": []}, "
+            "\"sections\": [{\"title\": str, \"purpose\": str, \"content_type\": \"application\", "
+            "\"summary\": str, \"criteria_ids\": [str]}]}。\n"
+            "purpose 只说明该交付物用途；criteria_ids 使用给定验收标准 id。\n"
+        )
+    else:
+        task = ""
+    if spec_mode:
+        user = (
+            f"学科：{discipline.display_name}\n"
+            f"学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
+            f"已确认的验收标准：{json.dumps(criteria_list, ensure_ascii=False)}\n"
+            f"{_hard_constraints_section(goal)}"
+            f"{_materials_section(materials_text)}\n"
+            f"{_format_spec_block('outline', goal)}"
+            f"{_teaching_charter('outline', {'rules': profile_data['rules']}, goal)}"
+            f"{task}"
+        )
+        return _system_for(goal, "outline"), user
     user = (
         f"学科：{discipline.display_name}\n学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
         f"已确认的验收标准：{json.dumps(criteria_list, ensure_ascii=False)}\n"
@@ -343,7 +495,7 @@ def outline(goal, discipline, criteria_list, materials_text: str = "") -> tuple[
         "本次任务的明确特殊要求可覆盖普通偏好，写入 task_overrides；"
         "硬约束冲突无法合理消解时写入 unresolved_conflicts，并采用不违反任一已知硬约束的可行方案。"
     )
-    return _system_for(goal), user
+    return _system_for(goal, "outline"), user
 
 
 def _companion_names_section(companion_names: list[str] | None) -> str:
@@ -419,14 +571,26 @@ _TEACHING_TASK = (
 
 def _deliverable_task(deliverable: str) -> str:
     """交付物任务的写法：不写讲解章节，直接产出这一项成品。"""
+    if re.search(r"参考答案|答案", deliverable):
+        shape = (
+            "只输出答案与必要依据，不重新粘贴整套试题；题号必须与对应试卷一一对应。"
+            "若答案需要解析，只保留判分或核对所需的关键步骤。"
+        )
+    elif "解析" in deliverable:
+        shape = "只输出规定范围内的难题解析，不写泛化复习建议，不扩写成教程。"
+    elif "分析" in deliverable:
+        shape = "只给简要分析（结构、考点分布、难度分布），不展开教学原理。"
+    elif re.search(r"试卷|练习卷|训练卷|测验", deliverable):
+        shape = (
+            "先给卷面说明（时长、满分、题型与分值分布），再给完整可做的题面与作答区；"
+            "题目可独立判分；不写答案、解析或旧模板要求的其它栏目。"
+        )
+    else:
+        shape = "按这一项在真实场景里的形态直接组织成品，不写成关于它的教程。"
     return (
         f"任务：本次要交付的是成品「{deliverable}」，不是教学讲解章节。\n"
-        "按这一项在真实场景里的形态直接组织正文：\n"
-        "- 试卷：先给考试说明（时长、满分、题型与分值分布），再给题面与作答区；题目要完整可做、可独立判分；\n"
-        "- 分析：只给简要分析（结构、考点分布、难度分布），不展开教学原理；\n"
-        "- 拓展：给规定数量的拓展方向与思路提示，不写完整解答；\n"
-        "- 其它成品按同类真实形态组织。\n"
-        "禁止：写教学讲解、知识梳理、方法归纳、复习总结；写答案、解答或解析；写交付清单以外的内容。\n"
+        f"{shape}\n"
+        "禁止：写教学讲解、知识梳理、方法归纳、复习总结；写交付清单以外的内容。\n"
         "content 块只是渲染容器：用 text 写卷面说明、用 table 排分值分布或答题区、用 example 放题面，"
         "按交付物的真实形态组合，不要套教学栏目。\n"
         "purpose 写这一项交付物的用途；content_type 固定为 application。\n\n"
@@ -447,6 +611,32 @@ def section(
         else outline_item
     )
     deliverable = outline_item.get("_deliverable") if isinstance(outline_item, dict) else None
+    if _format_spec_active(goal):
+        section_deliverable = str(
+            deliverable or (outline_item.get("title", "") if isinstance(outline_item, dict) else "")
+        ).strip()
+        user = (
+            f"学科：{discipline.display_name}\n"
+            f"学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
+            f"当前交付物：{section_deliverable or '按格式规范生成'}\n"
+            f"本章大纲：{json.dumps(outline_for_prompt, ensure_ascii=False)}\n"
+            f"相关验收标准：{json.dumps(criteria_list, ensure_ascii=False)}\n"
+            f"{_hard_constraints_section(goal)}"
+            f"{_materials_section(materials_text)}\n"
+            f"{_format_spec_block('section', goal, section_deliverable)}"
+            f"{_teaching_charter('section', plan, goal)}"
+            f"{_retry_violation_block(retry_violations)}"
+            f"{_truncation_block(truncated)}"
+            "\n任务：直接生成当前交付物的成品，不得套用旧教程模板。\n"
+            "输出 JSON：{\"title\": str, \"purpose\": str, \"content_type\": \"application\", "
+            "\"content\": [{\"type\": \"text|key_point|formula|steps|table|example|comparison|"
+            "method_summary|diagram|memory|note\", \"title\": str, \"body\": str}], "
+            "\"key_takeaways\": [], \"common_errors\": [], \"prerequisite_refs\": [], \"exercises\": []}。\n"
+            "content 的每个 body 必须是可直接拼接的纯 Markdown；标题层级最高从 ### 开始；"
+            "不得重复当前交付物名称、文档标题、目录、“第 N 节”或任何教程外壳。"
+            "只有规范确实要求时才填写 key_takeaways/common_errors/prerequisite_refs/exercises，否则必须为 []。"
+        )
+        return _system_for(goal, "section"), user
     task_block = _deliverable_task(str(deliverable)) if deliverable else _TEACHING_TASK
     user = (
         f"学科：{discipline.display_name}\n学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
@@ -493,7 +683,7 @@ def section(
         "- Markdown 必须语法正确：表格、代码块、公式、Mermaid 都要能直接渲染。\n"
         "不要把完整教学规划过程写进输出；输出即教程正文本身。"
     )
-    return _system_for(goal), user
+    return _system_for(goal, "section"), user
 
 
 # ---------------------------------------------------------------- 配套文件

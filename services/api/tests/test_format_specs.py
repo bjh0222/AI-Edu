@@ -1,9 +1,15 @@
 """格式规范：管理、匹配、任务快照与交付契约。"""
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
+from app.learning.disciplines import get_profile
+from app.llm import prompts
 from app.services.format_specs import check_snapshot_delivery, delivery_contract_for_snapshot
+from app.services.tutorials import _render_format_spec_document
 
 
 def _payload(name: str = "速查表规范", **overrides) -> dict:
@@ -138,6 +144,153 @@ def test_snapshot_delivery_contract_and_check():
 
     issues = check_snapshot_delivery(snapshot, {"outline": [{"title": "考向分析"}]})
     assert "必需交付物未出现在结构中：模拟试卷" in issues
+
+
+def test_selected_spec_is_the_only_format_authority():
+    snapshot = {
+        "id": "spec",
+        "name": "练习生成规范",
+        "scene": "exercise",
+        "snapshot_version": "v3",
+        "deliverables": [
+            {"name": "训练", "status": "required", "order": 1},
+        ],
+        "content_structure": "# 练习\n\n## 训练",
+        "format_rules": "只使用当前模板。",
+        "custom_markdown": "**当前模板专属规则**",
+    }
+    goal = SimpleNamespace(
+        title="Python 冲刺",
+        motivation="期中考试",
+        application_context="完成训练",
+        current_level="有基础",
+        time_budget="共 10 小时",
+        user_notes=(
+            "覆盖基础语法与容器。\n"
+            "用户已采纳 AI 建议，请按此约束生成：旧模板曾经要求先输出总览。"
+        ),
+        hard_constraints="1.练习题型只包括代码补全\n2.不要易错辨析，要知识概要\n3.第一章只输出两套试卷",
+        capability_level="L2",
+        generation_tier="standard",
+        format_spec_snapshot=json.dumps(snapshot, ensure_ascii=False),
+        generate_extra_exercises=False,
+        domain_key="cs_it",
+    )
+
+    system, outline_user = prompts.outline(goal, get_profile("cs_it"), [])
+    assert "唯一模板来源" in system
+    assert "长期教学宪章" not in outline_user
+    assert "不要易错辨析" not in outline_user
+    assert "第一章只输出" not in outline_user
+    assert "练习题型只包括代码补全" in outline_user
+    assert "覆盖基础语法与容器" in outline_user
+    assert "旧模板曾经要求先输出总览" not in outline_user
+    assert "**当前模板专属规则**" in outline_user
+
+    _, section_user = prompts.section(
+        goal,
+        get_profile("cs_it"),
+        {"title": "训练", "_deliverable": "训练"},
+        [],
+        [],
+    )
+    assert "当前唯一交付物：训练" in section_user
+    assert "不得套用旧教程模板" in section_user
+    assert "分层讲解原则" not in section_user
+    structural_only = prompts._teaching_charter(
+        "section",
+        {"rules": [{"text": "旧模板要求固定栏目", "hard": True, "rule_type": "required", "scopes": ["general"]}]},
+        goal,
+    )
+    assert structural_only == ""
+
+    profile_block = prompts._teaching_charter(
+        "section",
+        {
+            "rules": [
+                {
+                    "text": "遇到实践性强的项目时，希望有更多操作实例",
+                    "hard": False,
+                    "rule_type": "conditional",
+                    "scopes": ["example"],
+                },
+                {
+                    "text": "生成试卷时四个选项分行输出，并保留旧版目录栏目",
+                    "hard": True,
+                    "rule_type": "conditional",
+                    "scopes": ["format"],
+                },
+            ]
+        },
+        goal,
+    )
+    assert "长期用户画像" in profile_block
+    assert "希望有更多操作实例" in profile_block
+    assert "四个选项分行" not in profile_block
+    assert "旧版目录栏目" not in profile_block
+    assert "当前格式规范 > 本次任务明确内容 > 长期画像教学偏好" in profile_block
+
+
+def test_format_spec_renderer_removes_tutorial_wrappers_and_duplicate_titles():
+    goal = SimpleNamespace(title="Python 冲刺")
+    sections = [
+        {
+            "title": "训练",
+            "content": [
+                {
+                    "type": "text",
+                    "title": "讲解",
+                    "body": "# Python 冲刺\n\n## 第一部分\n\n完成题目。",
+                }
+            ],
+            "key_takeaways": ["旧模板结论"],
+            "exercises": ["旧模板练习"],
+        }
+    ]
+    lines: list[str] = []
+    _render_format_spec_document({}, goal, sections, lines)
+    text = "\n".join(lines)
+
+    assert text.count("# Python 冲刺") == 1
+    assert "## 训练" in text
+    assert "### 第一部分" in text
+    assert "## 第 1 节" not in text
+    assert "### 讲解" not in text
+    assert "旧模板结论" not in text
+    assert "旧模板练习" not in text
+
+
+def test_manual_spec_replaces_legacy_hard_constraint_structure(client: TestClient):
+    created = client.post(
+        "/api/format-specs",
+        json=_payload(
+            name="当前练习模板",
+            scene="exercise",
+            trigger_keywords=[],
+            deliverables=[
+                {"name": "训练", "status": "required", "order": 1, "allow_override": True},
+            ],
+            content_structure="# 练习名称\n\n## 训练",
+        ),
+    )
+    assert created.status_code == 200
+    spec_id = created.json()["id"]
+
+    response = client.post(
+        "/api/goals/quickstart",
+        json={
+            "title": "模板冲突验证",
+            "requirement": "完成练习",
+            "hard_constraints": "第一章只输出两套试卷\n不要易错辨析，要知识概要",
+            "format_spec_id": spec_id,
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    content = body["tutorial"]["current_version"]["content"]
+    assert [item["title"] for item in content["outline"]] == ["训练"]
+    assert content["delivery_contract"]["items"] == ["训练"]
+    assert body["tutorial"]["title"] == "模板冲突验证 · 当前练习模板"
 
 
 def test_quickstart_exam_spec_binds_snapshot_and_contract_before_outline(client: TestClient):

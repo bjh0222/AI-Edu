@@ -320,7 +320,7 @@ def test_section_prompt_switches_to_deliverable_mode(client):
     # 交付物章节直接产出成品，不能套讲解模板
     assert "不是教学讲解章节" in deliverable_user
     assert "分层讲解原则" not in deliverable_user
-    assert "写答案" in deliverable_user
+    assert "不写答案" in deliverable_user
     assert "分层讲解原则" in teaching_user
 
 

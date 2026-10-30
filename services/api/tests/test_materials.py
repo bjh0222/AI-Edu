@@ -155,7 +155,7 @@ def test_materials_context_truncates_and_labels(client):
 
     assert "长资料.md" in context
     assert "例题来源" in context
-    assert "摘录已截断" in context
+    assert "材料内容未完整注入" in context
     assert len(context) <= 700  # 总长度受 total_chars 约束
 
     # 未上传材料的目标注入为空串（保持原 prompt 行为不变）
@@ -168,15 +168,15 @@ def test_materials_context_truncates_and_labels(client):
 
 
 def test_materials_context_injects_raw_text_file(client):
-    """纯文本材料注入文件原文：超过旧摘录上限的内容也完整进入 prompt，且不做空白归一化。"""
+    """纯文本材料注入文件原文：完整进入 prompt，且不做空白归一化。"""
     from app.db import SessionLocal
     from app.models import GoalMaterial
 
     goal = _create_goal(client)
     goal_id = goal["id"]
     head = "开头标记：管道。\n\n\n\n行A。"
-    tail = "".join(f"第{i}步：过滤日志。\n" for i in range(700))  # 约 8300 字
-    long_text = head + tail  # 超过旧 8000 字入库上限，低于新默认单份注入上限（1.2 万字）
+    tail = "".join(f"第{i}步：过滤日志。\n" for i in range(1400))  # 约 1.7 万字
+    long_text = head + tail  # 超过旧 1.2 万字 prompt 上限
     assert _upload(client, goal_id, "全文笔记.txt", long_text.encode("utf-8")).status_code == 200
 
     db = SessionLocal()
@@ -188,8 +188,10 @@ def test_materials_context_injects_raw_text_file(client):
 
     assert "全文笔记.txt" in context
     assert "开头标记：管道。" in context
-    assert "第699步：过滤日志。" in context  # 旧实现（8000 字摘录 + 1500 字注入）必然截掉
+    assert "第1399步：过滤日志。" in context  # 默认完整注入，不再截到 1.2 万字
     assert "\n\n\n\n行A。" in context  # 文件原文逐字注入，未做归一化
+    assert "原始全文" in context
+    assert "材料内容未完整注入" not in context
     assert row.char_count == len(long_text.strip())  # 库内正文已自愈为文件原文（仅去首尾空白）
 
 

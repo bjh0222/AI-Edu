@@ -297,7 +297,7 @@ export default function LearningPage() {
                         </Badge>
                         <span className="truncate font-semibold text-[#33415c]">{material.filename}</span>
                         <span className="text-[10px] text-muted">
-                          {material.extract_status === "ok" ? `${material.char_count} 字摘录` : "未抽取正文"}
+                          {material.extract_status === "ok" ? `${material.char_count} 字正文` : "未抽取正文"}
                         </span>
                       </li>
                     ))}

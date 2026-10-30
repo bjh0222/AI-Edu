@@ -70,9 +70,15 @@ class Settings:
         self.material_max_bytes = int(os.getenv("MATERIAL_MAX_BYTES", str(20 * 1024 * 1024)) or 20 * 1024 * 1024)
         # 材料正文入库上限（字符）：默认 20 万字，覆盖整本书的量级；仅防极端文件撑爆数据库
         self.material_max_text_chars = int(os.getenv("MATERIAL_MAX_TEXT_CHARS", "200000") or 200000)
-        # 注入 prompt 的材料正文上限（字符）：单份 / 全部材料，均可按模型上下文调整
-        self.material_prompt_per_file_chars = int(os.getenv("MATERIAL_PROMPT_PER_FILE_CHARS", "12000") or 12000)
-        self.material_prompt_total_chars = int(os.getenv("MATERIAL_PROMPT_TOTAL_CHARS", "48000") or 48000)
+        # 注入 prompt 的材料正文上限（字符）：0 表示不额外截断，文本材料按原始全文注入。
+        # 这不同于上传时的入库保险丝 material_max_text_chars；只有显式设置正数时才启用
+        # prompt 侧预算，并且 materials_context 会在正文中明确标注截断状态。
+        self.material_prompt_per_file_chars = int(
+            os.getenv("MATERIAL_PROMPT_PER_FILE_CHARS", "0") or 0
+        )
+        self.material_prompt_total_chars = int(
+            os.getenv("MATERIAL_PROMPT_TOTAL_CHARS", "0") or 0
+        )
         self.cors_origins = os.getenv(
             "CORS_ORIGINS",
             "http://127.0.0.1:3000,http://localhost:3000,http://127.0.0.1:3001,http://localhost:3001,app://obsidian.md,capacitor://localhost",

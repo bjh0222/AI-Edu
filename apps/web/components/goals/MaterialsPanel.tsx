@@ -29,6 +29,8 @@ const FALLBACK_LIMITS: MaterialLimits = {
   ],
 };
 
+const TEXT_MATERIAL_EXTENSIONS = new Set([".txt", ".md", ".markdown", ".csv"]);
+
 const EXTRACT_LABEL: Record<string, { label: string; tone: "done" | "warn" | "neutral" }> = {
   ok: { label: "已抽取正文", tone: "done" },
   empty: { label: "未抽取到正文", tone: "warn" },
@@ -99,7 +101,7 @@ export function MaterialsPanel({
   goalId,
   materials,
   onChanged,
-  hint = "已上传的材料会以全文形式注入「价值诊断 / 学习计划 / 教程生成」的 prompt（超出上限时才截断，上限可在服务端配置）。",
+  hint = "文本类材料会以原始全文注入「价值诊断 / 学习计划 / 教程生成」；PDF/Word 使用文本抽取结果。默认不截断，仅服务端显式配置上限时会标注不完整范围。",
 }: {
   goalId: string;
   materials: Material[];
@@ -370,7 +372,10 @@ export function MaterialsPanel({
         ) : (
           <ul className="grid gap-1.5">
             {materials.map((material) => {
-              const extract = EXTRACT_LABEL[material.extract_status] ?? EXTRACT_LABEL.pending;
+              const extract =
+                material.extract_status === "ok" && TEXT_MATERIAL_EXTENSIONS.has(material.ext)
+                  ? { label: "已载入原始全文", tone: "done" as const }
+                  : EXTRACT_LABEL[material.extract_status] ?? EXTRACT_LABEL.pending;
               return (
                 <li key={material.id} className="rounded-xl border border-line bg-white px-3 py-2 text-[11px]">
                   <div className="flex flex-wrap items-center gap-2">
@@ -393,7 +398,7 @@ export function MaterialsPanel({
                   </div>
                   {material.excerpt_preview && (
                     <div className="mt-1 line-clamp-2 text-[10px] leading-relaxed text-muted">
-                      摘录：{material.excerpt_preview}
+                      内容预览：{material.excerpt_preview}
                     </div>
                   )}
                   {material.note && <div className="mt-0.5 text-[10px] text-muted">备注：{material.note}</div>}

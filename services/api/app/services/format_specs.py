@@ -663,3 +663,43 @@ def check_snapshot_delivery(snapshot: dict, content: dict) -> list[str]:
         if status == "forbidden" and any(name in title for title in titles):
             issues.append(f"禁止交付物出现在结构中：{name}")
     return issues
+
+
+def active_snapshot(goal) -> dict:
+    """返回已绑定且可执行的格式规范快照。"""
+    snapshot = jload(getattr(goal, "format_spec_snapshot", "") or "", {})
+    return snapshot if isinstance(snapshot, dict) and snapshot.get("name") else {}
+
+
+def authoritative_snapshot(goal) -> dict:
+    """真正接管模板的规范；默认教程规范继续走普通教程链路。"""
+    snapshot = active_snapshot(goal)
+    if not snapshot:
+        return {}
+    deliverables = snapshot.get("deliverables") or []
+    if str(snapshot.get("scene", "")) == "default_tutorial" and not deliverables:
+        return {}
+    return snapshot
+
+
+def contract_for_goal(goal, existing: dict | None = None) -> dict | None:
+    """统一交付契约来源。
+
+    选定格式规范后，它独占结构、标题、顺序和排版权限：即使规范没有交付物清单，
+    也不再回退到旧画像契约，避免两套模板同时生效。
+    """
+    if isinstance(existing, dict) and existing.get("source") == "format_spec":
+        return existing
+    snapshot = authoritative_snapshot(goal)
+    if snapshot:
+        return delivery_contract_for_snapshot(snapshot)
+    if isinstance(existing, dict) and existing:
+        return existing
+    from ..learning.teaching_profile import delivery_contract_for
+
+    return delivery_contract_for(goal)
+
+
+def suppress_legacy_companions(goal) -> bool:
+    """选定规范后，配套文件必须由规范明确要求，不能沿用旧教程画像自动生成。"""
+    return bool(authoritative_snapshot(goal))
