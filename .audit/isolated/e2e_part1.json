@@ -1,0 +1,70 @@
+{
+ "goal_id": "0d29b3b3594f447988ae87e37dda2e27",
+ "results": [
+  [
+   "PASS",
+   "POST /goals 创建目标",
+   "status=200 id=0d29b3b3594f447988ae87e37dda2e27 demo=None"
+  ],
+  [
+   "PASS",
+   "目标字段正确落库（挡位/层级/约束/额外练习）",
+   "tier=fast level=L2 hard_constraints=35字 extra_exercises=True"
+  ],
+  [
+   "FAIL",
+   "非法能力层级归一化（传 L9 -> 回落 L2）",
+   "EXCEPTION NameError: name '_check_level' is not defined"
+  ],
+  [
+   "FAIL",
+   "非法能力层级归一化（传 L9 -> 回落 L2）",
+   "status=422 capability_level=None"
+  ],
+  [
+   "PASS",
+   "POST /goals/{id}/diagnose 生成诊断",
+   "status=200 demo=True fields=['benefits', 'prerequisites', 'alternatives', 'recommendation']"
+  ],
+  [
+   "PASS",
+   "GET /goals/{id}/diagnose 幂等读取",
+   "status=200 same_id=True"
+  ],
+  [
+   "FAIL",
+   "POST /goals/{id}/decision 记录用户决定",
+   "status=200 user_decision=None"
+  ],
+  [
+   "FAIL",
+   "非法决定被拒绝（4xx）",
+   "status=200 detail={'ok': True}"
+  ],
+  [
+   "PASS",
+   "POST /goals/{id}/plan 生成学习计划",
+   "status=200 steps=2 plan_status=active"
+  ],
+  [
+   "PASS",
+   "POST /goals/{id}/criteria 生成验收标准",
+   "status=200 count=2 statuses=['pending', 'pending']"
+  ],
+  [
+   "PASS",
+   "POST /criteria/confirm-all 一键同意",
+   "status=200 confirmed=2 changed=2"
+  ],
+  [
+   "PASS",
+   "一键同意幂等（重复调用 changed=0）",
+   "status=200 changed=0"
+  ],
+  [
+   "PASS",
+   "一键同意不覆盖已拒绝项",
+   "rejected 项状态=rejected"
+  ]
+ ]
+}

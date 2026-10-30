@@ -31,10 +31,14 @@ from . import knowledge as knowledge_service
 from . import materials as materials_service
 from .utils import (
     add_usage,
+    align_section_titles,
     criterion_dict,
     jdump,
     jload,
+    prune_foreign_section_blocks,
+    prune_section_foreign_blocks,
     set_status_at_least,
+    _norm_ws,
     safe_obsidian_filename as _safe_filename,
     token_usage_dict,
     tutorial_version_dict,
@@ -852,6 +856,7 @@ def _generate_section_task(
     criteria_dicts: list[dict],
     prior_titles: list[str],
     materials_text: str,
+    outline_titles: list[str] | None = None,
 ) -> dict:
     """并发生成的单节任务：独立 Session + 独立 AIService。
 
@@ -884,6 +889,10 @@ def _generate_section_task(
         usage = dict(ai.usage_last)
         db.commit()  # 短事务：调用日志 / 训练样本立即落库，尽快释放写锁
         section_data = _with_rule_check(_normalize_section_raw(raw), raw)
+        # 确定性兜底：模型偶尔把整篇文档写进一节，先按大纲标题剔除其它章节的整块内容
+        section_data = prune_section_foreign_blocks(section_data, outline_titles or [])
+        if format_specs_service.authoritative_snapshot(goal):
+            section_data["title"] = item.get("title", "") or section_data.get("title", "")
         # 交付物章节统一用契约里的名称，避免模型把标题写成「目标：三项」
         section_data["title"] = (
             item.get("title", "")
@@ -1015,6 +1024,7 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
                     # 并发下「前置章节标题」取大纲静态切片，避免依赖完成顺序
                     prior_titles=outline_titles[:idx],
                     materials_text=materials_text,
+                    outline_titles=outline_titles,
                 ): idx
                 for idx, item in enumerate(outline)
             }
@@ -1202,6 +1212,11 @@ def regenerate_section(db: Session, tutorial_id: str, section_id: str, ai: AISer
         raise HTTPException(status_code=502, detail={"code": "llm_error", "message": str(exc)}) from exc
     usage = dict(ai.usage_last)
     section_data = _with_rule_check(_normalize_section_raw(raw), raw)
+    section_data = prune_section_foreign_blocks(
+        section_data, [str(o.get("title", "")) for o in outline]
+    )
+    if format_specs_service.authoritative_snapshot(goal):
+        section_data["title"] = item.get("title", "") or section_data.get("title", "")
     section_data.update(
         {
             "id": section_id,
@@ -1334,6 +1349,40 @@ def normalize_obsidian_syntax(markdown: str, allowed_links: set[str]) -> str:
             pieces[idx] = fix_links(fix_tags(piece))
         lines.append("".join(pieces))
     return "\n".join(lines)
+
+
+_LIST_ITEM_RE = re.compile(r"^(\s*)(?:[-*+]|\d{1,9}[.)])(?:\s|$)")
+
+
+def _expand_loose_list_spacing(markdown: str) -> str:
+    """Obsidian 阅读视图会把列表项之间的空行压掉（松散列表按紧凑渲染），
+    网页端的间隔在导出后因此消失。这里在“空行隔开的两个列表项”之间插入一行
+    缩进的 ``<br>`` 续行：阅读视图渲染为空行、恢复题目/条目间隔；源码与编辑视图
+    中它只是普通续行，不改变列表结构、编号与折叠行为。"""
+    lines = markdown.splitlines()
+    out: list[str] = []
+    fence: str | None = None
+    for idx, line in enumerate(lines):
+        out.append(line)
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            marker = stripped[:3]
+            if fence is None:
+                fence = marker
+            elif stripped.startswith(fence):
+                fence = None
+            continue
+        if fence is not None:
+            continue
+        if not _LIST_ITEM_RE.match(line):
+            continue
+        nxt = lines[idx + 1] if idx + 1 < len(lines) else ""
+        after = lines[idx + 2] if idx + 2 < len(lines) else ""
+        if nxt.strip() or not _LIST_ITEM_RE.match(after):
+            continue
+        indent = line[: len(line) - len(stripped)]
+        out.append(indent + "   <br>")
+    return "\n".join(out)
 
 
 # 内容块类型的默认标题（模型未给 title 时使用）
@@ -1473,10 +1522,25 @@ def _normalize_deliverable_body(body: str) -> str:
 
 def _render_deliverable_blocks(section: dict, lines: list[str]) -> None:
     """规范交付物专用渲染：不再追加教程通用栏目或重复块标题。"""
+    section_title = _norm_ws(section.get("title", ""))
     for block in section.get("content", []):
         if not isinstance(block, dict):
             continue
         body = _normalize_deliverable_body(str(block.get("body", "") or ""))
+        # 正文首行若重复块标题 / 章节标题，去掉，避免标题三连
+        body_lines = body.splitlines()
+        while body_lines and not body_lines[0].strip():
+            body_lines.pop(0)
+        if body_lines:
+            first = _norm_ws(re.sub(r"^#{1,6}\s*", "", body_lines[0]))
+            if first and first in (
+                _norm_ws(block.get("title", "")),
+                section_title,
+            ):
+                body_lines.pop(0)
+                while body_lines and not body_lines[0].strip():
+                    body_lines.pop(0)
+        body = "\n".join(body_lines)
         block_title = str(block.get("title", "") or "").strip()
         has_heading = any(_HEADING_RE.match(line) for line in body.splitlines())
         if block_title and block_title not in _GENERIC_BLOCK_TITLES and not has_heading:
@@ -1567,15 +1631,14 @@ def export_markdown(db: Session, tutorial_id: str) -> tuple[str, str]:
     exercises_file = content.get("extra_exercises") or {}
     format_spec = content.get("format_spec") or format_specs_service.active_snapshot(goal)
     contract = content.get("delivery_contract") or {}
+    content = align_section_titles(prune_foreign_section_blocks(content))
 
     lines: list[str] = []
-    if format_spec and (
-        contract.get("source") == "format_spec" or contract.get("format_spec_id")
-    ):
+    if format_specs_service.authoritative_spec_dict(format_spec):
         _render_format_spec_document(content, goal, content.get("sections", []), lines)
         filename = f"{_tutorial_base_name(goal)}.md"
-        return filename, normalize_obsidian_syntax(
-            "\n".join(lines), {_tutorial_base_name(goal)}
+        return filename, _expand_loose_list_spacing(
+            normalize_obsidian_syntax("\n".join(lines), {_tutorial_base_name(goal)})
         )
 
     lines.append(f"# {tutorial.title}")
@@ -1619,7 +1682,9 @@ def export_markdown(db: Session, tutorial_id: str) -> tuple[str, str]:
     if exercises_file.get("exercises"):
         allowed_links.add(exercises_file.get("filename") or f"{_safe_filename(goal.title)}-额外练习")
     filename = f"{_tutorial_base_name(goal)}.md"
-    return filename, normalize_obsidian_syntax("\n".join(lines), allowed_links)
+    return filename, _expand_loose_list_spacing(
+        normalize_obsidian_syntax("\n".join(lines), allowed_links)
+    )
 def export_cheatsheet(db: Session, tutorial_id: str) -> tuple[str, str]:
     """导出配套知识速查文件。未生成时 404。"""
     tutorial = _get_tutorial(db, tutorial_id)
@@ -1650,7 +1715,9 @@ def export_cheatsheet(db: Session, tutorial_id: str) -> tuple[str, str]:
         lines.append("")
 
     filename = f"{cheatsheet.get('filename') or _safe_filename(goal.title) + '-知识速查'}.md"
-    return filename, normalize_obsidian_syntax("\n".join(lines), {_tutorial_base_name(goal)})
+    return filename, _expand_loose_list_spacing(
+        normalize_obsidian_syntax("\n".join(lines), {_tutorial_base_name(goal)})
+    )
 
 
 def export_extra_exercises(db: Session, tutorial_id: str) -> tuple[str, str]:
@@ -1713,7 +1780,9 @@ def export_extra_exercises(db: Session, tutorial_id: str) -> tuple[str, str]:
         lines.append("")
 
     filename = f"{extra.get('filename') or _safe_filename(goal.title) + '-额外练习'}.md"
-    return filename, normalize_obsidian_syntax("\n".join(lines), {_tutorial_base_name(goal)})
+    return filename, _expand_loose_list_spacing(
+        normalize_obsidian_syntax("\n".join(lines), {_tutorial_base_name(goal)})
+    )
 
 
 def mark_delivery(db: Session, tutorial_id: str, payload) -> dict:

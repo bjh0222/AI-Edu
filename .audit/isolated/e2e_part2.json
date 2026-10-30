@@ -1,0 +1,156 @@
+{
+ "goal_id": "0d29b3b3594f447988ae87e37dda2e27",
+ "tutorial_id": "c894107cc6084e2b96462eb410d72d88",
+ "results": [
+  [
+   "PASS",
+   "POST /tutorials/quickstart 一键生成",
+   "status=200 demo=True steps=['format_spec:reused', 'diagnose:reused', 'decision:created', 'plan:reused', 'criteria:reused', 'outline:reused', 'sections:reused', 'companions:reused'] job=None 0.0s"
+  ],
+  [
+   "PASS",
+   "教程大纲已生成",
+   "outline=2 items"
+  ],
+  [
+   "PASS",
+   "全部章节已生成（sections>0）",
+   "sections=2"
+  ],
+  [
+   "PASS",
+   "每章含 v2 内容块 content[]",
+   "blocks_per_section=[5, 5]"
+  ],
+  [
+   "PASS",
+   "每章映射验收标准 mapping_criteria",
+   "mapped=[1, 1]"
+  ],
+  [
+   "PASS",
+   "质量检查报告已生成 quality_report",
+   "{'passed': True, 'checks': [{'name': '大纲与章节齐备', 'passed': True, 'detail': 'outline=2, sections=2'}, {'name': '章节均映射验收标准', 'passed': True, 'detail': '全部章节已映射'}, {'name': '验收标准双向覆盖', 'passed': True, 'de"
+  ],
+  [
+   "PASS",
+   "硬性约束生效：章节无「第X天/每天」日程表述",
+   "扫描 sections 文本"
+  ],
+  [
+   "PASS",
+   "知识速查已生成（cheatsheet）",
+   "cheatsheet=yes"
+  ],
+  [
+   "PASS",
+   "额外练习已生成（开关开启时）",
+   "extra_exercises=yes"
+  ],
+  [
+   "PASS",
+   "GET 主教程 导出 Markdown",
+   "status=200 chars=2368 disposition=attachment; filename*=UTF-8''E2E%20%E6%B5%8B%E8%AF%95%E7%9B%AE%E6%A0%87%EF%BC%9A"
+  ],
+  [
+   "PASS",
+   "导出无会生效的 #标签",
+   "len=2368"
+  ],
+  [
+   "PASS",
+   "导出含标题层级 (#)",
+   "headings=22"
+  ],
+  [
+   "PASS",
+   "GET 知识速查 导出 Markdown",
+   "status=200 chars=432 disposition=attachment; filename*=UTF-8''E2E%20%E6%B5%8B%E8%AF%95%E7%9B%AE%E6%A0%87%EF%BC%9A"
+  ],
+  [
+   "PASS",
+   "GET 额外练习 导出 Markdown",
+   "status=200 chars=746 disposition=attachment; filename*=UTF-8''E2E%20%E6%B5%8B%E8%AF%95%E7%9B%AE%E6%A0%87%EF%BC%9A"
+  ],
+  [
+   "PASS",
+   "GET /goals/{id}/usage token 统计",
+   "total=5499 source=estimated by_feature=['section', 'knowledge_extract', 'extra_exercises', 'diagnose', 'criteria', 'cheatsheet', 'outline', 'plan']"
+  ],
+  [
+   "PASS",
+   "GET /training/stats",
+   "totals={'records': 10, 'materials': 10, 'feedback': 0, 'demo_materials': 10, 'goals': 1}"
+  ],
+  [
+   "PASS",
+   "GET /training/records 列表（隔离库）",
+   "status=200 total=10 items=10"
+  ],
+  [
+   "PASS",
+   "GET /training/export JSONL 可解析（messages 结构）",
+   "status=200 lines=10 valid_messages_samples=5"
+  ],
+  [
+   "PASS",
+   "GET /training/export 排除演示数据",
+   "status=200 chars=2"
+  ],
+  [
+   "PASS",
+   "POST /training/feedback 提交反馈",
+   "status=200 rating=1 tags=['清晰', '可操作']"
+  ],
+  [
+   "PASS",
+   "非法评分被拒绝（rating 仅 ±1）",
+   "status=422 detail={'detail': [{'type': 'literal_error', 'loc': ['body', 'rating'], 'msg': 'Input should be -1 or 1', '"
+  ],
+  [
+   "PASS",
+   "不存在的教程 -> 404",
+   "status=404"
+  ],
+  [
+   "PASS",
+   "GET /knowledge 概念已提取",
+   "concepts=2 relations=1 proposals=0"
+  ],
+  [
+   "PASS",
+   "GET /knowledge/graph 图谱",
+   "nodes=3 edges=1"
+  ],
+  [
+   "PASS",
+   "GET /knowledge/nav 导航",
+   "status=200 keys=['domains', 'totals']"
+  ],
+  [
+   "PASS",
+   "GET /knowledge/concepts/{id} 概念详情",
+   "title=准备与核心概念 mastery={'status': 'no_evidence', 'basis': '关联教程尚无实践尝试记录'}"
+  ],
+  [
+   "PASS",
+   "POST /knowledge/dedupe 去重",
+   "status=200 {'merged': 0, 'remaining_concepts': 2}"
+  ],
+  [
+   "PASS",
+   "POST /knowledge/concepts 手工创建概念",
+   "id=96252c1eba9e41caafc93ae9a5fd89aa"
+  ],
+  [
+   "PASS",
+   "POST /knowledge/relations 建立关系",
+   "status=200 {'id': 'd2c61bc0ca48418789018822703e7e14', 'from_concept_id': '96252c1eba9e41caafc93ae9a5fd89aa', 'to_concept_id': '90da"
+  ],
+  [
+   "PASS",
+   "DELETE /knowledge/concepts/{id}",
+   "status=200 {'ok': True, 'concept_id': '96252c1eba9e41caafc93ae9a5fd89aa', 'title': 'E2E 手工概"
+  ]
+ ]
+}

@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from app.learning.disciplines import get_profile
 from app.llm import prompts
 from app.services.format_specs import check_snapshot_delivery, delivery_contract_for_snapshot
+from app.services.utils import align_section_titles, prune_foreign_section_blocks
 from app.services.tutorials import _render_format_spec_document
 
 
@@ -291,6 +292,103 @@ def test_manual_spec_replaces_legacy_hard_constraint_structure(client: TestClien
     assert [item["title"] for item in content["outline"]] == ["训练"]
     assert content["delivery_contract"]["items"] == ["训练"]
     assert body["tutorial"]["title"] == "模板冲突验证 · 当前练习模板"
+
+
+def test_foreign_chapter_blocks_are_pruned_and_titles_aligned():
+    content = {
+        "format_spec": {"name": "试卷生成规范", "scene": "exam_paper", "deliverables": []},
+        "outline": [
+            {"title": "第一章　基础对标卷（一套）"},
+            {"title": "第二章　高难进阶卷（两套）"},
+            {"title": "第三章　试卷答案与难题简析"},
+        ],
+        "sections": [
+            {
+                "title": "线性代数期中冲刺（内容参考）",
+                "content": [
+                    {"type": "text", "title": "第一章　基础对标卷（一套）", "body": "第一章正文"},
+                    {"type": "text", "title": "第二章　高难进阶卷（两套）", "body": "第二章正文"},
+                    {"type": "text", "title": "## 第三章　试卷答案与难题简析", "body": "第三章正文"},
+                    {"type": "text", "title": "第三章 答案与难题简析", "body": "编号启发式应剔除"},
+                    {
+                        "type": "text",
+                        "title": "第一章　基础对标卷（一套）· 填空题答案",
+                        "body": "派生块应保留",
+                    },
+                ],
+            },
+            {"title": "第二章　高难进阶卷（两套）", "content": [{"type": "text", "title": "第一套", "body": "x"}]},
+            {"title": "第三章　试卷答案与难题简析", "content": [{"type": "text", "title": "对照方式", "body": "y"}]},
+        ],
+    }
+    fixed = align_section_titles(prune_foreign_section_blocks(content))
+    first = fixed["sections"][0]
+    titles = [b.get("title") for b in first["content"]]
+    assert first["title"] == "第一章　基础对标卷（一套）"
+    assert titles == ["第一章　基础对标卷（一套）", "第一章　基础对标卷（一套）· 填空题答案"]
+    # 答案章节保留跨章答案块
+    answer_titles = [b.get("title") for b in fixed["sections"][2]["content"]]
+    assert answer_titles == ["对照方式"]
+
+
+def test_export_uses_spec_renderer_for_authoritative_spec(client: TestClient):
+    import json as _json
+
+    from app.db import SessionLocal
+    from app.models import Tutorial, TutorialVersion
+    from app.services.tutorials import export_markdown
+
+    created = client.post(
+        "/api/goals",
+        json={"title": "导出渲染验证", "hard_constraints": "第一章只输出一套试卷"},
+    )
+    goal_id = created.json()["id"]
+    db = SessionLocal()
+    try:
+        tutorial = Tutorial(goal_id=goal_id, title="导出渲染验证 · 试卷生成规范", status="drafted")
+        db.add(tutorial)
+        db.flush()
+        content = {
+            "format_spec": {"name": "试卷生成规范", "scene": "exam_paper", "deliverables": []},
+            "delivery_contract": {"source": "format_spec", "items": ["第一章　基础对标卷（一套）"]},
+            "outline": [
+                {"title": "第一章　基础对标卷（一套）", "criteria_ids": []},
+                {"title": "第二章　高难进阶卷（两套）", "criteria_ids": []},
+            ],
+            "sections": [
+                {
+                    "title": "导出渲染验证",
+                    "content": [
+                        {"type": "text", "title": "第一章　基础对标卷（一套）", "body": "卷面正文"},
+                        {"type": "text", "title": "第二章　高难进阶卷（两套）", "body": "不该出现"},
+                    ],
+                    "key_takeaways": ["旧栏目"],
+                }
+            ],
+        }
+        version = TutorialVersion(
+            tutorial_id=tutorial.id,
+            version=1,
+            content_json=_json.dumps(content, ensure_ascii=False),
+            prompt_version="v1",
+            model_provider="demo",
+            model_name="demo",
+            quality_report="{}",
+            source_refs="[]",
+        )
+        db.add(version)
+        db.flush()
+        tutorial.current_version_id = version.id
+        db.commit()
+        name, md = export_markdown(db, tutorial.id)
+    finally:
+        db.close()
+
+    assert "## 第 1 节" not in md
+    assert "### 核心结论" not in md
+    assert "## 第一章　基础对标卷（一套）" in md
+    assert "不该出现" not in md
+    assert "卷面正文" in md
 
 
 def test_quickstart_exam_spec_binds_snapshot_and_contract_before_outline(client: TestClient):

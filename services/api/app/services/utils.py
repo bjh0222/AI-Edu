@@ -148,11 +148,14 @@ def add_usage(target: dict, prompt: int | None, completion: int | None, total: i
 
 
 def tutorial_version_dict(v) -> dict:
+    content = align_section_titles(
+        prune_foreign_section_blocks(jload(v.content_json, {"outline": [], "sections": []}))
+    )
     return {
         "id": v.id,
         "tutorial_id": v.tutorial_id,
         "version": v.version,
-        "content": jload(v.content_json, {"outline": [], "sections": []}),
+        "content": content,
         "prompt_version": v.prompt_version or "v1",
         "model_provider": v.model_provider or "demo",
         "model_name": v.model_name or "demo",
@@ -167,3 +170,115 @@ def tutorial_version_dict(v) -> dict:
         ),
         "created_at": v.created_at,
     }
+
+
+def _norm_ws(text: str) -> str:
+    """比较标题时忽略空格 / 全角空格差异（模型常把「　」写成「 」）。"""
+    return re.sub(r"\s+", "", str(text or ""))
+
+
+_CHAPTER_RE = re.compile(r"^第\s*([0-9一二三四五六七八九十]+)\s*[章节]")
+_ANSWERISH = ("答案", "简析", "解析", "判断")
+
+
+def _chapter_marker(text: str) -> str:
+    match = _CHAPTER_RE.match(str(text or "").strip())
+    return match.group(1) if match else ""
+
+
+def _block_targets_other_chapter(block: dict, others: set) -> bool:
+    """块标题或正文首行正好是其它大纲章节标题 → 模型把整篇文档写进了本节。"""
+    title = _norm_ws(re.sub(r"^#{1,6}\s*", "", str(block.get("title", "") or "")))
+    if title and title in others:
+        return True
+    first = next((ln.strip() for ln in str(block.get("body", "") or "").splitlines() if ln.strip()), "")
+    first = _norm_ws(re.sub(r"^#{1,6}\s*", "", first))
+    return bool(first) and first in others
+
+
+def _block_from_other_chapter(block: dict, own_marker: str) -> bool:
+    """非答案章节里，块标题以别的章节编号开头 → 属于其它章节的内容。"""
+    if not own_marker:
+        return False
+    title = re.sub(r"^#{1,6}\s*", "", str(block.get("title", "") or "").strip()).strip()
+    marker = _chapter_marker(title)
+    return bool(marker) and marker != own_marker
+
+
+def prune_foreign_section_blocks(content: dict) -> dict:
+    """删除误写入当前章节的其它章节整块内容；只按标题精确匹配，避免误伤派生块标题。"""
+    outline = content.get("outline") or []
+    sections = content.get("sections") or []
+    titles = [str(item.get("title", "")).strip() for item in outline if isinstance(item, dict)]
+    if not titles or not sections:
+        return content
+    for idx, section in enumerate(sections):
+        if not isinstance(section, dict):
+            continue
+        own = titles[idx] if idx < len(titles) else str(section.get("title", "")).strip()
+        others = {_norm_ws(t) for t in titles if t and _norm_ws(t) != _norm_ws(own)}
+        own_marker = "" if any(word in own for word in _ANSWERISH) else _chapter_marker(own)
+        blocks = section.get("content")
+        if not others or not isinstance(blocks, list):
+            continue
+        kept = [
+            b
+            for b in blocks
+            if not (
+                isinstance(b, dict)
+                and (
+                    _block_targets_other_chapter(b, others)
+                    or _block_from_other_chapter(b, own_marker)
+                )
+            )
+        ]
+        if len(kept) != len(blocks):
+            section["content"] = kept
+    return content
+
+
+def _spec_dict_is_authoritative(spec: dict) -> bool:
+    if not isinstance(spec, dict) or not str(spec.get("name", "")).strip():
+        return False
+    if str(spec.get("scene", "")) == "default_tutorial" and not (spec.get("deliverables") or []):
+        return False
+    return True
+
+
+def align_section_titles(content: dict) -> dict:
+    """规范接管结构时，章节标题以大纲（交付单元）为准，避免模型自拟整篇标题。"""
+    if not _spec_dict_is_authoritative(content.get("format_spec") or {}):
+        return content
+    titles = [
+        str(item.get("title", "")).strip()
+        for item in (content.get("outline") or [])
+        if isinstance(item, dict)
+    ]
+    for idx, section in enumerate(content.get("sections") or []):
+        if isinstance(section, dict) and idx < len(titles) and titles[idx]:
+            section["title"] = titles[idx]
+    return content
+
+
+def prune_section_foreign_blocks(section: dict, outline_titles: list) -> dict:
+    """单节版本：生成 / 重生成后立即剔除属于其它章节的整块内容。"""
+    own = str(section.get("title", "")).strip()
+    others = {_norm_ws(t) for t in outline_titles or [] if _norm_ws(t) and _norm_ws(t) != _norm_ws(own)}
+    own_marker = "" if any(word in own for word in _ANSWERISH) else _chapter_marker(own)
+    blocks = section.get("content")
+    if not others or not isinstance(blocks, list):
+        return section
+    kept = [
+        b
+        for b in blocks
+        if not (
+            isinstance(b, dict)
+            and (
+                _block_targets_other_chapter(b, others)
+                or _block_from_other_chapter(b, own_marker)
+            )
+        )
+    ]
+    if len(kept) != len(blocks):
+        section["content"] = kept
+    return section

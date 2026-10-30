@@ -674,7 +674,12 @@ def active_snapshot(goal) -> dict:
 def authoritative_snapshot(goal) -> dict:
     """真正接管模板的规范；默认教程规范继续走普通教程链路。"""
     snapshot = active_snapshot(goal)
-    if not snapshot:
+    return authoritative_spec_dict(snapshot)
+
+
+def authoritative_spec_dict(snapshot: dict) -> dict:
+    """dict 版本：判断一份快照是否真正接管模板。"""
+    if not isinstance(snapshot, dict) or not str(snapshot.get("name", "")).strip():
         return {}
     deliverables = snapshot.get("deliverables") or []
     if str(snapshot.get("scene", "")) == "default_tutorial" and not deliverables:

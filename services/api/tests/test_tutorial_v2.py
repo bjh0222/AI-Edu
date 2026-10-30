@@ -463,6 +463,43 @@ def test_normalize_obsidian_syntax_keeps_examples_but_disables_them():
     assert _active_tags(out) == []
 
 
+def test_expand_loose_list_spacing_restores_obsidian_gaps():
+    """Obsidian 阅读视图会压掉列表项间空行；导出需插入缩进 <br> 续行恢复间隔。"""
+    from app.services.tutorials import _expand_loose_list_spacing
+
+    NL = chr(10)
+    md = NL.join([
+        "一、填空题（共 6 题，80 分）",
+        "",
+        "1. 第一题内容。",
+        "",
+        "2. 第二题内容。",
+        "",
+        "- 无序条目一",
+        "",
+        "- 无序条目二",
+        "",
+        "普通段落，不应被插入。",
+        "",
+        "1. 紧凑列表第一项",
+        "2. 紧凑列表第二项",
+        "",
+        "```md",
+        "1. 代码块里的列表",
+        "",
+        "2. 不应处理",
+        "```",
+    ])
+    out = _expand_loose_list_spacing(md)
+    assert "1. 第一题内容。" + NL + "   <br>" + NL + NL + "2. 第二题内容。" in out
+    assert "- 无序条目一" + NL + "   <br>" + NL + NL + "- 无序条目二" in out
+    assert "普通段落，不应被插入。" + NL + NL + "1. 紧凑列表第一项" in out
+    assert "1. 紧凑列表第一项" + NL + "2. 紧凑列表第二项" in out
+    assert "1. 代码块里的列表" + NL + NL + "2. 不应处理" in out
+    # 幂等：重复处理不再叠加
+    assert _expand_loose_list_spacing(out) == out
+
+
 def test_section_prompt_forbids_tags_and_guesses(client):
     """章节提示词必须注入禁标签规则与确切的配套文件名。"""
     from app.llm.prompts import WIKILINK_RULE, section

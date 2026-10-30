@@ -442,6 +442,8 @@ def outline(goal, discipline, criteria_list, materials_text: str = "") -> tuple[
         task = (
             "\n任务：严格按当前格式规范生成内部交付结构。每个允许交付物对应一个 section，"
             "title 必须逐字使用该交付物名称；不得生成教程导学、知识讲解、复习总结、附录或其它章节。\n"
+            "若规范没有交付物清单，则按用户本次明确要求的交付单元拆分 section（例如每章试卷、"
+            "答案、判断题各一节）；每节只产出本节自己的内容，禁止提前写入其它节的内容。\n"
             "输出 JSON：{\"teaching_plan\": {\"rules_applied\": [], \"decisions\": [], "
             "\"task_overrides\": [], \"unresolved_conflicts\": []}, "
             "\"sections\": [{\"title\": str, \"purpose\": str, \"content_type\": \"application\", "
@@ -628,6 +630,7 @@ def section(
             f"{_retry_violation_block(retry_violations)}"
             f"{_truncation_block(truncated)}"
             "\n任务：直接生成当前交付物的成品，不得套用旧教程模板。\n"
+            "只输出当前交付物自己的内容；其它章节/交付物的内容一律不写，也不得提前给出后文的答案或题目。\n"
             "输出 JSON：{\"title\": str, \"purpose\": str, \"content_type\": \"application\", "
             "\"content\": [{\"type\": \"text|key_point|formula|steps|table|example|comparison|"
             "method_summary|diagram|memory|note\", \"title\": str, \"body\": str}], "
