@@ -5,18 +5,33 @@
 ## 1. 系统分层
 
 ```
-apps/web (Next.js App Router)
-   └─ features/* ── lib/api.ts ──► REST /api/*
-services/api (FastAPI)
-   ├─ api/        路由：请求校验、响应格式、错误语义
-   ├─ services/   业务：目标诊断、计划、验收、教程生成、反馈、评估、复盘、知识提议、答疑
-   ├─ learning/   通用学习引擎 + 学科配置（discipline profiles）
-   ├─ llm/        LLMProvider 抽象（真实调用 / 演示生成器）
-   ├─ models/     SQLAlchemy 实体
-   ├─ schemas/    Pydantic 请求/响应模型
-   ├─ repositories/ 数据访问（可选：v1 直接在 service 中使用 Session，保持简单）
-   └─ prompts/    提示词模板（按功能组织，版本化字段存在 PromptVersion 表或常量中）
+apps/web (Next.js 16 App Router + React 19 + Tailwind 4)
+   ├─ app/          路由页面：/ · /goals · /goals/[id](+5 个阶段子页) · /tutorials/[tid]
+   │                · /tutorials/[tid]/sections/[sid] · /knowledge · /training · /settings
+   ├─ components/   页面组件（goals/ · knowledge/ · ui.tsx · tutorial.tsx …）
+   └─ lib/          api.ts（同源 /api 客户端）· types.ts · goal-phases.ts（阶段单一事实来源）
+                    · job-poll.ts（生成任务轮询）· tutorial-continue.ts · theme.ts · format.ts
+        │
+        └─ 浏览器只请求同源 /api/*，由 next.config.ts rewrites 反向代理到 FastAPI
+           （需要直连其它后端时用 API_BACKEND_URL 改写目标）
+
+services/api (FastAPI + SQLAlchemy + SQLite)
+   ├─ api/          路由：请求校验、响应格式、错误语义（按资源分文件）
+   ├─ services/     业务：目标/诊断/计划/验收、教程生成、材料、格式规范、知识网络、
+   │                训练数据、用量统计、导入导出、实践/评估/复盘/答疑
+   ├─ learning/     学习引擎（engine.py 的 PHASES）· 学科画像 · 能力层级 · 生成挡位
+   │                · 教学画像（长期规则/交付契约）· 演示生成器
+   ├─ llm/          provider.py（OpenAI 兼容调用 + JSON 修复）· service.py（AIService：
+   │                调用/核验/记账）· prompts.py（全部提示词模板）
+   ├─ models.py     SQLAlchemy 实体（单文件，非 models/ 包）
+   ├─ schemas.py    Pydantic 请求/响应模型（单文件，非 schemas/ 包）
+   ├─ db.py         引擎/会话/轻量迁移（补列 + 补索引）
+   ├─ config.py     配置加载：相对路径一律锚定到 services/api（BACKEND_ROOT）
+   └─ model_settings.py  本地模型 profile（密钥只落 services/api/data/model-settings.json）
 ```
+
+没有 repositories/ 层：service 直接使用 SQLAlchemy Session（v1 刻意保持简单）。
+提示词版本记录在 `TutorialVersion.prompt_version`，没有独立的 PromptVersion 表。
 
 原则：UI 不直接调模型；密钥只在服务端；错误响应不含堆栈/密钥/内部提示词；关键写入可幂等重试。
 
@@ -46,11 +61,22 @@ services/api (FastAPI)
 
 辅助等级：A0 引导 / A1 协作 / A2 提示 / A3 独立验证（记录在 Attempt.help_level）。
 
-## 3. 学习状态机（v2.0 §5.1）
+## 3. 学习状态机（当前实现）
 
-`goal_definition → diagnosis → planning → acceptance_design → learning → practice → feedback → assessment → reflection → knowledge_update`
+五阶段单一流程，**教程学习是终点**：
 
-阶段存储在 `LearningGoal.status` 或计算得出；用户可回退；修改验收标准后标记受影响教程/评估「可能过期」。
+`goal_definition → diagnosis → planning → acceptance_design → learning`
+
+单一事实来源：后端 `app/learning/engine.py` 的 `PHASES`，前端 `apps/web/lib/goal-phases.ts`
+的 `GOAL_PHASES`（子路由 slug、阶段条、上一步/下一步导航都由它派生）。
+
+- 阶段存在 `LearningGoal.status`，由 `set_status_at_least` 单向推进（不会回退）。
+- 先定验收标准、再生成教程：确认后的标准进入教程大纲的验收映射，`check_structure` 做双向覆盖检查。
+- v2.0 方案里的 `practice / feedback / assessment / reflection / knowledge_update` 五个阶段
+  **已从用户流程中移除**（不再有对应子页）。其后端能力仍保留并可用
+  （`services/practice.py`、`api/practice.py`、`api/chat.py`，以及知识网络的 mastery 计算），
+  当前仅由知识网络页与 API 直接调用；`PHASE_LABELS` 保留旧阶段中文名，
+  让停留在旧状态的历史数据仍能正常显示徽章。
 
 ## 4. 学科配置（v2.0 §5.4/5.5）
 

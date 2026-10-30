@@ -9,6 +9,7 @@ from ..db import get_db
 from ..llm.provider import LLMError, OpenAICompatibleProvider
 from ..llm.service import AIService
 from ..models import LearningGoal, TrainingRecord
+from ..services.utils import jload
 
 
 def local_origin(request: Request):
@@ -123,7 +124,15 @@ def get_user_profile_suggestion(db: Session = Depends(get_db)):
             for g in goals
         ],
         "recent_feedback": [
-            {"rating": r.rating, "tags": r.tags, "comment": r.comment, "target_type": r.target_type}
+            {
+                "rating": r.rating,
+                "tags": r.tags,
+                "comment": r.comment,
+                # target_type 存在 context_json 里，不是 TrainingRecord 的列
+                # （见 services/training.py:submit_feedback）。直接取属性会 AttributeError
+                # → 500，让「用户画像建议」整块功能在完成第 10 个目标后彻底不可用。
+                "target_type": (jload(r.context_json, {}) or {}).get("target_type", "general"),
+            }
             for r in feedback
         ],
         "current_profile": str(store.read_config().get("user_profile", "")),

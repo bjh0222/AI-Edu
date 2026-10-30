@@ -184,8 +184,8 @@ export function useGoalWorkspace(goalId: string, slices: WorkspaceSlices): GoalW
   }, [goalId, slices]);
 
   useEffect(() => {
-    // 挂载时按 URL 拉取工作区数据；该规则对异步 setState 误报
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // 挂载时按 URL 拉取工作区数据。setState 发生在异步的 load() 内部、不在 effect 同步体里，
+    // 因此无需抑制 react-hooks/set-state-in-effect。
     load().catch((e) => {
       setError(errMsg(e));
       setLoading(false);

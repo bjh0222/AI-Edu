@@ -46,11 +46,17 @@ API 文档：http://127.0.0.1:8000/docs　健康检查：`GET /api/health`
 
 ```powershell
 cd apps/web
-npm install
-npm run dev
+pnpm install
+pnpm dev
 ```
 
 打开 http://127.0.0.1:3001
+
+> 前端实际用 **pnpm** 安装（仓库里 `apps/web/pnpm-lock.yaml` 为准，`node_modules` 也是 pnpm 结构）。
+> 仓库同时保留了 `package-lock.json`，两者当前都与 `package.json` 同步；
+> 但不要在同一份 `node_modules` 上混用 `npm install` 与 `pnpm install`——
+> 两种管理器的目录布局不同，混用会得到一棵彼此「invalid」的依赖树。
+> 若要用 npm，先删掉 `node_modules` 再 `npm install`。
 
 ### 3. 模型配置
 

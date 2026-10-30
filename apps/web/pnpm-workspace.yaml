@@ -1,2 +1,7 @@
 allowBuilds:
-  unrs-resolver: set this to true or false
+  # unrs-resolver 是 eslint 的原生模块解析器。它的安装脚本在本项目中一直是被跳过的
+  # （pnpm 默认不跑依赖的 build script），而 lint / tsc / next build 全部正常通过，
+  # 所以这里显式记为 false：保持既有行为，同时消掉每次 install 都报的
+  # ERR_PNPM_IGNORED_BUILDS（此前这里是一句没填的占位符 "set this to true or false"，
+  # pnpm 读到非法值就会中断安装）。若将来确认需要其原生构建产物，改成 true 即可。
+  unrs-resolver: false

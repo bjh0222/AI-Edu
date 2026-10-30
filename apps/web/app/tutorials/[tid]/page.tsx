@@ -59,8 +59,7 @@ function TutorialDetail() {
   }, [tutorialId]);
 
   useEffect(() => {
-    // 首次进入按 URL 拉取教程；该规则对异步 setState 误报
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // 首次进入按 URL 拉取教程。setState 在异步 load() 内部、不在 effect 同步体里，无需抑制规则。
     load().catch((e) => setError(errMsg(e)));
   }, [load]);
 

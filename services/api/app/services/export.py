@@ -78,7 +78,14 @@ def export_data(db: Session) -> dict:
 
 
 def _backup_path() -> Path:
-    base = Path("data") / "backups"
+    """导入前的兜底备份路径。
+
+    必须用 settings.backup_dir：它已锚定到后端目录。此前这里写的是相对 CWD 的
+    Path("data") / "backups"，从仓库根启动就把备份写到仓库根的 data/backups，
+    与 goals_service.purge_goal 用的 settings.backup_dir 分家（仓库根那个 data/
+    目录里躺着一个 0 字节 aiedu.db 和 20 份孤儿备份，就是这么来的）。
+    """
+    base = Path(settings.backup_dir)
     base.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     return base / f"aiedu-backup-{stamp}.json"

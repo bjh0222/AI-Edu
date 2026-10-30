@@ -385,7 +385,8 @@ class ModelCallLog(Base):
     completion_tokens = Column(Integer, default=0)
     total_tokens = Column(Integer, default=0)
     usage_source = Column(String(20), default="")  # provider / estimated
-    created_at = Column(String(40), default=lambda: _now().isoformat())
+    # 同 TrainingRecord：goal_usage 按 created_at 聚合，建索引避免磁盘 TEMP B-TREE
+    created_at = Column(String(40), default=lambda: _now().isoformat(), index=True)
 
 
 class TrainingRecord(Base):
@@ -412,4 +413,9 @@ class TrainingRecord(Base):
     tags = Column(Text, default="[]")
     comment = Column(Text, default="")
     context_json = Column(Text, default="{}")
-    created_at = Column(String(40), default=lambda: _now().isoformat())
+    # 排序键必须建索引：训练数据列表 / 导出都按 created_at 排序，而 system_prompt /
+    # output_text 单行就有几万字。没有索引时 SQLite 会把整表连同大字段一起塞进
+    # 磁盘 TEMP B-TREE 再排序，一旦临时文件目录不可写就整条查询 500
+    # （sqlite3.OperationalError: unable to open database file）。有索引则走索引序，
+    # 不产生临时文件，分页也从「全表排序」变成 O(limit)。
+    created_at = Column(String(40), default=lambda: _now().isoformat(), index=True)

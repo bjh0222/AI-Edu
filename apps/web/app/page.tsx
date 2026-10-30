@@ -54,12 +54,15 @@ export default function Home() {
   useEffect(() => {
     (async () => {
       try {
-        const [g, h, k, setting, suggestionData] = await Promise.all([
+        // 不在这里拉「画像建议」：该建议只在「用户画像」弹窗里展示，点开时由
+        // loadSuggestion() 拉取。而 GET /user-profile-suggestion 在达标（每完成 10 个目标）
+        // 时会真的调一次模型生成建议——放在挂载阶段等于每次打开首页都白烧一次 token，
+        // 且返回值此前被解构成 suggestionData 后直接丢弃，从未 setSuggestion。
+        const [g, h, k, setting] = await Promise.all([
           api.get<Goal[]>("/api/goals"),
           api.get<Health>("/api/health"),
           api.get<Knowledge>("/api/knowledge"),
           api.get<{ user_profile: string }>("/api/settings/models"),
-          api.get<ProfileSuggestionState>("/api/settings/models/user-profile-suggestion").catch(() => null),
         ]);
         setGoals(g);
         setHealth(h);
@@ -85,7 +88,14 @@ export default function Home() {
 
 
   const loadSuggestion = async () => {
-    setSuggestion(await api.get<ProfileSuggestionState>("/api/settings/models/user-profile-suggestion"));
+    // 调用方是 void loadSuggestion()：这里必须自己兜住异常，否则模型生成建议失败时
+    // 会变成未处理的 Promise rejection，弹窗既不显示建议也不提示原因。
+    try {
+      setSuggestion(await api.get<ProfileSuggestionState>("/api/settings/models/user-profile-suggestion"));
+    } catch (e) {
+      setSuggestion(null);
+      setProfileError(e instanceof Error ? e.message : String(e));
+    }
   };
 
   const dismissSuggestion = async () => {

@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator
 
-from .config import settings
+from .config import BACKEND_ROOT, settings
 
 _lock = threading.RLock()
 
@@ -44,7 +44,16 @@ class ModelProfile(BaseModel):
 
 
 def config_path() -> Path:
-    return Path(os.getenv("MODEL_SETTINGS_FILE", "data/model-settings.json"))
+    """模型配置文件路径。
+
+    相对路径锚定到后端目录，而不是进程工作目录：config.py 已经把数据库、材料、备份
+    目录都锚定了，唯独这里漏了。从仓库根启动后端时，已保存的模型配置会「凭空消失」
+    （read_config 读不到文件 → 回落到 .env 里那一组 → 用户在网页上配的其它 profile
+    连同用户画像一起看不到），而 write_config 又会把新文件写到仓库根，配置就此分裂成两份。
+    """
+    raw = os.getenv("MODEL_SETTINGS_FILE", "data/model-settings.json")
+    path = Path(raw)
+    return path if path.is_absolute() else (BACKEND_ROOT / path).resolve()
 
 
 def read_config() -> dict:

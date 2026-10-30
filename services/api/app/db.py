@@ -1,6 +1,7 @@
 """数据库：引擎 / 会话 / 初始化。"""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from sqlalchemy import create_engine, event
@@ -50,6 +51,44 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _migrate_sqlite_columns()
+    _migrate_sqlite_indexes()
+
+
+def _migrate_sqlite_indexes() -> None:
+    """轻量迁移：为已存在的 SQLite 表补上模型里声明的索引。
+
+    create_all 只建缺失的表，对已存在的表既不补列也不补索引，所以老库拿不到后来
+    新增的 index=True。缺索引不只是慢：按未建索引的 created_at 排序时，SQLite 要把
+    整表（含 system_prompt / output_text 这类几万字的大字段）写进磁盘 TEMP B-TREE，
+    临时目录不可写就整条查询报 "unable to open database file" 并 500。
+
+    用 SQLAlchemy 自己的 CreateIndex 编译 DDL，而不是手拼字符串：部分索引
+    （format_specs 的 uq_format_specs_default 带 WHERE is_default = 1）手拼会丢掉
+    WHERE 谓词，把「只能有一个默认规范」的唯一约束悄悄放宽成全表唯一。
+
+    CREATE INDEX IF NOT EXISTS 只读原表、不排序溢出，可重复执行。单个索引失败只记日志
+    （例如老库里已有违反唯一谓词的脏数据），不阻塞启动。
+    """
+    if not _is_sqlite:
+        return
+    from sqlalchemy.schema import CreateIndex
+
+    logger = logging.getLogger("aiedu")
+    with engine.begin() as conn:
+        existing_tables = {
+            row[0]
+            for row in conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue
+            for index in table.indexes:
+                if not index.columns:
+                    continue
+                try:
+                    conn.execute(CreateIndex(index, if_not_exists=True))
+                except Exception as exc:  # noqa: BLE001  补索引失败不阻塞启动
+                    logger.warning("补建索引失败：%s.%s：%s", table.name, index.name, exc)
 
 
 def _migrate_sqlite_columns() -> None:

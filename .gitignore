@@ -15,10 +15,21 @@ build/
 
 # runtime data
 *.db
+# SQLite WAL / 共享内存边车文件：此前 debug_format2.db-shm/.db-wal 就是因为 *.db
+# 匹配不到这两个后缀而被误提交进仓库的（二进制、每次运行都变，属于纯噪音）。
+*.db-shm
+*.db-wal
+*.db-journal
 *.sqlite3
 data/
 services/api/tests/test_materials/
 services/api/tests/test_backups/
+services/api/tests/test_model_settings.json
+services/api/tests/test_aiedu.db*
+# pip 中断留下的临时目录（pip-build-tracker-* / pip-install-* / pip-ephem-wheel-cache-*）
+services/api/pip-*/
+# 本地调试用的临时库
+services/api/debug_*.db*
 logs/
 *.log
 
@@ -32,5 +43,8 @@ logs/
 Thumbs.db
 .vscode/
 .idea/
-services/api/pip-*/
 apps/web/.next/
+apps/web/tsconfig.tsbuildinfo
+
+# 审计 / 实测用的临时工作区（隔离数据库、浏览器脚本、截图、迁移前备份）
+.audit/

@@ -19,7 +19,7 @@ if (-not (Test-Path $py)) {
 }
 if (-not (Test-Path (Join-Path $frontendDir "node_modules"))) {
     Write-Host "[错误] 前端依赖未安装：$frontendDir\node_modules" -ForegroundColor Red
-    Write-Host "      请先在 apps/web 下执行：npm install"
+    Write-Host "      请先在 apps/web 下执行：pnpm install（本仓库前端用 pnpm，勿与 npm 混用）"
     exit 1
 }
 

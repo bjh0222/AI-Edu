@@ -17,7 +17,7 @@ import {
 import { Badge, Button } from "@/components/ui";
 import { useGoalWorkspace, type GoalWorkspaceState, type WorkspaceSlices } from "./useGoalWorkspace";
 
-/** 单阶段页面的统一外壳：面包屑 / 标题 / 十步导航 / 提示条 / 上一步下一步。 */
+/** 单阶段页面的统一外壳：面包屑 / 标题 / 阶段导航 / 提示条 / 上一步下一步。 */
 export function GoalPhaseView({
   phase,
   slices,
@@ -197,7 +197,8 @@ export function GoalStatusBadge({ goal, currentPhaseKey }: { goal: Goal; current
   );
 }
 
-/** 十步阶段条：可点击跳转，已到达的阶段高亮；当前阶段 aria-current="page"。 */
+/** 阶段条：可点击跳转，已到达的阶段高亮；当前阶段 aria-current="page"。
+ *  阶段数由 GOAL_PHASES 决定（当前五阶段），不写死数字，避免流程调整后再次与注释不符。 */
 export function PhaseStepper({
   goalId,
   currentSlug,
@@ -208,7 +209,7 @@ export function PhaseStepper({
   goalStatus: string;
 }) {
   return (
-    <nav aria-label="学习目标十项流程" className="mt-4 mb-5">
+    <nav aria-label={`学习目标流程（共 ${GOAL_PHASES.length} 个阶段）`} className="mt-4 mb-5">
       <ol className="flex flex-wrap gap-1.5">
         {GOAL_PHASES.map((phase, index) => {
           const active = phase.slug === currentSlug;
