@@ -15,6 +15,7 @@ import re
 from ..learning.generation_tiers import tier_prompt_block, tier_system
 from ..learning.levels import level_prompt_block
 from ..services.utils import jload, safe_obsidian_filename
+from ..services import format_specs as format_specs_service
 from ..learning.teaching_profile import (
     RULE_LABELS,
     delivery_contract,
@@ -48,6 +49,16 @@ SYSTEM = (
 # Obsidian 双链说明：正文只允许用 [[文件名]] 指向本次生成集合内的配套文件。
 # 模型此前会写出 [[...]]、[[目标]]、[[笔记名]] 这类占位/虚构链接，交付到 Vault 后全部是断链；
 # 这里把「可链接对象」和「写法」都收紧，语法示例必须放进行内代码或代码块。
+# 设计之初的固定栏目与「练习册外壳」元栏目已全部退役：它们不是教学内容，
+# 模型却会把它们当成模板逐章复述（使用说明 / 做题方式 / 自检清单 / 核心结论 …）。
+# 这里集中声明禁令，legacy 与规范两条 section 提示词路径共用。
+_NO_META_SECTIONS = (
+    "禁止元栏目（以下都不是教学内容，不得作为块标题或正文小标题出现，也不得变相改写后出现）：\n"
+    "- 使用说明 / 做题方式 / 如何使用本教程 / 自检清单 / 怎么用这套题判断「真的会了」；\n"
+    "- 核心结论 / 常见错误 / 前置知识 / 必要练习 / 对应验收标准 / 来源 / 引用列表；\n"
+    "- 读者确需的使用提示，用一句话写进相关内容的引子或题干里，不单独成节。\n"
+)
+
 WIKILINK_RULE = (
     "Obsidian 双链使用规则（严格）：\n"
     "- 只有本次同时生成的配套文件才能作为双链目标，且只能写 [[文件名]] 这一种形式；\n"
@@ -261,6 +272,44 @@ def _capability(goal) -> str:
     return level_prompt_block(getattr(goal, "capability_level", None))
 
 
+_CLAUSE_SPLIT = re.compile(r"[，,；;。]")
+_CLAUSE_PREFIX = re.compile(r"^\s*(?:\d+\s*[、.．)]\s*)?")
+
+
+def _content_clauses(text: str, legacy_structure: "re.Pattern[str]") -> list[str]:
+    """按小句（而不是整行）过滤旧结构约定，保留同一行里的内容要求。
+
+    用户常把结构要求与内容要求写在同一句里，例如：
+    「按参考材料的分章，为每一个章节生成单元检测卷，题量不限，要求知识点全覆盖」。
+    整行丢弃会连带丢掉「题量不限 / 知识点全覆盖 / 难度拔高」这些真正约束内容的部分，
+    模型于是只知道要出一份卷子，不知道要覆盖到什么程度。
+    结构要求本身不再靠提示词表达：它已由规范快照的交付物清单（含按章拆分）确定性落实。
+    """
+    kept: list[str] = []
+    for line in str(text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if not legacy_structure.search(line) and not re.search(
+            r"只(?:输出|包括).*(?:试卷|答案|解析|章节)", line
+        ):
+            kept.append(line)
+            continue
+        clauses = [
+            _CLAUSE_PREFIX.sub("", piece).strip()
+            for piece in _CLAUSE_SPLIT.split(line)
+        ]
+        for clause in clauses:
+            if len(clause) < 2:
+                continue
+            if legacy_structure.search(clause):
+                continue
+            if re.search(r"只(?:输出|包括).*(?:试卷|答案|解析|章节)", clause):
+                continue
+            kept.append(clause)
+    return kept
+
+
 def _hard_constraints_section(goal) -> str:
     """本次目标用户填写的「硬性约束」注入块：所有生成阶段共用。
 
@@ -278,13 +327,9 @@ def _hard_constraints_section(goal) -> str:
             r"模板|排版|章节|第\s*[一二三四五六七八九十\d]+\s*章|模块|栏目|目录|"
             r"标题|格式|易错辨析|知识概要|知识速查|附加|附带|不要.*(?:教学|建议|信息)"
         )
-        content_lines = [
-            line.strip()
-            for line in text.splitlines()
-            if line.strip()
-            and not legacy_structure.search(line)
-            and not re.search(r"只(?:输出|包括).*(?:试卷|答案|解析|章节)", line)
-        ]
+        # 按小句过滤：同一行里的内容要求（题量、覆盖范围、难度）不能因为夹带
+        # 「章节」等结构字样就整行丢弃，否则模型只知道要出卷、不知道要出到什么程度。
+        content_lines = _content_clauses(text, legacy_structure)
         if not content_lines:
             return ""
         content_block = "\n".join(f"- {line}" for line in content_lines)
@@ -319,17 +364,47 @@ def _materials_section(materials_text: str) -> str:
     )
 
 
+def _is_guidance_goal(goal) -> bool:
+    """目标绑定的快照是否是指导型规范（教程族）。"""
+    from ..services.utils import is_guidance_snapshot
+
+    return is_guidance_snapshot(jload(getattr(goal, "format_spec_snapshot", "") or "", {}))
+
+
+def _is_reading_guide_goal(goal) -> bool:
+    """目标绑定的快照是否是阅读教程规范（scene == reading_guide）。
+
+    与「教程族」并列但**刻意独立**：阅读规范不进 utils.GUIDANCE_SCENES（进了会让
+    authoritative_spec_dict 对无交付物的它返回 {}，节标题就不再被强制对齐成大纲章名，
+    而按章注入依赖可靠的章名）。它只在这里、章节范围声明、两阶段生成三处被单独放行。
+    """
+    return format_specs_service.is_reading_guide(
+        jload(getattr(goal, "format_spec_snapshot", "") or "", {})
+    )
+
+
 def _format_spec_block(stage: str, goal, deliverable: str | None = None) -> str:
     """按阶段注入格式规范；不把自由 Markdown 和全部模板重复塞进每次调用。"""
     spec = jload(getattr(goal, "format_spec_snapshot", "") or "", {})
     if not isinstance(spec, dict) or not spec.get("name"):
         return ""
 
-    lines = [
-        f"本次格式规范（冻结快照，结构、排版和交付物唯一依据）：{spec.get('name', '')}",
-        "优先级：本规范 > 旧任务约定中的格式要求 > 长期画像中的教学偏好。"
-        "不得把旧模板的标题、章节、栏目或排版与当前规范拼接使用。",
-    ]
+    from ..services.utils import is_guidance_snapshot
+
+    guidance = is_guidance_snapshot(spec)
+    if guidance:
+        # 指导型规范（教程族）：只约束写法与质量，不接管章节数与章节标题；
+        # 章节结构由大纲模型按知识逻辑决定（否则会把教程写成固定模板）。
+        lines = [
+            f"本次格式规范（写法与质量的唯一依据，不决定章节数与章节标题）：{spec.get('name', '')}",
+            "优先级：本规范 > 旧任务约定中的格式要求 > 长期画像中的教学偏好。",
+        ]
+    else:
+        lines = [
+            f"本次格式规范（冻结快照，结构、排版和交付物唯一依据）：{spec.get('name', '')}",
+            "优先级：本规范 > 旧任务约定中的格式要求 > 长期画像中的教学偏好。"
+            "不得把旧模板的标题、章节、栏目或排版与当前规范拼接使用。",
+        ]
     if stage in {"plan", "outline", "criteria"}:
         if spec.get("output_goal"):
             lines.append(f"输出目标：{spec['output_goal']}")
@@ -349,7 +424,16 @@ def _format_spec_block(stage: str, goal, deliverable: str | None = None) -> str:
     if stage == "criteria" and spec.get("acceptance_criteria"):
         lines.append(f"规范验收条件：\n{spec['acceptance_criteria']}")
     if stage in {"outline", "section"} and spec.get("content_structure"):
-        lines.append(f"内容结构：\n{spec['content_structure']}")
+        # content_structure 是结构模板的唯一来源；reference_examples 只作排版对照示例，
+        # 不参与结构，避免两个模板字段同时生效时模型不知道听谁的。
+        cs = str(spec["content_structure"])
+        if guidance and stage == "outline":
+            # 指导型规范：outline 只要「章级规则」（分章与章节顺序），不要节内模板，
+            # 否则大纲模型会把「本章导入 / 核心概念」当成章名。
+            cs = cs.split("【节内结构")[0].rstrip()
+        lines.append(f"内容结构：\n{cs}")
+        if (not guidance or stage == "section") and str(spec.get("reference_examples", "") or "").strip():
+            lines.append(f"排版正反例（只约束写法，不改变上面的结构）：\n{spec['reference_examples']}")
     if stage in {"outline", "section"} and spec.get("forbidden_rules"):
         lines.append(f"禁止内容：\n{spec['forbidden_rules']}")
     if stage == "outline" and spec.get("custom_markdown"):
@@ -359,7 +443,7 @@ def _format_spec_block(stage: str, goal, deliverable: str | None = None) -> str:
             lines.append(f"目标受众：{spec['target_reader']}")
         for key in ("format_rules", "required_rules", "suggested_rules", "flexible_rules"):
             if spec.get(key):
-                lines.append(f"{key}：\n{spec[key]}")
+                lines.append(f"{key}：\n{str(spec[key]).strip()}")
         if spec.get("custom_markdown"):
             lines.append(f"自定义补充规则：\n{spec['custom_markdown']}")
         if stage == "section" and spec.get("acceptance_criteria"):
@@ -372,7 +456,8 @@ def _format_spec_block(stage: str, goal, deliverable: str | None = None) -> str:
             "- title 必须严格使用当前交付物名称，不得改写成教程章节标题；\n"
             "- 不要在 content 的 body 中重复输出当前交付物标题、文档级 H1、目录、“第 N 节”或教程外壳；\n"
             "- body 直接写该交付物的 Markdown 成品；内部小标题从 ### 开始；\n"
-            "- 不要为了套用旧教学模板而增加总览、核心结论、前置知识、必要练习、来源或验收标准栏目。"
+            "- 不要为了套用旧教学模板而增加总览、核心结论、前置知识、必要练习、来源或验收标准栏目；\n"
+            "- 不要输出使用说明、做题方式、自检清单一类元栏目；使用提示一句话并入相关引子。"
         )
     return "\n" + "\n".join(lines) + "\n"
 
@@ -442,13 +527,21 @@ def outline(goal, discipline, criteria_list, materials_text: str = "") -> tuple[
         task = (
             "\n任务：严格按当前格式规范生成内部交付结构。每个允许交付物对应一个 section，"
             "title 必须逐字使用该交付物名称；不得生成教程导学、知识讲解、复习总结、附录或其它章节。\n"
-            "若规范没有交付物清单，则按用户本次明确要求的交付单元拆分 section（例如每章试卷、"
-            "答案、判断题各一节）；每节只产出本节自己的内容，禁止提前写入其它节的内容。\n"
-            "输出 JSON：{\"teaching_plan\": {\"rules_applied\": [], \"decisions\": [], "
+            + (
+                "若规范没有交付物清单，则按规范的分章规则与知识自身逻辑拆分 section（教程类规范："
+                "一章一节，章名即 section 标题）；每节只产出本节自己的内容，禁止提前写入其它节的内容。\n"
+                if (_is_guidance_goal(goal) or _is_reading_guide_goal(goal))
+                else "若规范没有交付物清单，则按用户本次明确要求的交付单元拆分 section（例如每章试卷、"
+                "答案、判断题各一节）；每节只产出本节自己的内容，禁止提前写入其它节的内容。\n"
+            )
+            + "输出 JSON：{\"teaching_plan\": {\"rules_applied\": [], \"decisions\": [], "
             "\"task_overrides\": [], \"unresolved_conflicts\": []}, "
             "\"sections\": [{\"title\": str, \"purpose\": str, \"content_type\": \"application\", "
             "\"summary\": str, \"criteria_ids\": [str]}]}。\n"
             "purpose 只说明该交付物用途；criteria_ids 使用给定验收标准 id。\n"
+            "篇幅纪律：rules_applied / decisions 每条不超过 60 字、合计不超过 8 条；"
+            "purpose / summary 各不超过 40 字；整份 JSON 控制在 1500 字以内，"
+            "确保单次输出不被截断（截断会导致整份 JSON 无法解析、本次生成作废）。\n"
         )
     else:
         task = ""
@@ -562,13 +655,98 @@ _TEACHING_TASK = (
     "常见失败原因与排查（形成「需求 → 功能 → 入口 → 使用方法 → 结果检查」的完整链路）；\n"
     "- 事实与记忆：区分「必须记住 / 理解后使用 / 知道在哪查 / 靠练习熟练」，不要都变成背诵任务；\n"
     "- 综合应用：真实任务 → 知识与方法组合 → 关键决策及依据 → 完整过程 → 结果检查与适用范围。\n\n"
-    "例题与练习（克制原则）：\n"
+    "例题（克制原则）：\n"
     "- 数量由知识难度、教学需要与能力层级决定，不设固定数量；没有教学价值就不加；\n"
     "- 例题优先选有代表性、信息密度高的；篇幅与其教学价值相称，不得挤占核心讲解；\n"
     "- 方法性例题体现方法选择与关键决策，不只要计算过程；工具操作用简短真实可执行的示例；\n"
-    "- exercises 只放验证核心方法所必需的必要练习；更大量的巩固练习由独立的额外练习文件承载（不由本章生成）。\n"
+    "- 巩固练习由独立的额外练习文件承载（不由本章生成）；正文不设练习栏目。\n"
     "不要把完整教学规划过程写进输出；输出即教程正文本身。\n\n"
+    + _NO_META_SECTIONS + "\n"
 )
+
+
+_CHAPTER_DELIVERABLE_RE = re.compile(
+    r"^\s*(第\s*[0-9一二三四五六七八九十]+\s*章)"        # 章号
+    r"\s*([^（(]*?)"                                        # 章名
+    r"\s*(?:单元检测卷|单元测验卷|单元试卷|检测卷|测验卷|测试卷|自测卷|模拟卷|练习卷|试卷)?$"
+)
+
+
+def _chapter_scope_block(deliverable: str, reading_guide: bool = False) -> str:
+    """按章交付时的范围声明：只覆盖本章、只取材本章。
+
+    交付物名形如「第 3 章 矩阵 单元检测卷」；范围里只保留章号与章名，
+    否则模型会把「单元检测卷」当成要覆盖的知识点。
+
+    ``reading_guide`` 为真时用导读版措辞。**这不是文风偏好，是语义相反**：
+    试卷 / 练习要「不得跨章综合」（每章自成一卷，跨章就泄题）；
+    而阅读导读的规范明确要求「思想关联：与其他章节的关联」「识别不同章节之间的
+    思想联系，尤其是跨章节的概念和论证」—— 直接照搬「不得跨章综合」会把规范
+    自己定义的核心能力禁掉。
+    """
+    match = _CHAPTER_DELIVERABLE_RE.match(str(deliverable or "").strip())
+    if not match:
+        return ""
+    chapter = f"{match.group(1)} {match.group(2)}".strip()
+    if not match.group(2).strip():
+        chapter = match.group(1).strip()
+    if reading_guide:
+        return (
+            f"本次范围：只导读「{chapter}」这一章。\n"
+            f"- 原文摘录、概念详解、论证分析与难点辨析只能取材于材料中该章的正文；\n"
+            "- 需要指出与其它章节的思想联系时，只写「与第 N 章的 X 概念相关」这类定位性提示，\n"
+            "  不展开讲解其它章的内容，也不替其它章下结论（那是那一节自己的任务）；\n"
+            "- 全书层面的评价（思想史地位、学界争鸣、总体贡献）留给全书层章节，本节不写。\n"
+        )
+    return (
+        f"本次范围：只覆盖「{chapter}」这一章。"
+        "命题只能取材于材料中该章（含其各节习题）涉及的知识点；"
+        "其它章节的内容一律不得出现在本节，也不得跨章综合。\n"
+    )
+
+
+# 试卷类交付物的名词判据：直接复用 format_specs._UNIT_NOUN_RE，只有一处词表。
+# 卷面自检、按章「自成一卷」、_deliverable_task 三处都靠它识别「这一节是不是一份卷」。
+# 曾在本文件另写一份「试卷|练习卷|训练卷|测验|检测卷」，漏了「模拟卷」「自测卷」，
+# 于是这两类合法卷名会静默丢掉卷面自检（题号重置、声明题量与实际不符无人管）。
+# 追加「训练卷」「测验」是为了兼容旧卷名；「单元卷」这类裸词不在词表里，规范不得允许。
+_EXAM_NOUN_RE = re.compile(format_specs_service._UNIT_NOUN_RE.pattern + r"|训练卷|测验")
+
+
+def _exam_self_check() -> str:
+    """试卷类交付物的确定性自检要求（两条提示词路径共用）。
+
+    实测发现模型会在「试卷说明」里声明 20 题却写出 25 题，或每个题型都从 1 重新
+    编号，导致答案区题号与题面对不上。这类错误无法靠渲染层修复，只能在出题时约束。
+    """
+    return (
+        "卷面自检（必须满足，否则本卷不可用）：\n"
+        "1. 题号在全卷内连续递增，从 1 开始；不得在每个题型重新从 1 开始编号；\n"
+        "2. 卷面说明里声明的总题数、各题型题数与分值之和，必须与实际写出的题目数量和分值完全一致；\n"
+        "3. 先确定题量与分值再落笔，写完逐条核对上述两项，不要出现「声明 20 题、实际 25 题」的情况；\n"
+        "4. 参考答案按题号一一对应，不缺题、不串号；\n"
+        "5. 分值之和必须等于卷面声明的满分；\n"
+        r"6. 数学表达式一律使用 LaTeX，且分隔符只用 $...$（行内）与 $$...$$（独立成行）；"
+        r"禁止使用 \(...\) 与 \[...\] 这两种反斜杠分隔符（Obsidian 会把反斜杠当转义吃掉，公式无法渲染）。"
+        "禁止用 Unicode 数学字符代替公式（如 ℝ、ℕ、ⁿ、ᵀ、⁻¹、∈、∪、∩、⊆、×、≤、≠、∅），"
+        "矩阵用 \\begin{pmatrix}…\\end{pmatrix}，分式用 \\dfrac{…}{…}；\n"
+        "7. 全卷数学风格必须一致：不得一部分章节用 LaTeX、另一部分用 Unicode 字符。"
+    )
+
+
+def _self_contained_paper_block() -> str:
+    """按章交付的单元卷是「自成一卷」的成品：卷末必须自带参考答案。
+
+    与交付物清单里单列「参考答案」的试卷规范不同：按章拆分后每章就是一份独立可自测的
+    卷子，没有配套的答案交付物。实测 7 章里有 6 章自带答案、1 章不带，同一份文档内
+    形态不一致，所以这里明确要求统一形态，而不是留给模型逐章随机决定。
+    """
+    return (
+        "本卷是自成一卷的成品（没有单独的答案交付物），因此卷末必须附「参考答案」小节：\n"
+        "- 覆盖全部题号，选择题给出正确项，判断题给出对错，解答/计算/综合题给出关键步骤与结论；\n"
+        "- 答案区不得遗漏任何一题，题号与题面一一对应；\n"
+        "- 答案只在卷末集中给出，题面部分不得夹带答案、提示或解题过程。\n"
+    )
 
 
 def _deliverable_task(deliverable: str) -> str:
@@ -582,15 +760,17 @@ def _deliverable_task(deliverable: str) -> str:
         shape = "只输出规定范围内的难题解析，不写泛化复习建议，不扩写成教程。"
     elif "分析" in deliverable:
         shape = "只给简要分析（结构、考点分布、难度分布），不展开教学原理。"
-    elif re.search(r"试卷|练习卷|训练卷|测验", deliverable):
+    elif re.search(_EXAM_NOUN_RE, deliverable):
         shape = (
             "先给卷面说明（时长、满分、题型与分值分布），再给完整可做的题面与作答区；"
-            "题目可独立判分；不写答案、解析或旧模板要求的其它栏目。"
+            "题目可独立判分；不写答案、解析或旧模板要求的其它栏目。\n"
+            + _exam_self_check()
         )
     else:
         shape = "按这一项在真实场景里的形态直接组织成品，不写成关于它的教程。"
     return (
         f"任务：本次要交付的是成品「{deliverable}」，不是教学讲解章节。\n"
+        f"{_chapter_scope_block(deliverable)}"
         f"{shape}\n"
         "禁止：写教学讲解、知识梳理、方法归纳、复习总结；写交付清单以外的内容。\n"
         "content 块只是渲染容器：用 text 写卷面说明、用 table 排分值分布或答题区、用 example 放题面，"
@@ -617,10 +797,18 @@ def section(
         section_deliverable = str(
             deliverable or (outline_item.get("title", "") if isinstance(outline_item, dict) else "")
         ).strip()
+        # 试卷类交付物追加卷面自检要求（规范模式的提示词路径不经过 _deliverable_task）
+        is_exam_paper = bool(re.search(_EXAM_NOUN_RE, section_deliverable))
+        exam_self_check_block = _exam_self_check() + "\n" if is_exam_paper else ""
+        # 按章拆分时每章自成一卷（无单独的答案交付物）：卷末必须自带参考答案
+        snapshot_spec = jload(getattr(goal, "format_spec_snapshot", "") or "", {})
+        if is_exam_paper and isinstance(snapshot_spec, dict) and snapshot_spec.get("chapter_split"):
+            exam_self_check_block += _self_contained_paper_block()
         user = (
             f"学科：{discipline.display_name}\n"
             f"学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
             f"当前交付物：{section_deliverable or '按格式规范生成'}\n"
+            f"{_chapter_scope_block(section_deliverable, format_specs_service.is_reading_guide(snapshot_spec))}"
             f"本章大纲：{json.dumps(outline_for_prompt, ensure_ascii=False)}\n"
             f"相关验收标准：{json.dumps(criteria_list, ensure_ascii=False)}\n"
             f"{_hard_constraints_section(goal)}"
@@ -631,13 +819,15 @@ def section(
             f"{_truncation_block(truncated)}"
             "\n任务：直接生成当前交付物的成品，不得套用旧教程模板。\n"
             "只输出当前交付物自己的内容；其它章节/交付物的内容一律不写，也不得提前给出后文的答案或题目。\n"
+            f"{exam_self_check_block}"
             "输出 JSON：{\"title\": str, \"purpose\": str, \"content_type\": \"application\", "
             "\"content\": [{\"type\": \"text|key_point|formula|steps|table|example|comparison|"
-            "method_summary|diagram|memory|note\", \"title\": str, \"body\": str}], "
-            "\"key_takeaways\": [], \"common_errors\": [], \"prerequisite_refs\": [], \"exercises\": []}。\n"
+            "method_summary|diagram|memory|note\", \"title\": str, \"body\": str}]}。\n"
             "content 的每个 body 必须是可直接拼接的纯 Markdown；标题层级最高从 ### 开始；"
             "不得重复当前交付物名称、文档标题、目录、“第 N 节”或任何教程外壳。"
-            "只有规范确实要求时才填写 key_takeaways/common_errors/prerequisite_refs/exercises，否则必须为 []。"
+            "不要输出 key_takeaways/common_errors/prerequisite_refs/exercises 字段（固定栏目已退役）；"
+            "规范确需的结论或易错提醒，直接写进 content 块正文。\n"
+            + _NO_META_SECTIONS
         )
         return _system_for(goal, "section"), user
     task_block = _deliverable_task(str(deliverable)) if deliverable else _TEACHING_TASK
@@ -667,12 +857,11 @@ def section(
         "|\"method_summary\"|\"diagram\"|\"memory\"|\"note\",\n"
         "       \"title\": str,                               # 块标题（可以是空串）\n"
         "       \"body\": str}],                              # Markdown 正文\n"
-        " \"key_takeaways\": [str],                          # 核心结论；无则 []\n"
-        " \"common_errors\": [{\"error\": str, \"cause\": str, \"diagnose\": str}],  # 与本章密切相关的典型错误；无则 []\n"
-        " \"prerequisite_refs\": [str],                      # 正文涉及的必要前置知识或速查条目名称；无则 []\n"
-        " \"exercises\": [str]}                              # 必要练习；无则 []\n"
-        "只输出上述字段；不要输出目录、对应验收标准、来源、引用列表或其他元信息栏。\n"
-        "内容块规范：\n"
+        " \"mapping_criteria\": []}                                # 验收映射由系统回填，输出空数组即可\n"
+        "只输出上述字段；不要输出目录、来源、引用列表或其他元信息栏；\n"
+        "不要输出 key_takeaways/common_errors/prerequisite_refs/exercises 字段（固定栏目已退役）。\n"
+        + _NO_META_SECTIONS
+        + "内容块规范：\n"
         "- text：普通解释正文；\n"
         "- key_point：关键结论（简短，用于强调真正重要的结论）；\n"
         "- formula：公式与推导，body 用 LaTeX（$...$ 或 $$...$$）；\n"
@@ -725,38 +914,58 @@ def cheatsheet(
 def extra_exercises(
     goal, discipline, outline_items, materials_text: str = "",
     retry_violations: list[str] | None = None,
+    exercise_spec: dict | None = None,
 ) -> tuple[str, str]:
+    """额外练习配套文件：排版与结构完全交给「练习生成规范」，按教程大纲分节。
+
+    exercise_spec 由调用方从 format_specs.get_exercise_spec_dict 传入；
+    为空时退化为无规范生成（保持旧行为可运行）。
+    """
+    spec = exercise_spec if isinstance(exercise_spec, dict) and exercise_spec.get("name") else {}
+    chapter_titles = [str(i.get("title", "")).strip() for i in outline_items or [] if isinstance(i, dict)]
+    chapter_titles = [x for x in chapter_titles if x]
+    spec_lines: list[str] = []
+    if spec:
+        spec_lines.append(f"排版与结构唯一依据：{spec.get('name', '')}（练习生成规范，逐字遵守）")
+        for key, label in (
+            ("content_structure", "内容结构"),
+            ("format_rules", "format_rules"),
+            ("required_rules", "required_rules"),
+            ("forbidden_rules", "禁止内容"),
+            ("reference_examples", "排版正反例"),
+            ("custom_markdown", "自定义补充规则"),
+        ):
+            if str(spec.get(key, "") or "").strip():
+                spec_lines.append(f"{label}：\n{str(spec[key]).strip()}")
+    spec_block = ("\n".join(spec_lines) + "\n") if spec_lines else ""
     user = (
         f"学科：{discipline.display_name}\n学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
-        f"教程大纲：{json.dumps(outline_items, ensure_ascii=False)}\n"
+        f"教程大纲（分节依据）：{json.dumps(chapter_titles, ensure_ascii=False)}\n"
         f"{_hard_constraints_section(goal)}"
         f"{_tier_prompt_block(goal)}"
         f"{_capability(goal)}\n"
         f"{_materials_section(materials_text)}\n"
-        f"{_format_spec_block('extra_exercises', goal)}"
-        f"{_teaching_charter('extra_exercises', None, goal)}"
+        f"{spec_block}"
         f"{_retry_violation_block(retry_violations)}\n"
         f"统一文件名（反向双链只能使用）：[[{_tutorial_file_name(goal)}]]\n"
         f"{WIKILINK_RULE}"
         "\n任务：为教程生成独立的「额外练习」文件，用于强化、巩固、检验和迁移，"
         "不是简单复制教程正文中的例题。\n"
-        "要求：\n"
+        "分节规则（覆盖练习规范里的「按材料分章」）：\n"
+        "- 一节 = 教程大纲的一章，节数与顺序逐字等于上面给出的大纲；不得合并、增删或改名；\n"
+        "- 节标题逐字使用大纲章名；章标题由系统输出，正文不写 # 或 ## 级标题；\n"
+        "- 每节内部完全按练习规范的节内结构走（### 一、易错辨析 / ### 二、训练 / ### 参考答案，"
+        "题型 ####，题号在本节内从 1 连续，各节独立编号）；\n"
+        "- 每节只出一个 content 块，块 title 逐字等于本节章名。\n"
+        "其它要求：\n"
         "- 题目数量克制：按知识难度与能力层级决定，避免无意义堆题；\n"
-        "- 题目难度与用户能力层级匹配，如果用户提供参考习题，那么题目类型参考用户提供；\n"
-        "- 每题包含清晰的任务说明和必要条件；\n"
-        "- 根据学科特点提供解题思路或提示（hint）；\n"
-        "- 提供参考答案或自我检查标准（solution）；\n"
-        "- 题目编号连续。\n"
-        "输出 JSON：{\"title\": str, \"intro\": str, "
-        "\"exercises\": [{\"number\": int, \"task\": str, \"requirements\": str, \"hint\": str, \"solution\": str}], "
-        "\"answers_note\": str}。"
-        "answers_note 是说明参考答案位置的提示语（答案会集中渲染在文件后部）。"
+        "- 不逐题标注难度、分值、考点或验收标准（练习规范明令禁止）；\n"
+        "- 不写「使用说明 / 做题方式 / 自检清单」一类元栏目。\n"
+        "输出：直接输出整份 Markdown 成品（不要 JSON、不要代码围栏包裹）：\n"
+        "第一行写 `# {教程名} · 额外练习` 形式的文档标题，随后按节输出；"
+        "每节的正文从 `### 一、易错辨析` 开始。"
     )
-    return SYSTEM, user
-
-
-# ---------------------------------------------------------------- 闭环阶段
-
+    return _system_for(goal, "extra_exercises"), user
 def feedback(goal, criteria_list, task, attempt) -> tuple[str, str]:
     user = (
         f"学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"

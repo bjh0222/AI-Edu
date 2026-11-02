@@ -174,6 +174,22 @@ def goal_context_text(goal) -> str:
     return "\n".join(parts)
 
 
+def task_requirement_text(goal) -> str:
+    """本次任务文本：目标上下文 + 用户填写的「硬性约束」。
+
+    硬性约束是用户对本次交付结构最直接的表述（例如「为每一个章节生成一套检测卷」），
+    规范快照的模式判定与任务覆盖项必须看到它；否则交付结构只能交给模型猜，
+    用户重复生成多少次都得不到按章拆分的结果。
+    """
+    if goal is None:
+        return ""
+    parts = [goal_context_text(goal)]
+    hard = str(getattr(goal, "hard_constraints", "") or "").strip()
+    if hard:
+        parts.append(hard)
+    return "\n".join(part for part in parts if part.strip())
+
+
 def _match_form(text: str) -> str:
     return _MATCH_NOISE.sub("", str(text or "")).lower()
 

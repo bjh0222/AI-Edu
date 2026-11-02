@@ -21,10 +21,25 @@ LINK_RE = re.compile(r"!?\[\[([^\[\]\n]+)\]\]")
 TAG_RE = re.compile(r"(?<![\w#])#([A-Za-z0-9_\u4e00-\u9fff][\w\u4e00-\u9fff/-]*)")
 
 
+# 行内代码与四种数学记法：都不含会生效的双链 / 标签，校验前一律剔除
+_INLINE_SKIP_RE = re.compile(
+    r"(`[^`\n]*`"              # 行内代码
+    r"|\$\$[^$\n]*\$\$"        # 行内 $$…$$
+    r"|\\\[[^\n]*?\\\]"      # 行内 \[…\]
+    r"|\\\([^\n]*?\\\)"      # 行内 \(…\)
+    r"|\$[^$\n]+\$)"            # 行内 $…$
+)
+
+
 def strip_code(markdown: str) -> str:
-    """去掉围栏代码块与行内代码，只保留会生效的 Markdown 文本。"""
+    r"""去掉围栏代码块、行内代码与数学公式，只保留会生效的 Markdown 文本。
+
+    数学记法必须一并剔除：形式幂级数环 \(R[[x]]\)、矩阵 \([[a,b],[c,d]]\) 里的
+    [[…]] 是记号而不是双链，否则校验会报出一批并不存在的断链。
+    """
     lines: list[str] = []
     fence: str | None = None
+    in_math = False
     for line in markdown.splitlines():
         stripped = line.lstrip()
         if stripped.startswith("```") or stripped.startswith("~~~"):
@@ -36,8 +51,22 @@ def strip_code(markdown: str) -> str:
             continue
         if fence is not None:
             continue
-        # 行内代码：只保留非代码片段
-        pieces = re.split(r"(`[^`\n]*`)", line)
+        # $$ 与 \[ 围栏：整块都是公式。按「开/闭」净差翻转状态——
+        # 同一行自闭合时不翻转；单独一行只有闭合符时也必须翻回来，
+        # 否则后续正文会被整段吞掉（校验将漏掉真实断链）。
+        if stripped.count("$$") % 2 == 1:
+            in_math = not in_math
+            continue
+        opens, closes = stripped.count("\\["), stripped.count("\\]")
+        if opens > closes:
+            in_math = True
+            continue
+        if closes > opens:
+            in_math = False
+        if in_math:
+            continue
+        # 行内代码与行内公式：只保留非代码、非公式片段
+        pieces = _INLINE_SKIP_RE.split(line)
         lines.append("".join(piece for idx, piece in enumerate(pieces) if idx % 2 == 0))
     return "\n".join(lines)
 

@@ -137,21 +137,6 @@ export function SectionContent({
           {(section.content ?? []).map((block, index) => (
             <BlockView key={index} block={block} />
           ))}
-          {(section.key_takeaways?.length ?? 0) > 0 && (
-            <div className="text-[11px]">
-              <div className="mb-1 text-[10px] font-bold text-muted">核心结论</div>
-              <ul className="list-disc pl-4 leading-relaxed text-[#33415c]">
-                {section.key_takeaways!.map((item, index) => (
-                  <li key={index}>{item}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {(section.prerequisite_refs?.length ?? 0) > 0 && (
-            <div className="text-[10px] text-muted">
-              前置知识：{section.prerequisite_refs!.join("、")}
-            </div>
-          )}
         </>
       ) : (
         <>
@@ -199,29 +184,7 @@ export function SectionContent({
         </>
       )}
 
-      {(section.exercises?.length ?? 0) > 0 && (
-        <div className="text-[11px]">
-          <div className="mb-1 text-[10px] font-bold text-muted">练习</div>
-          <ul className="list-disc pl-4 leading-relaxed text-[#33415c]">
-            {section.exercises!.map((item, index) => (
-              <li key={index}>{item}</li>
-            ))}
-          </ul>
-        </div>
-      )}
 
-      {(section.common_errors?.length ?? 0) > 0 && (
-        <div className="text-[11px]">
-          <div className="mb-1 text-[10px] font-bold text-muted">常见错误</div>
-          <ul className="grid gap-1">
-            {section.common_errors!.map((item, index) => (
-              <li key={index} className="text-muted">
-                <b className="text-[#a33]">{item.error}</b> · {item.cause} · 排查：{item.diagnose}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
 
       {(section.mapping_criteria?.length ?? 0) > 0 && (
         <div className="text-[10px] text-muted">

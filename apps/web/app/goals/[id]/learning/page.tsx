@@ -297,7 +297,11 @@ export default function LearningPage() {
                         </Badge>
                         <span className="truncate font-semibold text-[#33415c]">{material.filename}</span>
                         <span className="text-[10px] text-muted">
-                          {material.extract_status === "ok" ? `${material.char_count} 字正文` : "未抽取正文"}
+                          {material.extract_status === "ok"
+                            ? `${material.char_count.toLocaleString()} 字正文`
+                            : material.extract_status === "truncated"
+                              ? `仅载入 ${material.char_count.toLocaleString()} / ${material.source_char_count.toLocaleString()} 字（已截断）`
+                              : "未抽取正文"}
                         </span>
                       </li>
                     ))}

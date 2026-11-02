@@ -11,7 +11,9 @@
  * 4. openTutorialFile 在当前窗口新标签打开并聚焦；
  * 5. 带参考材料的两步提交：建目标 → 上传材料 → 触发生成；
  * 6. 材料上传失败：不重复创建目标，重试只补传材料；
- * 7. 材料预校验规则与后端一致（扩展名 / 大小 / 空文件）。
+ * 7. 材料预校验规则与后端一致（扩展名 / 大小 / 空文件）；
+ * 8. 「教程规范」一栏：分组下拉、规范正文预览、与网站一致的 id 映射；
+ * 9. 手机端（安卓）适配：移动端 leaf 策略、回环地址告警、后端连通性自检。
  */
 
 const fs = require("fs");
@@ -51,6 +53,8 @@ let requestUrlImpl = async () => {
 function requestUrl(...args) {
   return requestUrlImpl(...args);
 }
+// Platform 是可切换的：桌面与手机端的分支（leaf 策略 / 软键盘 / 回环告警）都要能测到
+const Platform = { isMobile: false, isAndroidApp: false, isIosApp: false };
 
 const stub = {
   Plugin,
@@ -59,6 +63,7 @@ const stub = {
   Modal,
   Notice,
   normalizePath,
+  Platform,
   requestUrl,
 };
 stub.setRequestUrl = (impl) => { requestUrlImpl = impl; };
@@ -77,6 +82,10 @@ fs.writeFileSync(
     source,
     "module.exports.__AIEduModal = AIEduModal;",
     "module.exports.__validateMaterialFile = validateMaterialFile;",
+    "module.exports.__groupSpecs = groupSpecs;",
+    "module.exports.__specGroupLabel = specGroupLabel;",
+    "module.exports.__specPreviewMarkdown = specPreviewMarkdown;",
+    "module.exports.__loopbackHostWarning = loopbackHostWarning;",
     "module.exports.__MATERIAL_FALLBACK_LIMITS = MATERIAL_FALLBACK_LIMITS;",
     "module.exports.__buildMultipartBody = buildMultipartBody;",
   ].join("\n"),
@@ -85,6 +94,10 @@ fs.writeFileSync(
 const pluginModule = require(tempFile);
 const AIEduModal = pluginModule.__AIEduModal;
 const validateMaterialFile = pluginModule.__validateMaterialFile;
+const groupSpecs = pluginModule.__groupSpecs;
+const specGroupLabel = pluginModule.__specGroupLabel;
+const specPreviewMarkdown = pluginModule.__specPreviewMarkdown;
+const loopbackHostWarning = pluginModule.__loopbackHostWarning;
 const MATERIAL_FALLBACK_LIMITS = pluginModule.__MATERIAL_FALLBACK_LIMITS;
 const buildMultipartBody = pluginModule.__buildMultipartBody;
 assert(AIEduModal, "应能拿到 AIEduModal");
@@ -220,7 +233,13 @@ function makeModal() {
       return { status: 200, json: { id: "m1", filename: "x" } };
     }
     if (options.method === "POST" && url.endsWith("/tutorials/quickstart")) {
-      assert.strictEqual(options.body, "{}", "quickstart 请求体应为空对象");
+      const body = JSON.parse(options.body);
+      assert.strictEqual(
+        Object.keys(body).length,
+        1,
+        `两步提交的 quickstart 只应带 format_spec_id：${options.body}`
+      );
+      assert.strictEqual(body.format_spec_id, null, "未选择规范时应传 null（自动匹配）");
       return { status: 200, json: { tutorial: { id: "t1" }, job_id: null } };
     }
     if (options.method === "GET" && url.endsWith("/api/tutorials/t1")) {
@@ -349,6 +368,219 @@ function makeModal() {
   assert(pausedDetail && pausedDetail.goal_id === "g3", "应进入暂停面板并带上目标 id");
   assert.strictEqual(pausedCase.busy, false, "暂停后应解除 busy");
   assert(httpCalls.some((item) => item.endsWith("/api/goals/g3/materials")), "暂停前材料应已上传");
+
+
+  // 8. 格式规范选择：readForm 映射与网站一致（auto→null / ""→"" / id→id）
+  function makeFormModal(specValue) {
+    const modal = makeModal();
+    modal.titleInputEl = { value: " 线性代数练习 " };
+    modal.domainEl = { value: "math_logic" };
+    modal.motivationEl = { value: "动机" };
+    modal.applicationEl = { value: "应用" };
+    modal.currentLevelEl = { value: "基础" };
+    modal.hardConstraintsEl = { value: "约束" };
+    modal.timeBudgetEl = { value: "无上限" };
+    modal.capabilityEl = { value: "L3" };
+    modal.extraEl = { checked: false };
+    modal.tierEl = { value: "standard" };
+    modal.formatSpecEl = { value: specValue };
+    return modal;
+  }
+
+  const autoForm = AIEduModal.prototype.readForm.call(makeFormModal("auto"));
+  assert.strictEqual(autoForm.format_spec_id, null, "auto 应映射为 null");
+  const noneForm = AIEduModal.prototype.readForm.call(makeFormModal(""));
+  assert.strictEqual(noneForm.format_spec_id, "", "「本次不使用」应映射为空串");
+  const manualForm = AIEduModal.prototype.readForm.call(makeFormModal("spec-42"));
+  assert.strictEqual(manualForm.format_spec_id, "spec-42", "手动选择应原样提交 id");
+
+  // 9. 规范下拉渲染：已删除的已存规范回落到自动匹配；存在的保持选中
+  // 假 select：顶层 createEl 收到 option 或 optgroup；optgroup 再挂自己的 option。
+  // 扁平 options 列表保留「渲染顺序」，groups 记录分组标签，两者都要能断言。
+  function makeFakeSelect() {
+    const self = {
+      options: [],
+      groups: [],
+      value: "",
+      empty() { self.options = []; self.groups = []; },
+      createEl(tag, opts) {
+        if (tag === "optgroup") {
+          self.groups.push(opts.attr && opts.attr.label);
+          return {
+            createEl(_childTag, childOpts) {
+              self.options.push(childOpts);
+            },
+          };
+        }
+        self.options.push(opts);
+        return null;
+      },
+    };
+    return self;
+  }
+
+  const specModal = makeModal();
+  specModal.formatSpecs = [
+    { id: "s1", name: "练习生成规范", scene: "exercise", is_default: false, version: 26 },
+    { id: "s2", name: "知识性教程规范", scene: "default_tutorial", is_default: true, version: 4 },
+    { id: "s3", name: "实践性教程规范", scene: "practical_tutorial", is_default: false, version: 2 },
+    { id: "s4", name: "试卷生成规范", scene: "exam_paper", is_default: false, version: 11 },
+    { id: "s5", name: "我的自定义规范", scene: "my_custom", is_default: false, version: 1 },
+  ];
+  specModal.formatSpecEl = makeFakeSelect();
+  specModal.formatSpecId = "s-deleted";
+  AIEduModal.prototype.renderFormatSpecOptions.call(specModal);
+  assert.deepStrictEqual(
+    specModal.formatSpecEl.options.map((o) => o.value),
+    ["auto", "", "s2", "s3", "s1", "s4", "s5"],
+    `下拉应按「教程 → 练习与试卷 → 其他」分组排序：${JSON.stringify(specModal.formatSpecEl.options)}`
+  );
+  assert.deepStrictEqual(
+    specModal.formatSpecEl.groups,
+    ["教程规范", "练习与试卷规范", "其他规范"],
+    `分组标签错误：${JSON.stringify(specModal.formatSpecEl.groups)}`
+  );
+  assert(specModal.formatSpecEl.options.some((o) => o.text.includes("· 默认")), "默认规范应标注");
+  assert.strictEqual(specModal.formatSpecEl.value, "auto", "已删除的规范应回落自动匹配");
+  assert.strictEqual(specModal.formatSpecId, "auto", "回落应同步回写当前选择");
+
+  specModal.formatSpecId = "s1";
+  AIEduModal.prototype.renderFormatSpecOptions.call(specModal);
+  assert.strictEqual(specModal.formatSpecEl.value, "s1", "仍存在的已存规范应保持选中");
+
+  // 10. 暂停续跑携带格式规范选择
+  httpCalls.length = 0;
+  const bodies = [];
+  stub.setRequestUrl(async (options) => {
+    httpCalls.push(`${options.method} ${options.url}`);
+    const url = options.url;
+    if (options.method === "POST" && url.endsWith("/tutorials/quickstart")) {
+      bodies.push(options.body);
+      return { status: 200, json: { tutorial: { id: "t9" }, job_id: null } };
+    }
+    throw new Error(`unexpected request: ${options.method} ${url}`);
+  });
+  const resumeModal = makeModal();
+  resumeModal.pausedGoalId = "g9";
+  resumeModal.formatSpecEl = { value: "spec-7" };
+  resumeModal.loadAndDeliver = async () => { calls.push("deliver"); };
+  await AIEduModal.prototype.resumePaused.call(resumeModal, "proceed");
+  const resumeBody = JSON.parse(bodies[0]);
+  assert.strictEqual(resumeBody.pause_action, "proceed", "续跑应带 pause_action");
+  assert.strictEqual(resumeBody.format_spec_id, "spec-7", "续跑应带格式规范选择");
+
+  // 11. 手机端（安卓）适配：leaf 策略 / 回环地址告警 / 后端连通性自检 / 规范正文预览
+  // 11a. 桌面端仍是 getLeaf("tab")（回归：不能被移动端分支改掉）
+  calls.length = 0;
+  Platform.isMobile = false;
+  const desktopOpener = makeModal();
+  await AIEduModal.prototype.openTutorialFile.call(desktopOpener, "学习/测试-教程.md");
+  assert(calls.includes("getLeaf:tab"), `桌面端应使用 getLeaf("tab")：${calls.join(" → ")}`);
+
+  // 11b. 手机端改用 getLeaf(true)：移动端没有标签页概念
+  calls.length = 0;
+  Platform.isMobile = true;
+  const mobileOpener = makeModal();
+  await AIEduModal.prototype.openTutorialFile.call(mobileOpener, "学习/测试-教程.md");
+  assert(calls.includes("getLeaf:true"), `手机端应使用 getLeaf(true)：${calls.join(" → ")}`);
+  assert.deepStrictEqual(
+    calls.filter((item) => ["openFile", "revealLeaf", "setActiveLeaf"].includes(item)),
+    ["openFile", "revealLeaf", "setActiveLeaf"],
+    `手机端打开顺序错误：${calls.join(" → ")}`
+  );
+
+  // 11c. getLeaf 抛错（移动端某些版本）时退回当前叶子，主路径不能断
+  calls.length = 0;
+  const fallbackOpener = makeModal();
+  let fallbackCalls = 0;
+  fallbackOpener.app.workspace.getLeaf = (mode) => {
+    fallbackCalls += 1;
+    calls.push(`getLeaf:${mode}`);
+    if (fallbackCalls === 1) throw new Error("mobile: tab not supported");
+    return { openFile: async () => { calls.push("openFile"); } };
+  };
+  await AIEduModal.prototype.openTutorialFile.call(fallbackOpener, "学习/测试-教程.md");
+  assert(calls.includes("openFile"), `getLeaf 抛错后应仍打开文件：${calls.join(" → ")}`);
+  Platform.isMobile = false;
+
+  // 11d. 回环地址告警：只在手机端出现，局域网 IP 不告警
+  Platform.isMobile = true;
+  assert(
+    loopbackHostWarning("http://127.0.0.1:8000").includes("指向手机自己"),
+    "手机端 127.0.0.1 应告警"
+  );
+  assert(loopbackHostWarning("http://localhost:8000").length > 0, "手机端 localhost 应告警");
+  assert.strictEqual(loopbackHostWarning("http://192.168.1.20:8000"), "", "局域网 IP 不应告警");
+  assert.strictEqual(loopbackHostWarning("http://[fd00::1]:8000"), "", "IPv6 局域网不应告警");
+  Platform.isMobile = false;
+  assert.strictEqual(loopbackHostWarning("http://127.0.0.1:8000"), "", "桌面端不需要该告警");
+
+  // 11e. 连通性自检：成功写入状态行；失败给出手机端可执行排查步骤
+  const probeOk = makeModal();
+  stub.setRequestUrl(async (options) => {
+    assert(options.url.endsWith("/api/health"), `自检应打 /api/health：${options.url}`);
+    return { status: 200, json: { demo: false, llm_configured: true } };
+  });
+  const okResult = await AIEduModal.prototype.probeApi.call(probeOk);
+  assert.strictEqual(okResult.ok, true, "健康检查应成功");
+  assert(probeOk.lastStatus.includes("已连接"), `状态行应显示已连接：${probeOk.lastStatus}`);
+
+  const probeFail = makeModal();
+  stub.setRequestUrl(async () => { throw new Error("Failed to connect"); });
+  Platform.isMobile = true;
+  const failResult = await AIEduModal.prototype.probeApi.call(probeFail);
+  assert.strictEqual(failResult.ok, false, "连不上时应标记失败");
+  assert(probeFail.lastStatus.includes("Failed to connect"), `应带原始原因：${probeFail.lastStatus}`);
+  assert(probeFail.lastStatus.includes("防火墙"), `手机端应给出排查步骤：${probeFail.lastStatus}`);
+  Platform.isMobile = false;
+
+  // 11f. 规范正文预览：段落顺序与网页端 previewMarkdown 一致，空字段跳过
+  const previewText = specPreviewMarkdown({
+    name: "知识性教程规范",
+    description: "面向零基础读者的知识性教程",
+    version: 4,
+    scene: "default_tutorial",
+    applicable_tasks: "概念解释、原理学习",
+    trigger_keywords: ["原理", "推导"],
+    excluded_keywords: [],
+    output_goal: "输出一份系统、准确的教程",
+    content_structure: "# 教程名称\n\n- 第一章是「教程概览」",
+    format_rules: "",
+    required_rules: "- 概念必须有定义",
+    reference_examples: "",
+    deliverables: [],
+  });
+  const headings = previewText.split("\n").filter((line) => line.startsWith("## "));
+  assert.deepStrictEqual(
+    headings,
+    ["## 匹配与适用", "## 输出目标与受众", "## 交付物（一个交付物一章）", "## 内容结构", "## 必须遵守"],
+    `预览段落顺序错误：${JSON.stringify(headings)}`
+  );
+  assert(previewText.startsWith("# 知识性教程规范"), "预览应以规范名为一级标题");
+  assert(!previewText.includes("## 格式与表达"), "空字段应整段跳过，不留空标题");
+  assert(previewText.includes("- 概念必须有定义"), "必须遵守的规则应出现在预览里");
+  assert(previewText.includes("未配置结构化交付物"), "无交付物时应说明由大纲模型决定");
+
+  // 11g. 分组与族别标签：阅读教程规范单独点名（后端对它走两阶段生成）
+  assert.strictEqual(
+    specGroupLabel({ name: "阅读教程规范", scene: "reading_guide" }),
+    "阅读教程规范",
+    "阅读规范应单独点名"
+  );
+  assert.strictEqual(specGroupLabel({ scene: "practical_tutorial" }), "教程规范", "实践性属教程族");
+  assert.strictEqual(specGroupLabel({ scene: "exam_paper" }), "练习与试卷规范", "试卷属练习与试卷族");
+  assert.strictEqual(specGroupLabel({ scene: "whatever" }), "其他规范", "未知 scene 落到其他规范");
+  const grouped = groupSpecs([
+    { id: "a", scene: "default_tutorial" },
+    { id: "b", scene: "exercise" },
+    { id: "c", scene: "reading_guide" },
+  ]);
+  assert.deepStrictEqual(
+    grouped.map((g) => [g.label, g.specs.map((s) => s.id)]),
+    [["教程规范", ["a", "c"]], ["练习与试卷规范", ["b"]]],
+    `分组结果错误：${JSON.stringify(grouped)}`
+  );
+  assert.deepStrictEqual(groupSpecs([]), [], "空列表不应产出空分组");
 
   // 8. 材料预校验与 multipart 构造
   assert.strictEqual(validateMaterialFile(makeFile("a.md", 10), MATERIAL_FALLBACK_LIMITS), "", "md 应通过");

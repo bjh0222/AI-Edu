@@ -233,8 +233,9 @@ class MaterialOut(BaseModel):
     size: int = 0
     status: str = "ready"
     error_message: str = ""
-    extract_status: str = "pending"  # ok / empty / unsupported / failed
+    extract_status: str = "pending"  # ok / empty / unsupported / failed / truncated
     char_count: int = 0
+    source_char_count: int = 0  # 原文字数；大于 char_count 表示入库时被截断
     note: str = ""
     created_at: Optional[str] = None
     excerpt_preview: str = ""
@@ -340,10 +341,6 @@ class SectionOut(BaseModel):
     purpose: str = ""
     content_type: str = "mixed"
     content: list[ContentBlock] = []
-    key_takeaways: list[str] = []
-    prerequisite_refs: list[str] = []
-    common_errors: list[CommonError] = []
-    exercises: list[str] = []
     sources: list[SourceRef] = []
     mapping_criteria: list[str] = []
     rule_check: Optional[RuleCheck] = None
@@ -370,19 +367,16 @@ class CheatsheetOut(BaseModel):
 
 
 class ExtraExerciseItem(BaseModel):
+    """额外练习的题号条目：正文在 markdown 里，这里只保留计数所需的题号。"""
+
     number: int = 0
-    task: str
-    requirements: str = ""
-    hint: str = ""
-    solution: str = ""
 
 
 class ExtraExercisesOut(BaseModel):
     filename: str = ""  # 配套文件名（不含 .md），与主教程中的 Obsidian 双链一致
     title: str = ""
-    intro: str = ""
+    markdown: str = ""  # 练习生成规范排版的整份 Markdown 成品
     exercises: list[ExtraExerciseItem] = []
-    answers_note: str = ""
     rule_check: Optional[RuleCheck] = None
 
 

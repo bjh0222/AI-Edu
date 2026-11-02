@@ -14,13 +14,14 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from ..learning.generation_tiers import normalize_tier
-from ..learning.teaching_profile import delivery_contract_for
+from ..learning.teaching_profile import delivery_contract_for, task_requirement_text
 
 from ..llm.service import AIService
 from ..models import GenerationJob, GoalAssessment, LearningGoal
 from ..services.utils import jdump, jload
 from . import goals as goals_service
 from . import format_specs as format_specs_service
+from . import materials as materials_service
 from . import tutorials as tutorials_service
 
 
@@ -142,12 +143,19 @@ def quickstart(
     steps: list[dict] = []
 
     # 大纲前选定并冻结规范：manual_spec_id=None 表示自动匹配，"" 表示本次不使用特殊规范。
-    task_text = "\n".join([goal.application_context or "", goal.user_notes or ""]).strip()
+    # 任务文本必须包含 hard_constraints：「为每一个章节生成一套检测卷」这类决定交付结构的要求，
+    # 用户通常写在硬性约束里而不是需求正文里，漏掉它就等于让模型自己猜交付结构。
+    task_text = task_requirement_text(goal)
     if format_spec_id is not None or not goal.format_spec_snapshot:
         resolved = format_specs_service.resolve_spec(
             db, task_text, ai=ai, manual_spec_id=format_spec_id
         )
         snapshot = format_specs_service.apply_task_overrides(resolved["snapshot"], task_text)
+        # 「为每一章各生成一份检测卷」按材料章节定死交付物（不靠模型自觉拆章）
+        materials_context = materials_service.materials_context(db, goal.id)
+        snapshot = format_specs_service.apply_chapter_split(
+            snapshot, task_text, materials_context
+        )
         goal.format_spec_id = resolved["selected_spec"].id if resolved["selected_spec"] is not None else ""
         goal.format_spec_source = resolved["source"]
         goal.format_spec_match_note = resolved["note"]

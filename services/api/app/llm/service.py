@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -63,12 +64,6 @@ def _section_check_text(data: dict) -> str:
         if isinstance(block, dict):
             parts.append(str(block.get("title", "")))
             parts.append(str(block.get("body", "")))
-    for key in ("key_takeaways", "exercises", "prerequisite_refs"):
-        for item in data.get(key) or []:
-            parts.append(str(item))
-    for item in data.get("common_errors") or []:
-        if isinstance(item, dict):
-            parts.extend(str(item.get(field, "")) for field in ("error", "cause", "diagnose"))
     return "\n".join(parts)
 
 
@@ -276,6 +271,25 @@ class AIService:
         )
         return _require(data, *required)
 
+    def _real_text(self, feature: str, system: str, user: str, goal=None) -> str:
+        """纯 Markdown 输出的调用：记录日志与训练样本，返回去首尾空白的文本。"""
+        try:
+            text, latency, usage = self.provider.complete_text(system, user)  # type: ignore[union-attr]
+        except LLMError as exc:
+            self._log_error(feature, exc)
+            raise AIServiceError(str(exc)) from exc
+        text = str(text or "").strip()
+        if not text:
+            self._log_error(feature, LLMError("模型输出为空"))
+            raise AIServiceError(f"{feature} 模型输出为空")
+        if usage is None:
+            usage = estimate_usage(f"{system}\n{user}", text)
+        self._record(
+            feature, system=system, user=user, output=text,
+            usage=usage, goal=goal, latency_ms=latency,
+        )
+        return text
+
     def _demo(self, feature: str, output: Any, goal=None, extra_user: str = "") -> Any:
         """演示模式：记录估算 token 与「合成输入」，训练样本标记 demo=true。"""
         system = f"（演示生成器：{feature}，未配置真实模型）"
@@ -322,10 +336,33 @@ class AIService:
                 "outline", {"sections": demo.outline(goal, discipline, ids)}, goal, materials_text
             )
         system, user = prompts.outline(goal, discipline, criteria_list, materials_text)
-        data = self._real_json("outline", system, user, ("sections",), goal)
-        if not isinstance(data.get("sections"), list) or not data["sections"]:
-            raise AIServiceError("模型输出缺少有效大纲")
-        return data
+        # 大纲是整条管线的咽喉：一次偶发截断 / 限流 / 解析失败就会让「一键生成」
+        # 在前四步全部成功后整体报废。与章节生成同款策略：失败自动重试，
+        # 且截断型失败重试时显式要求压缩篇幅（原样重发几乎必然再截断）。
+        last_exc: AIServiceError | None = None
+        for attempt in (1, 2, 3):
+            prompt_user = user
+            if attempt > 1 and last_exc is not None and "截断" in str(last_exc):
+                prompt_user = (
+                    user
+                    + "\n上一稿因超出单次输出长度上限被截断，JSON 不完整、无法解析。"
+                    "本次必须压缩篇幅：teaching_plan 各列表合计不超过 8 条、每条不超过 60 字；"
+                    "sections 的 purpose / summary 各不超过 40 字；宁可少写也要保证 JSON 完整闭合。"
+                )
+            try:
+                data = self._real_json("outline", system, prompt_user, ("sections",), goal)
+            except AIServiceError as exc:
+                last_exc = exc
+                if attempt >= 3:
+                    raise
+                continue
+            if not isinstance(data.get("sections"), list) or not data["sections"]:
+                last_exc = AIServiceError("模型输出缺少有效大纲")
+                if attempt >= 3:
+                    raise last_exc
+                continue
+            return data
+        raise last_exc if last_exc else AIServiceError("模型输出缺少有效大纲")
 
     def _section_payload(
         self, goal, discipline, item, criteria_list, prior_titles, materials_text: str,
@@ -346,10 +383,7 @@ class AIService:
             goal,
         )
         # 可选内容块允许缺失/非法：归一化，不因没有例题或易错点而判定生成失败
-        for key in (
-            "content", "key_takeaways", "common_errors", "prerequisite_refs",
-            "exercises", "sources", "mapping_criteria",
-        ):
+        for key in ("content", "sources", "mapping_criteria"):
             if not isinstance(data.get(key), list):
                 data[key] = []
         # 模型没给映射就退回大纲里已经声明好的验收标准 id，语义等价且不丢覆盖关系
@@ -403,30 +437,37 @@ class AIService:
 
         return _rule_checked(produce, _sections_check_text)
 
-    def extra_exercises(self, goal, discipline, outline_items, materials_text: str = "") -> dict:
-        """独立额外练习文件（仅在用户开启选项时生成）。失败抛 AIServiceError，由调用方兜底。"""
+    def extra_exercises(
+        self, goal, discipline, outline_items, materials_text: str = "",
+        exercise_spec: dict | None = None,
+    ) -> dict:
+        """独立额外练习文件：Markdown 成品，排版与结构由练习生成规范决定。
+
+        返回 {"title": str, "markdown": str, "exercises": [{"number": int}]}；
+        exercises 由 markdown 解析题号得到，供前端计数与插件存在性判断。
+        硬约束（画像）核验与定向重写沿用 _rule_checked，文本版。
+        """
         if self.is_demo:
             return self._demo("extra_exercises", demo.extra_exercises(goal, discipline, outline_items), goal)
 
         def produce(violations):
             system, user = prompts.extra_exercises(
-                goal, discipline, outline_items, materials_text, violations
+                goal, discipline, outline_items, materials_text, violations, exercise_spec
             )
-            data = self._real_json("extra_exercises", system, user, ("exercises",), goal)
-            data["exercises"] = [
-                {
-                    "number": int(e.get("number") or idx + 1),
-                    "task": str(e.get("task", "") or ""),
-                    "requirements": str(e.get("requirements", "") or ""),
-                    "hint": str(e.get("hint", "") or ""),
-                    "solution": str(e.get("solution", "") or ""),
-                }
-                for idx, e in enumerate(data.get("exercises", []) or [])
-                if isinstance(e, dict) and str(e.get("task", "")).strip()
-            ]
-            return data
+            markdown = self._real_text("extra_exercises", system, user, goal)
+            from ..services.utils import parse_exercise_numbers
 
-        return _rule_checked(produce, _exercises_check_text)
+            title = next(
+                (re.sub(r"^#\s*", "", ln).strip() for ln in markdown.splitlines() if ln.startswith("# ")),
+                "",
+            )
+            return {
+                "title": title or f"{getattr(goal, 'title', '')} · 额外练习",
+                "markdown": markdown,
+                "exercises": parse_exercise_numbers(markdown),
+            }
+
+        return _rule_checked(produce, lambda data: str(data.get("markdown", "")))
 
     def format_spec_match(self, requirement: str, candidates: list[dict]) -> dict:
         """少量候选规范的语义匹配；失败由 format_specs 服务回退默认规范。"""

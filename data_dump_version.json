@@ -1,0 +1,194 @@
+{
+  "format_spec": {
+    "id": "f97140129d4b4435bf447a927b55659f",
+    "name": "试卷生成规范",
+    "description": "适用于模拟试卷、练习卷和阶段测验；约束试卷结构和交付范围。",
+    "scene": "exam_paper",
+    "is_builtin": true,
+    "is_default": false,
+    "version": 5,
+    "applicable_tasks": "生成、编写、扩写或重组模拟试卷、练习卷、阶段测验、期中试卷和期末试卷。",
+    "applicable_intents": [
+      "生成试卷",
+      "编写试卷",
+      "出题",
+      "扩写试卷",
+      "重组试卷"
+    ],
+    "excluded_scenarios": [
+      "解释已有试题",
+      "单独讲解知识点",
+      "整理复习笔记",
+      "总结课程内容"
+    ],
+    "excluded_intents": [
+      "解释试题",
+      "讲解知识点",
+      "整理笔记",
+      "总结课程"
+    ],
+    "trigger_keywords": [
+      "模拟试卷",
+      "试卷生成",
+      "练习卷",
+      "考试出题",
+      "期中试卷",
+      "期末试卷",
+      "阶段测验",
+      "模拟考试"
+    ],
+    "excluded_keywords": [],
+    "allow_keyword_trigger": true,
+    "allow_semantic_recommendation": true,
+    "allow_explicit_selection": true,
+    "target_reader": "使用电脑阅读的学生。",
+    "output_goal": "输出用户明确要求且可直接作答的试卷及配套内容，不输出无关教程或建议。",
+    "deliverables": [],
+    "content_structure": "# 试卷名称\n\n题量、每题分值和总分。\n\n## 第 I 部分：题型\n\n**1.**题干\n\n选项（没有选项则空两行）",
+    "format_rules": "- 题号连续编号\n- 分值、题量和满分只在开头或题号旁出现\n- 同一题型格式和标点风格一致\n- 数学表达式风格统一",
+    "required_rules": "- 题目必须在用户指定或合理推断的考试范围内；材料和任务信息不足时可合理补全\n- 生成章节的内容必须遵照用户的“硬性约束”",
+    "forbidden_rules": "- 不输出冗长学习教程、泛化学习建议或无关说明\n- 不编造考试时间、考试范围、命题人或真题出处等具体事实\n- 试卷正文不包含关键过程、易错点、考点标签、难度说明或命题意图",
+    "suggested_rules": "图表给出编号、标题和题干引用；无法生成原图时用可读文字或表格描述。",
+    "flexible_rules": "题型、题量、分值、时长、难度、覆盖范围和答案解析默认服从本次任务要求。",
+    "acceptance_criteria": "- 可直接作答\n- 试卷结构完整且格式一致\n- 交付清单外无无关内容，无重复、冗余内容",
+    "reference_examples": "",
+    "custom_markdown": "**选择题排版规则**\n\n1. **目标宽度基准**\n   - 使用半角字符宽度单位 `u`：ASCII、数字、英文标点计 `1u`；中文、全角标点计 `2u`。\n   - 数学公式按化简后的源文本估算；若使用 LaTeX，先估算渲染后的主要字符宽度，每个 `$...$` 额外加 `2u` 分隔余量。\n   - 选项间距每个按 `2u` 计算。\n\n2. **目标渲染档位**\n   - 默认按 `W = 88u` 估算，约等于常见桌面 Markdown 阅读宽度。\n   - 安全边距默认 `M = 6u`。\n\n3. **估算公式**\n   - 选项内容宽度：`a = width(A内容)`，`b = width(B内容)`，`c = width(C内容)`，`d = width(D内容)`。\n   - 标签宽度：`A.`、`B.`、`C.`、`D.` 各计 `2u`。\n   - 四选项同一行总宽：\n\n   ```text\n   S = (a + 2) + (b + 2) + (c + 2) + (d + 2) + 3 × 2\n     = a + b + c + d + 14\n   ```\n\n   - 两栏模式时，每栏宽度：\n\n   ```text\n   col = max(a, b) 或 max(c, d)\n   栏宽 = col + 2 + 2\n   两栏总宽 S2 = max(max(a,b), max(c,d)) × 2 + 6\n   ```\n\n   其中第一个 `2` 是选项标签宽度，第二个 `2` 是栏内最小边距；栏间距按 `6u`。\n\n4. **判定顺序**\n   - 若 `S ≤ W - M`，使用方案 A：四个选项同一行。\n   - 否则若 `S2 ≤ W - M`，使用方案 B：A/B 一行，C/D 一行。\n   - 否则使用方案 C：每个选项单独一行。\n\n5. **分行禁止项**\n   - 不得把 `A.` 与其选项内容拆开。\n   - 不得在公式、英文单词、数字、函数名内部断开。\n   - 不得为了塞入一行缩小字号。\n   - 不使用“尽量”“合适”“美观”等模糊判断。\n\n6. **输出方式**\n   - 生成过程中先输出判断表：\n\n   ```text\n   题号 | A | B | C | D | S | S2 | 可用宽度 | 采用方案\n   ```\n\n   - 最终试卷中不保留判断表，只输出排版后的题目\n\n7. **Markdown 输出格式**\n   - 方案 A：\n\n   ```markdown\n   A. xxx　　B. xxx　　C. xxx　　D. xxx\n   ```\n\n   - 方案 B：\n\n   ```markdown\n   A. xxx　　B. xxx  \n   C. xxx　　D. xxx\n   ```\n\n   - 方案 C：\n\n   ```markdown\n   A. xxx  \n   B. xxx  \n   C. xxx  \n   D. xxx\n   ```\n\n   行尾使用两个空格表示 Markdown 换行。\n\n** 判断题排版规则 **\n\n 1. 页面开头用三级标题 `### 判断题`，只写一次。  \n 2. 每道题用有序列表编号：`1.`、`2.`、`3.`……题目正文紧接编号。  \n 3. 数学公式使用 LaTeX 行内公式格式，例如 `\\(A\\)`、`\\(m\\times n\\)`、`\\(r(A)\\le r\\)`。  \n 4. 每道题题干结束后，另起一行，插入一个右对齐的复选框，HTML 固定写成：  \n    `<p align=\"right\"><input type=\"checkbox\"> </p>`  \n 5. 每道题的复选框单独占一行，且右对齐；不要勾选。  \n 6. 题目与题目之间空一行。  \n 7. 只输出题目和复选框，不输出答案、解析或额外说明。  ",
+    "created_at": "2026-10-29T01:31:07.355744+00:00",
+    "updated_at": "2026-10-31T05:04:50.264479+00:00",
+    "snapshot_version": "v5-2026-10-31T05:04:50.264479+00:00",
+    "task_overrides": [],
+    "variant_mode": false
+  },
+  "teaching_plan": {
+    "rules": [
+      {
+        "id": "rule-01",
+        "text": "我是计算机强校的人工智能本科生，学习能力强，偏好广泛了解各领域的知识。",
+        "rule_type": "default",
+        "hard": false,
+        "condition": "",
+        "scopes": [
+          "general"
+        ]
+      },
+      {
+        "id": "rule-02",
+        "text": "目前正在学习计算机基础知识，从事AI协作开发",
+        "rule_type": "default",
+        "hard": false,
+        "condition": "",
+        "scopes": [
+          "depth"
+        ]
+      },
+      {
+        "id": "rule-04",
+        "text": "务必保证文件排版清晰易读",
+        "rule_type": "required",
+        "hard": true,
+        "condition": "",
+        "scopes": [
+          "format"
+        ]
+      },
+      {
+        "id": "rule-06",
+        "text": "当遇到实践性强的项目时，我希望有更多的操作实例；当遇到项目中有技巧性内容时，我希望得到方法的归纳和少量挑战性的难题；当遇到项目中有需要知道，记忆的基本内容或者较多概念时，我希望其被归纳放在知识速查中。",
+        "rule_type": "conditional",
+        "hard": false,
+        "condition": "当遇到实践性强的项目时，我希望有更多的操作实例；当遇到项目中有技巧性内容时，我希望得到方法的归纳和少量挑战性的难题；当遇到项目中有需要知道，记忆的基本内容或者较多概念时，我希望其被归纳放在知识速查中。",
+        "scopes": [
+          "general"
+        ]
+      }
+    ],
+    "rules_applied": [
+      "务必保证文件排版清晰易读",
+      "按规范仅输出试卷名称、题量分值、第I部分题型与题干选项。",
+      "不写教程、建议、考点标签、难度说明、命题意图或编造事实。",
+      "选择题按宽度公式判定并采用A/B/C排版，选项不拆标签。",
+      "判断题用三级标题一次，题后右对齐复选框，不附答案。"
+    ],
+    "decisions": [
+      "仅设“线性代数单元检测卷”一节，覆盖全部5条验收标准。",
+      "题型安排选择、判断、解答与综合题，综合题置于第I部分后。"
+    ],
+    "task_overrides": [
+      "规范无交付物清单，按用户明确要求只设试卷节，不增设答案节。"
+    ],
+    "unresolved_conflicts": [
+      "JSON结构无正文正文字段，本节仅登记试卷交付结构与覆盖范围。"
+    ],
+    "source": "long_term_user_profile"
+  },
+  "outline": [
+    {
+      "id": "73fee562",
+      "title": "线性代数单元检测卷",
+      "purpose": "用于检测线性代数单元掌握与难题突破",
+      "content_type": "application",
+      "summary": "含选择、判断、解答、综合题；覆盖5条验收标准",
+      "criteria_ids": [
+        "d45f439012214482970c88f6f99b37a1",
+        "f93e29956f6a46fe9212bf04b14de8b5",
+        "da9b2b756bfd4e9ca35383f071ccc5a8",
+        "928f6cddb57a48099be5ee22739d8223",
+        "51c1b9abafdd43529cbd1d755ce37ff6"
+      ]
+    }
+  ],
+  "sections": [
+    {
+      "title": "线性代数单元检测卷",
+      "purpose": "用于检测线性代数单元掌握与难题突破",
+      "content_type": "application",
+      "content": [
+        {
+          "type": "text",
+          "title": "试卷说明",
+          "body": "本卷共 19 题，满分 100 分。选择题 8 题，每题 4 分；判断题 6 题，每题 3 分；解答题 3 题，每题 10 分；综合题 2 题，每题 10 分。"
+        },
+        {
+          "type": "text",
+          "title": "选择题",
+          "body": "### 选择题\n\n**1.** 设 \\(\\alpha_1,\\alpha_2,\\alpha_3\\) 线性无关，下列向量组一定线性无关的是（　　）\nA. \\(\\alpha_1+\\alpha_2,\\alpha_2+\\alpha_3,\\alpha_3-\\alpha_1\\)  \nB. \\(\\alpha_1-\\alpha_2,\\alpha_2-\\alpha_3,\\alpha_3-\\alpha_1\\)  \nC. \\(\\alpha_1,\\alpha_1+\\alpha_2,\\alpha_1+\\alpha_2+\\alpha_3\\)  \nD. \\(\\alpha_1+\\alpha_2,\\alpha_1-\\alpha_2,\\alpha_1\\)  \n\n**2.** 设 \\(A\\) 为 \\(3\\times 3\\) 矩阵，则 \\(A\\) 可逆的充要条件是（　　）\nA. \\(r(A)=2\\)　　B. \\(\\det A\\neq0\\)　　C. \\(Ax=0\\) 有非零解　　D. \\(A\\) 有两行成比例\n\n**3.** 设 \\(A\\) 为 \\(m\\times n\\) 矩阵，\\(r(A)=r\\)。齐次方程组 \\(Ax=0\\) 的解空间维数为（　　）\nA. \\(r\\)　　B. \\(m-r\\)　　C. \\(n-r\\)　　D. \\(m+n-r\\)\n\n**4.** 向量组 \\(\\alpha_1,\\alpha_2,\\alpha_3\\) 线性相关的一个充分条件是（　　）\nA. 其中有两个向量相等　　B. 其中每个向量都非零　　C. 向量个数等于 3　　D. 向量个数小于维数\n\n**5.** 设 \\(A\\) 为 \\(n\\) 阶方阵，且 \\(A^2=A\\)。下列结论一定成立的是（　　）\nA. \\(A=0\\)　　B. \\(A=E\\)　　C. \\(A\\) 可逆　　D. \\(A(A-E)=0\\)\n\n**6.** 行列式 \\(\\begin{vmatrix}1&2\\\\3&4\\end{vmatrix}\\) 的值为（　　）\nA. \\(-2\\)　　B. \\(2\\)　　C. \\(10\\)　　D. \\(-10\\)\n\n**7.** 下列映射 \\(T:\\mathbb R^2\\to\\mathbb R^2\\) 中，是线性映射的是（　　）\nA. \\(T(x,y)=(x+1,y)\\)　　B. \\(T(x,y)=(x^2,y)\\)  \nC. \\(T(x,y)=(2x-y,y)\\)　　D. \\(T(x,y)=(xy,0)\\)\n\n**8.** 设 \\(A\\) 为 \\(2\\times 3\\) 矩阵，\\(B\\) 为 \\(3\\times 2\\) 矩阵，且 \\(r(A)=2\\)，\\(r(B)=2\\)。则 \\(r(AB)\\)（　　）\nA. 一定为 0　　B. 一定为 1　　C. 一定为 2　　D. 可能小于 2"
+        },
+        {
+          "type": "text",
+          "title": "判断题",
+          "body": "### 判断题\n\n1. 若向量组 \\(\\alpha_1,\\ldots,\\alpha_s\\) 线性无关，则其中任意部分组也线性无关。\n<p align=\"right\"><input type=\"checkbox\"> </p>\n\n2. 若 \\(n\\) 个 \\(n\\) 维向量线性相关，则以它们为列的矩阵行列式为零。\n<p align=\"right\"><input type=\"checkbox\"> </p>\n\n3. 齐次线性方程组 \\(Ax=0\\) 中，若方程个数少于未知元个数，则必有非零解。\n<p align=\"right\"><input type=\"checkbox\"> </p>\n\n4. 若 \\(A\\) 为 \\(m\\times n\\) 矩阵，则 \\(r(A)\\) 等于 \\(A\\) 的非零行数。\n<p align=\"right\"><input type=\"checkbox\"> </p>\n\n5. 设 \\(A,B\\) 为同阶方阵，若 \\(AB=0\\)，则 \\(A=0\\) 或 \\(B=0\\)。\n<p align=\"right\"><input type=\"checkbox\"> </p>\n\n6. 线性映射的核是定义域的子空间。\n<p align=\"right\"><input type=\"checkbox\"> </p>"
+        },
+        {
+          "type": "text",
+          "title": "解答题",
+          "body": "### 解答题\n\n**1.**（10 分）请陈述线性相关与线性无关的定义，说明其几何直觉及一个适用条件；并分别给出线性相关与线性无关的一个正例和一个反例。\n\n**2.**（10 分）某车间生产产品 A、B，需用三种原料。生产 1 件 A 需原料 1、2、3 分别为 \\(2,1,0\\) kg；生产 1 件 B 需原料 1、2、3 分别为 \\(1,2,3\\) kg。现有原料 1、2、3 分别为 \\(7,8,9\\) kg。设 A、B 的产量分别为 \\(x,y\\)。建立线性方程组，求产量，并解释结果的实际含义。\n\n**3.**（10 分）某同学解方程组\n\\[\n\\begin{cases}\nx+y+z=3,\\\\2x+2y+2z=6,\\\\x-y+z=1\n\\end{cases}\n\\]\n时写道：“系数矩阵的行列式为零，所以方程组无解；又因为第二个方程是第一个方程的 2 倍，所以只需解前两个方程。”请指出至少一处错误，说明其属于假设不满足、概念误用还是计算错误，并写出修正后的关键步骤，判断方程组解集的结构。"
+        },
+        {
+          "type": "text",
+          "title": "综合题",
+          "body": "### 综合题\n\n**1.**（10 分）设\n\\[\nA(\\lambda)=\\begin{pmatrix}1&1&\\lambda\\\\1&\\lambda&1\\\\\\lambda&1&1\\end{pmatrix}.\n\\]\n(1) 讨论 \\(\\lambda\\) 取何值时 \\(A(\\lambda)\\) 可逆，并求此时 \\(A(\\lambda)\\) 的秩；\n(2) 求使 \\(A(\\lambda)x=0\\) 有非零解的 \\(\\lambda\\)，并给出此时解空间的维数；\n(3) 取一个使 \\(A(\\lambda)\\) 不可逆的 \\(\\lambda\\)，判断方程组 \\(A(\\lambda)x=(1,0,0)^T\\) 是否有解，并说明依据。\n\n**2.**（10 分）设 \\(X_1=(1,0,a)\\)，\\(X_2=(0,1,2)\\)，\\(X_3=(a,1,2a)\\)。\n(1) 讨论 \\(a\\) 取何值时向量组 \\(X_1,X_2,X_3\\) 线性相关、何值时线性无关；\n(2) 若将 \\(X_3\\) 改为 \\((a,1,2a+1)\\)，判断原结论中需要调整的步骤，并给出新的相关性条件；\n(3) 对 (2) 中的一个取值，写出一个线性关系或说明不存在非零线性关系。"
+        }
+      ],
+      "key_takeaways": [],
+      "common_errors": [],
+      "prerequisite_refs": [],
+      "exercises": [],
+      "sources": [],
+      "mapping_criteria": [
+        "d45f439012214482970c88f6f99b37a1",
+        "f93e29956f6a46fe9212bf04b14de8b5",
+        "da9b2b756bfd4e9ca35383f071ccc5a8",
+        "928f6cddb57a48099be5ee22739d8223",
+        "51c1b9abafdd43529cbd1d755ce37ff6"
+      ],
+      "id": "9c4f9e7b",
+      "token_usage": {
+        "prompt_tokens": 56810,
+        "completion_tokens": 15128,
+        "total_tokens": 71938,
+        "usage_source": "provider"
+      }
+    }
+  ],
+  "cheatsheet": null
+}

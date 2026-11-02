@@ -8,6 +8,9 @@
   max-height: 76vh;
   overflow-y: auto;
   padding-right: 6px;
+  /* 手机上滚动必须能用手势惯性，否则长表单像卡住 */
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
 
 .ai-edu-subtitle {
@@ -52,6 +55,52 @@ textarea.ai-edu-input {
   min-height: 64px;
   resize: vertical;
   line-height: 1.55;
+}
+
+/* 教程规范一栏：下拉与「查看规范」并排，手机上按钮不被挤到看不见 */
+.ai-edu-spec-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.ai-edu-spec-select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ai-edu-spec-toggle {
+  flex: 0 0 auto;
+  font-size: 11px;
+  white-space: nowrap;
+  padding: 0 10px;
+}
+
+.ai-edu-spec-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+/* 规范正文是等宽 Markdown，长行必须能换行；手机上单独给一段可滚区域，
+   避免展开后把整张表单顶出屏幕 */
+.ai-edu-spec-pre {
+  margin: 0;
+  max-height: 40vh;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  padding: 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 6px);
+  background: var(--background-primary-alt, var(--background-secondary));
+  font-size: 11.5px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  tab-size: 2;
 }
 
 .ai-edu-hint {
@@ -268,4 +317,180 @@ textarea.ai-edu-input {
   font-size: 10px;
   line-height: 1.5;
   color: var(--text-error);
+}
+
+/* ------------------------------------------------------------------ *
+ * 手机端（安卓 / iOS Obsidian）适配
+ *
+ * 判定用 Obsidian 自己打的 is-phone / is-mobile 类（body 上），不用媒体查询
+ * 猜宽度：桌面把窗口拖窄不应该触发手机布局，手机横屏也不应该退回桌面布局。
+ * ------------------------------------------------------------------ */
+.is-mobile .modal.ai-edu-modal-wide {
+  /* 手机上占满可用宽度：Obsidian 移动端弹窗自带边距，再收 94vw 会浪费两侧空间 */
+  width: 100%;
+  max-width: 100%;
+  max-height: 92dvh;
+  border-radius: var(--radius-m, 8px);
+}
+
+.is-mobile .ai-edu-modal .modal-content {
+  /* dvh 跟随地址栏/软键盘伸缩；vh 在移动端会把底部按钮顶到屏幕外 */
+  max-height: calc(92dvh - 92px);
+  padding-right: 0;
+  padding-bottom: 8px;
+}
+
+.is-mobile .ai-edu-form {
+  gap: 16px;
+}
+
+.is-mobile .ai-edu-label {
+  font-size: 13px;
+}
+
+/* 输入框字号 16px 是硬要求：安卓 Chrome 内核在 <16px 的输入框上聚焦时会自动放大页面，
+   放大后布局错位、且用户必须手动缩回来 */
+.is-mobile .ai-edu-input,
+.is-mobile select.ai-edu-input,
+.is-mobile textarea.ai-edu-input,
+.is-mobile input.ai-edu-input {
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+.is-mobile textarea.ai-edu-input {
+  min-height: 84px;
+}
+
+/* 下拉在手机上会唤起系统选择器，右侧留白避免文字被箭头压住 */
+.is-mobile select.ai-edu-input {
+  padding-right: 28px;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-muted) 50%),
+    linear-gradient(135deg, var(--text-muted) 50%, transparent 50%);
+  background-position: calc(100% - 16px) 52%, calc(100% - 11px) 52%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+
+/* 触控目标：安卓无障碍建议 ≥48dp，至少不能小于 44px */
+.is-mobile .ai-edu-actions {
+  gap: 10px;
+  margin-top: 18px;
+  justify-content: stretch;
+  /* 按钮吸底：长表单滚到任何位置都能提交，不必先滚回底部 */
+  position: sticky;
+  bottom: 0;
+  padding: 10px 0 calc(10px + env(safe-area-inset-bottom));
+  background: var(--background-primary);
+  border-top: 1px solid var(--background-modifier-border);
+  z-index: 2;
+}
+
+.is-mobile .ai-edu-actions button {
+  flex: 1 1 44%;
+  min-height: 46px;
+  font-size: 14px;
+  padding: 10px 12px;
+}
+
+.is-mobile .ai-edu-paused .ai-edu-actions {
+  position: static;
+  border-top: none;
+  background: transparent;
+  padding-bottom: 0;
+}
+
+.is-mobile .ai-edu-spec-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.is-mobile .ai-edu-spec-toggle {
+  min-height: 44px;
+  font-size: 13px;
+  padding: 8px 12px;
+}
+
+.is-mobile .ai-edu-spec-pre {
+  max-height: 45dvh;
+  font-size: 12.5px;
+  padding: 12px;
+}
+
+/* 材料区：手机上按钮全宽、行内信息允许换行，状态标签不再挤掉文件名 */
+.is-mobile .ai-edu-materials-head {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.is-mobile .ai-edu-kind-group {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 6px;
+}
+
+.is-mobile .ai-edu-kind-btn {
+  min-height: 44px;
+  font-size: 13px;
+  padding: 8px 6px;
+}
+
+.is-mobile .ai-edu-material-pick {
+  margin-left: 0;
+  min-height: 46px;
+  font-size: 14px;
+  padding: 10px 12px;
+}
+
+.is-mobile .ai-edu-material-name {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.is-mobile .ai-edu-material-line {
+  gap: 8px;
+  font-size: 12px;
+}
+
+.is-mobile .ai-edu-material-status {
+  margin-left: 0;
+}
+
+.is-mobile .ai-edu-material-remove {
+  margin-left: auto;
+  min-width: 44px;
+  min-height: 32px;
+  font-size: 12px;
+}
+
+.is-mobile .ai-edu-check {
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+}
+
+.is-mobile .ai-edu-check input[type="checkbox"] {
+  width: 22px;
+  height: 22px;
+  margin-top: 0;
+}
+
+.is-mobile .ai-edu-status {
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.is-mobile .ai-edu-hint,
+.is-mobile .ai-edu-subtitle,
+.is-mobile .ai-edu-draft-status {
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
 }

@@ -245,28 +245,11 @@ def section(goal, discipline: DisciplineProfile, item: dict, criteria_by_id: dic
         },
     ]
 
-    exercises = [
-        "练习 1：按本章步骤复现最小示例，并把实际输出与预期对照。",
-        "练习 2：故意制造一个错误，按排查方法定位并修复。",
-        f"练习 3：把本章方法应用到你自己的场景：{getattr(goal, 'application_context', '你的真实任务')}。",
-    ]
-    common_errors = [
-        {"error": e, "cause": "常见原因见学科清单", "diagnose": "按「复现 → 定位 → 最小验证」三步排查"}
-        for e in discipline.common_errors[:3]
-    ]
-
     return {
         "title": title,
         "purpose": str(item.get("purpose", "") or summary),
         "content_type": str(item.get("content_type", "") or "mixed"),
         "content": content,
-        "key_takeaways": [
-            "每一步操作都要能回答：输入是什么、输出是什么、如何验证。",
-            "遇到错误先复现，再定位，最后最小验证修复。",
-        ],
-        "common_errors": common_errors,
-        "prerequisite_refs": ["完成上一章内容", "工具/环境可用"],
-        "exercises": exercises,
         "sources": [
             {
                 "title": "演示模式生成内容",
@@ -309,40 +292,29 @@ def cheatsheet(goal, discipline: DisciplineProfile, outline_items: list[dict]) -
 
 
 def extra_exercises(goal, discipline: DisciplineProfile, outline_items: list[dict]) -> dict:
-    """演示版额外练习：与教程正文例题区分，答案集中放在文件后部。"""
-    title = _goal_title(goal)
-    app = getattr(goal, "application_context", "") or "你的真实任务"
-    return {
-        "title": f"{title} · 额外练习",
-        "intro": (
-            f"本文件是「{title}」教程的独立练习集，用于强化、巩固、检验和迁移。"
-            "题目与教程正文中的必要练习不重复；参考答案集中在本文件末尾，建议先完成再看。"
-        ),
-        "exercises": [
-            {
-                "number": 1,
-                "task": "在不看教程步骤的情况下，复现教程第 2 节的最小任务（换一组数据或目录）。",
-                "requirements": "只允许查阅速查文件；记录每一步的实际输出。",
-                "hint": "按「前提 → 操作 → 验证」的顺序执行；卡住时先确认输入是否符合预期。",
-                "solution": "输出与预期一致、且能解释每步输入输出即为通过。",
-            },
-            {
-                "number": 2,
-                "task": "构造一个会触发常见错误的场景，复现、定位并修复它。",
-                "requirements": "记录错误信息、原因判断与修复后的验证结果。",
-                "hint": f"可从常见错误清单中选择：{('路径/权限/参数拼写' if _is_cli(discipline) else '概念混淆/假设不满足/计算错误')}。",
-                "solution": "错误可复现、原因解释正确、修复后验证通过即为通过。",
-            },
-            {
-                "number": 3,
-                "task": f"把教程方法应用到一个教程未覆盖的情境：{app}。",
-                "requirements": "完成后解释你依据了哪条规律，哪些地方需要调整。",
-                "hint": "先识别情境与教程示例的相同点与不同点，再决定沿用或调整哪些步骤。",
-                "solution": "任务完成且能说明关键决策依据即为通过；说不清依据说明迁移尚未形成。",
-            },
-        ],
-        "answers_note": "参考答案与自检标准如上各题 solution 所示；先独立完成，再逐条对照。",
-    }
+    """演示版额外练习：按教程大纲分节的 Markdown 成品（与真实链路同构）。"""
+    title = f"{_goal_title(goal)} · 额外练习"
+    chapters = [str(i.get("title", "")).strip() for i in outline_items or [] if isinstance(i, dict)]
+    chapters = [c for c in chapters if c] or ["综合练习"]
+    parts = [f"# {title}", ""]
+    num = 0
+    for ch in chapters:
+        parts += [f"## {ch}", "", "### 一、易错辨析", "", "> 考察知识点：本章核心概念的适用边界。", "", "#### 判断题", ""]
+        num += 1
+        parts += [
+            f"**{num}.** 演示判断题：本章结论在任意条件下都成立。",
+            "",
+            '<p align="right"><input type="checkbox"> </p>',
+            "",
+            "### 二、训练",
+            "",
+            "#### 基础概念题",
+            "",
+        ]
+        num += 1
+        parts += [f"**{num}.** 演示计算题：按本章方法完成一个最小任务并写出依据。", "", "", "", "### 参考答案", ""]
+        parts += [f"**{num - 1}.** 错误。", "", f"**{num}.** 答案：完成且能说明依据即为通过。", ""]
+    return {"title": title, "markdown": "\n".join(parts), "exercises": [{"number": i} for i in range(1, num + 1)]}
 
 
 def feedback(goal, discipline: DisciplineProfile, task, attempt, criteria: list[dict]) -> dict:

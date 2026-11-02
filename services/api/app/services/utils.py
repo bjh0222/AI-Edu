@@ -11,6 +11,15 @@ from ..learning.generation_tiers import normalize_tier
 from ..learning.levels import normalize_level
 
 
+_EXERCISE_NUM_RE = re.compile(r"^\*\*(\d+)\.\*\*", re.M)
+
+
+def parse_exercise_numbers(markdown: str) -> list[dict]:
+    """从练习成品 Markdown 里抽出题号清单（去重升序），供前端计数与存在性判断。"""
+    nums = sorted({int(n) for n in _EXERCISE_NUM_RE.findall(str(markdown or ""))})
+    return [{"number": n} for n in nums]
+
+
 def jload(text: str | None, default: Any = None) -> Any:
     if not text:
         return default if default is not None else []
@@ -237,10 +246,28 @@ def prune_foreign_section_blocks(content: dict) -> dict:
     return content
 
 
-def _spec_dict_is_authoritative(spec: dict) -> bool:
+# 指导型规范（教程族）：只约束「怎么写」，不接管节数与节标题。
+# default_tutorial 走这条路径后，知识性教程规范可以写得再细也不会把章节结构定死。
+GUIDANCE_SCENES = ("default_tutorial", "knowledge_tutorial", "practical_tutorial")
+
+
+def is_guidance_snapshot(spec) -> bool:
+    """快照是否是指导型规范（有名字、scene 在 GUIDANCE_SCENES 内）。"""
     if not isinstance(spec, dict) or not str(spec.get("name", "")).strip():
         return False
-    if str(spec.get("scene", "")) == "default_tutorial" and not (spec.get("deliverables") or []):
+    return str(spec.get("scene", "")).strip() in GUIDANCE_SCENES
+
+
+def _spec_dict_is_authoritative(spec: dict) -> bool:
+    """结构权威判定：规范是否接管「节标题对齐」。
+
+    指导型规范（教程族）不接管节数与节标题：章节名由大纲模型按知识逻辑决定，
+    落库的 section 标题就是最终标题，不能被大纲条目覆盖回去。
+    导出渲染的分支另按「是否具名规范」判断（见 tutorials.export_markdown）。
+    """
+    if not isinstance(spec, dict) or not str(spec.get("name", "")).strip():
+        return False
+    if is_guidance_snapshot(spec) and not (spec.get("deliverables") or []):
         return False
     return True
 

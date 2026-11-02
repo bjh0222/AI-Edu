@@ -237,16 +237,23 @@ def test_cheatsheet_repairs_forbidden_schedule_expression_once(client, monkeypat
 def test_extra_exercises_keeps_first_output_when_repair_still_violates(client, monkeypatch):
     _set_profile(client, "不要安排日程\n")
 
-    dirty = {"title": "练习", "exercises": [{"number": 1, "task": "每天做一遍管道练习"}]}
-    still_dirty = {"title": "练习", "exercises": [{"number": 1, "task": "每周完成一次复盘"}]}
+    dirty = "# 练习\n\n**1.** 每天做一遍管道练习\n"
+    still_dirty = "# 练习\n\n**1.** 每周完成一次复盘，每天看一眼\n"
+
     ai, seen = _real_mode_service(monkeypatch, [dirty, still_dirty])
+
+    class _P:
+        def complete_text(self, system, user):
+            return ai._real_json("x", system, user, (), None), 1, None
+
+    monkeypatch.setattr(ai, "provider", _P())
 
     data = ai.extra_exercises(_goal(), DISCIPLINE, [])
 
     assert len(seen) == 2, "只修复一次，不无限重试"
     assert data["rule_check"]["repaired"] is False
     assert "不要安排日程" in data["rule_check"]["violations"][0]
-
+    assert data["markdown"] == dirty.strip()
 
 def test_rule_check_is_not_dropped_by_response_schema():
     """核验结果必须穿得出去：响应模型此前没有这个字段，违规信息在 API 层被静默丢弃。"""

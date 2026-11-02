@@ -33,6 +33,7 @@ const TEXT_MATERIAL_EXTENSIONS = new Set([".txt", ".md", ".markdown", ".csv"]);
 
 const EXTRACT_LABEL: Record<string, { label: string; tone: "done" | "warn" | "neutral" }> = {
   ok: { label: "已抽取正文", tone: "done" },
+  truncated: { label: "原文超长已截断", tone: "warn" },
   empty: { label: "未抽取到正文", tone: "warn" },
   unsupported: { label: "仅登记来源", tone: "neutral" },
   failed: { label: "抽取失败", tone: "warn" },
@@ -372,8 +373,12 @@ export function MaterialsPanel({
         ) : (
           <ul className="grid gap-1.5">
             {materials.map((material) => {
-              const extract =
-                material.extract_status === "ok" && TEXT_MATERIAL_EXTENSIONS.has(material.ext)
+              const isTruncated =
+                material.extract_status === "truncated" ||
+                (material.source_char_count || 0) > (material.char_count || 0);
+              const extract = isTruncated
+                ? { label: "原文超长已截断", tone: "warn" as const }
+                : material.extract_status === "ok" && TEXT_MATERIAL_EXTENSIONS.has(material.ext)
                   ? { label: "已载入原始全文", tone: "done" as const }
                   : EXTRACT_LABEL[material.extract_status] ?? EXTRACT_LABEL.pending;
               return (
@@ -396,6 +401,13 @@ export function MaterialsPanel({
                       {deleting === material.id ? "删除中…" : "删除"}
                     </button>
                   </div>
+                  {isTruncated && (
+                    <div className="mt-1 rounded-lg border border-[#f0c36d] bg-[#fff8e6] px-2 py-1 text-[10px] leading-relaxed text-[#8a5b00]">
+                      原文约 {(material.source_char_count || 0).toLocaleString()} 字，超过单份入库上限，
+                      仅载入前 {(material.char_count || 0).toLocaleString()} 字。后段内容 AI 看不到，
+                      请拆分文件或分章上传。
+                    </div>
+                  )}
                   {material.excerpt_preview && (
                     <div className="mt-1 line-clamp-2 text-[10px] leading-relaxed text-muted">
                       内容预览：{material.excerpt_preview}

@@ -305,9 +305,14 @@ class GoalMaterial(Base, TimestampMixin):
     size = Column(Integer, default=0)
     status = Column(String(20), default="ready")  # ready / failed
     error_message = Column(Text, default="")
-    extract_status = Column(String(20), default="pending")  # ok / empty / unsupported / failed
+    # ok / empty / unsupported / failed / truncated（truncated = 原文超过入库上限被截断）
+    extract_status = Column(String(20), default="pending")
     text_excerpt = Column(Text, default="")
+    # 实际入库 / 实际注入的字数（可能被 MAX_EXCERPT_CHARS 截断）
     char_count = Column(Integer, default=0)
+    # 文件原文字数（未截断）。source_char_count > char_count 即为被截断，
+    # 旧库由 _migrate_sqlite_columns 自动补列，默认 0 表示「未知 / 未截断」。
+    source_char_count = Column(Integer, default=0)
     note = Column(Text, default="")
 
 

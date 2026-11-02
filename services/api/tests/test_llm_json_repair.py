@@ -98,3 +98,29 @@ def test_unhandled_error_returns_readable_json(client, monkeypatch):
     assert detail["code"] == "internal_error"
     assert "RuntimeError" in detail["message"]
 
+
+def test_extract_json_repairs_invalid_latex_escapes():
+    """模型把集合差 H\\K、\\underline 等原样写进字符串：完整输出也应能解析。"""
+    text = (
+        '{"title": "参考答案", "content": [{"type": "note", "title": "", '
+        '"body": "设 G=H\\\\K、k\\\\in K；\\\\underline{x} 与 \\\\frac{1}{2} 均保留"}]}'
+    )
+    data = extract_json(text)
+    body = data["content"][0]["body"]
+    assert "H\\K" in body  # 字面反斜杠保留，语义不变
+    assert "\\underline{x}" in body
+    assert "\\frac{1}{2}" in body
+
+
+def test_extract_json_keeps_valid_escapes_untouched():
+    text = '{"body": "换行\\n制表\\t引号\\\"反斜杠\\\\结束"}'
+    data = extract_json(text)
+    assert data["body"] == '换行\n制表\t引号"反斜杠\\结束'
+
+
+def test_extract_json_error_shows_tail_and_finish_reason():
+    with pytest.raises(LLMError) as excinfo:
+        extract_json('{"a": "未闭合……训练版式：**n.*', finish_reason="stop")
+    message = str(excinfo.value)
+    assert "训练版式" in message
+    assert "finish_reason=stop" in message

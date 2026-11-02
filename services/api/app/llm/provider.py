@@ -54,6 +54,64 @@ def _escape_control_chars_in_strings(text: str) -> str:
     return "".join(out)
 
 
+_VALID_ESCAPES = set('"\\/bfnrt')
+_HEX_DIGITS = set("0123456789abcdefABCDEF")
+
+
+def _is_valid_unicode_escape(text: str, idx: int) -> bool:
+    """text[idx] 为反斜杠且其后是合法 \\uXXXX 时成立。"""
+    frag = text[idx + 2 : idx + 6]
+    return text[idx + 1 : idx + 2] == "u" and len(frag) == 4 and all(c in _HEX_DIGITS for c in frag)
+
+
+def _escape_invalid_backslashes(text: str) -> str:
+    """把字符串内部的非法转义反斜杠转义掉（模型写 LaTeX 的高频毛病）。
+
+    数学内容里 \\frac、\\cup、\\underline 极常见：模型把它们原样写进 JSON 字符串，
+    其中 \\u 后跟非十六进制（\\underline / \\cup）同样是非法转义。整份输出可能
+    完全写完（finish_reason=stop）却仍解析失败——截断重试对它无效，必须就地修复。
+    修复语义不变：转义反斜杠后，字符串内容恰为模型想写的字面文本。
+    """
+    out: list[str] = []
+    idx = 0
+    total = len(text)
+    in_string = False
+    while idx < total:
+        ch = text[idx]
+        if not in_string:
+            out.append(ch)
+            if ch == '"':
+                in_string = True
+            idx += 1
+            continue
+        if ch == '"':
+            out.append(ch)
+            in_string = False
+            idx += 1
+            continue
+        if ch != "\\":
+            out.append(ch)
+            idx += 1
+            continue
+        nxt = text[idx + 1 : idx + 2]
+        if nxt in _VALID_ESCAPES:
+            out.append(ch)
+            out.append(nxt)
+            idx += 2
+            continue
+        if _is_valid_unicode_escape(text, idx):
+            out.append(text[idx : idx + 6])
+            idx += 6
+            continue
+        out.append("\\\\")
+        if nxt:
+            out.append(nxt)
+            idx += 2
+        else:
+            idx += 1
+    return "".join(out)
+
+
 def _strip_trailing_commas(text: str) -> str:
     """去掉对象/数组末尾的多余逗号（模型常见的小毛病）。"""
     previous = None
@@ -79,13 +137,23 @@ def _tolerant_loads(text: str) -> Any:
         ch = text[idx]
         if in_string:
             if ch == "\\":
-                if idx + 1 < total:
+                nxt = text[idx + 1 : idx + 2]
+                if nxt in _VALID_ESCAPES:
                     out.append(ch)
-                    out.append(text[idx + 1])
+                    out.append(nxt)
                     idx += 2
                     continue
+                if _is_valid_unicode_escape(text, idx):
+                    out.append(text[idx : idx + 6])
+                    idx += 6
+                    continue
+                # 非法转义（LaTeX 反斜杠等）：转义反斜杠本身，保留其后字符
                 out.append("\\\\")
-                idx += 1
+                if nxt:
+                    out.append(nxt)
+                    idx += 2
+                else:
+                    idx += 1
                 continue
             if ch == '"':
                 nxt = idx + 1
@@ -115,7 +183,7 @@ def _tolerant_loads(text: str) -> Any:
     return json.loads("".join(out))
 
 
-def extract_json(text: str) -> dict:
+def extract_json(text: str, finish_reason: str = "") -> dict:
     """从模型输出中提取 JSON（容忍围栏、前后缀、裸换行与未转义引号）。
 
     注意：不能先用 ``` 正则剥围栏——教程正文本身可能包含 ```mermaid / ```python
@@ -126,9 +194,13 @@ def extract_json(text: str) -> dict:
     1. 原文直接解析；
     2. 截取首个 { 到末个 } 再解析；
     3. 转义字符串内部的裸换行/制表符（Markdown / Mermaid 场景最常见）；
-    4. 同时清理对象/数组末尾的多余逗号；
-    5. 最后用容错扫描器处理未转义引号；
-    6. 仍失败时，尝试剥离整体 ```json 围栏后重试以上步骤。
+    4. 转义字符串内部的非法转义反斜杠（LaTeX \\frac / \\underline 等）；
+    5. 同时清理对象/数组末尾的多余逗号；
+    6. 最后用容错扫描器处理未转义引号（其内部同样修复非法转义）；
+    7. 仍失败时，尝试剥离整体 ```json 围栏后重试以上步骤。
+
+    不做「截断 salvaging」：被截断的输出补全括号只会静默丢字段/丢章节，
+    正确做法是把失败原因（含结尾与长度）暴露给上层触发重试或确定性兜底。
     """
     raw = text.strip()
     candidates = [raw]
@@ -148,8 +220,14 @@ def extract_json(text: str) -> dict:
         attempts = [
             candidate,
             _escape_control_chars_in_strings(candidate),
+            _escape_invalid_backslashes(candidate),
             _strip_trailing_commas(candidate),
             _strip_trailing_commas(_escape_control_chars_in_strings(candidate)),
+            _strip_trailing_commas(_escape_invalid_backslashes(candidate)),
+            _escape_control_chars_in_strings(_escape_invalid_backslashes(candidate)),
+            _strip_trailing_commas(
+                _escape_control_chars_in_strings(_escape_invalid_backslashes(candidate))
+            ),
         ]
         for attempt in attempts:
             try:
@@ -160,7 +238,15 @@ def extract_json(text: str) -> dict:
             return _tolerant_loads(_strip_trailing_commas(candidate))
         except json.JSONDecodeError:
             continue
-    raise LLMError(f"模型输出无法解析为 JSON：{raw[:200]}")
+    # 只给开头 200 字时，「输出在字符串中间戛然而止」这一最关键线索恰好被切掉
+    # （真实故障：模型输出被截断，结尾停在半句话上）。结尾 + 长度 + finish_reason
+    # 才能区分「截断」「围栏混入」「完全胡话」三类根因，供上层决定重试或兜底。
+    tail = raw[-160:].replace("\n", "\\n")
+    reason = f"（finish_reason={finish_reason}）" if finish_reason else ""
+    raise LLMError(
+        f"模型输出无法解析为 JSON{reason}：长度 {len(raw)} 字符；"
+        f"开头：{raw[:120]}；结尾：{tail}"
+    )
 
 
 def parse_usage(data: dict[str, Any]) -> dict[str, Any] | None:
@@ -305,7 +391,7 @@ class OpenAICompatibleProvider:
         )
         if len(self.api_key) >= 6:
             content = content.replace(self.api_key, "[REDACTED]")
-        return extract_json(content), latency, usage
+        return extract_json(content, _finish_reason), latency, usage
 
     def complete_text(self, system: str, user: str) -> tuple[str, int, dict[str, Any] | None]:
         content, latency, usage, _finish_reason = self._post(

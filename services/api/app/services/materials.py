@@ -53,17 +53,32 @@ KIND_LABELS: dict[str, str] = {
 
 EXTRACT_LABELS: dict[str, str] = {
     "ok": "已抽取正文",
+    "truncated": "原文超长已截断",
     "empty": "未抽取到正文",
     "unsupported": "仅登记来源",
     "failed": "抽取失败",
     "pending": "待抽取",
 }
 
+
 MAX_EXCERPT_CHARS = settings.material_max_text_chars  # 入库正文上限（默认 20 万字，可配），仅防极端文件
 PROMPT_PER_FILE_CHARS = settings.material_prompt_per_file_chars  # 0 = 单份材料不截断
 PROMPT_TOTAL_CHARS = settings.material_prompt_total_chars  # 0 = 全部材料不截断
 PDF_MAX_PAGES = 500  # PDF 抽取的页数保险丝，防极端大文件拖死请求
 CHUNK_SIZE = 1024 * 256
+
+
+def _cap_text(text: str) -> tuple[str, bool]:
+    """按入库上限截断正文，并显式告知是否截断。
+
+    入库（extract_text）与注入（_material_body）两条路径都必须走它。
+    历史上两处各写各的：入库截到 20 万字却仍返回 status='ok'，注入侧反而直接
+    path.read_bytes() 读原文全量进 prompt —— 同一份 45 万字材料，库里 20 万字、
+    提示词里 45 万字，且前端两处都显示「已抽取正文」，用户完全无法察觉后半本丢了。
+    """
+    if MAX_EXCERPT_CHARS > 0 and len(text) > MAX_EXCERPT_CHARS:
+        return text[:MAX_EXCERPT_CHARS], True
+    return text, False
 
 
 def _materials_root() -> Path:
@@ -221,10 +236,14 @@ def _pdf_text(path: Path) -> str:
     return _normalize(_pdf_literal_text(raw))
 
 
-def extract_text(path: Path, ext: str) -> tuple[str, str]:
-    """返回 (正文, 状态)。状态：ok / empty / unsupported / failed。"""
+def extract_text(path: Path, ext: str) -> tuple[str, str, int]:
+    """返回 (正文, 状态, 原文字数)。状态：ok / empty / unsupported / failed / truncated。
+
+    第三个返回值是**截断前**的原文字数：截断后 len(text) 就等于上限了，
+    丢掉原长就无法告诉用户「45 万字只载入了 20 万字」，也无法在提示词里标注缺口。
+    """
     if ext in IMAGE_EXTENSIONS:
-        return "", "unsupported"
+        return "", "unsupported", 0
     try:
         if ext in TEXT_EXTENSIONS:
             text = _normalize(_decode_text(path.read_bytes()))
@@ -233,12 +252,14 @@ def extract_text(path: Path, ext: str) -> tuple[str, str]:
         elif ext == ".pdf":
             text = _normalize(_pdf_text(path))
         else:
-            return "", "unsupported"
+            return "", "unsupported", 0
     except OSError:
-        return "", "failed"
+        return "", "failed", 0
     if not text:
-        return "", "empty"
-    return text[:MAX_EXCERPT_CHARS], "ok"
+        return "", "empty", 0
+    source_chars = len(text)
+    capped, truncated = _cap_text(text)
+    return capped, ("truncated" if truncated else "ok"), source_chars
 
 
 # ------------------------------------------------------------------ CRUD
@@ -258,6 +279,7 @@ def material_dict(material: GoalMaterial) -> dict:
         "error_message": material.error_message or "",
         "extract_status": material.extract_status or "pending",
         "char_count": int(material.char_count or 0),
+        "source_char_count": int(material.source_char_count or 0),
         "note": material.note or "",
         "created_at": material.created_at,
         "excerpt_preview": text[:160],
@@ -323,7 +345,7 @@ def save_upload(
         target.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail={"code": "empty_file", "message": "文件为空，无法上传"})
 
-    text, extract_status = extract_text(target, ext)
+    text, extract_status, source_chars = extract_text(target, ext)
     material = GoalMaterial(
         id=material_id,
         goal_id=goal.id,
@@ -337,6 +359,7 @@ def save_upload(
         extract_status=extract_status,
         text_excerpt=text,
         char_count=len(text),
+        source_char_count=source_chars,
         note=(note or "")[:500],
     )
     db.add(material)
@@ -361,12 +384,17 @@ def delete_material(db: Session, material_id: str) -> dict:
 
 
 def _material_body(db: Session, row: GoalMaterial) -> str:
-    """取材料的注入正文：纯文本文件直接读原始全文，其余退回库内抽取文本。
+    """取材料的注入正文：纯文本文件读原文，其余退回库内抽取文本。
 
     txt/md/csv 是「文本文件的内容即文件本身」，因此注入时逐字读取文件原文，
-    不经过抽取 / 归一化，也不在这里施加 prompt 长度上限；旧数据入库时正文被截断，
-    原文比库内正文长时回写自愈。文件丢失或读取失败时退回库内文本，保证注入不因
-    单份材料中断。PDF/DOCX 仍使用上传阶段得到的文本抽取结果。
+    不经过归一化；旧数据入库时正文被截断，原文比库内正文长时回写自愈。
+    文件丢失或读取失败时退回库内文本，保证注入不因单份材料中断。
+    PDF/DOCX 仍使用上传阶段得到的文本抽取结果。
+
+    **但读取的原文同样要过 _cap_text**：这是历史上「两条路径给出矛盾字数」的根源——
+    入库侧截到 MAX_EXCERPT_CHARS，这里却把整本书全量塞进 prompt，既撑爆上下文，
+    又让 extract_status 显示 ok。现在两侧共用同一上限，并把原文字数记进
+    source_char_count，超限时状态改判为 truncated（前端据此告警）。
     """
     stored_text = (row.text_excerpt or "").strip()
     if not row.stored_name:
@@ -383,15 +411,176 @@ def _material_body(db: Session, row: GoalMaterial) -> str:
     text = text.strip()
     if not text:
         return stored_text
-    if len(text) > len(stored_text):
-        row.text_excerpt = text
-        row.char_count = len(text)
-        row.extract_status = "ok"
+
+    source_len = len(text)
+    capped, truncated = _cap_text(text)
+    # 回写自愈：库内正文比原文短，或截断状态 / 原文字数与实测不符时更新
+    dirty = (
+        len(capped) != len(stored_text)
+        or capped != stored_text
+        or int(row.char_count or 0) != len(capped)
+        or int(row.source_char_count or 0) != source_len
+        or (row.extract_status or "") != ("truncated" if truncated else "ok")
+    )
+    if dirty:
+        row.text_excerpt = capped
+        row.char_count = len(capped)
+        row.source_char_count = source_len
+        row.extract_status = "truncated" if truncated else "ok"
         try:
             db.commit()
         except Exception:  # noqa: BLE001  回写失败不影响本次注入
             db.rollback()
-    return text
+    return capped
+
+
+# ------------------------------------------------------------------ 按章切片
+#
+# 只有「阅读教程规范」（scene == READING_GUIDE_SCENE）会用到这一节：整本书分章上传后，
+# 每节只注入自己那一章，而不是把全书塞进每一次调用。其它规范仍走全量注入，行为不变。
+#
+# 为什么必须切片：materials_context 的结果在 _sections_worker 里被同一个变量传给
+# **每一个**并行节任务（tutorials.py 的 materials_text=materials_text）。40 万字的书
+# 按 0.70 token/字 换算是 28 万 token/节，单节直接超上下文窗口，不是慢而是调用失败。
+
+_CN_DIGITS = {"零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+              "六": 6, "七": 7, "八": 8, "九": 9}
+_CHAPTER_MARK_RE = re.compile(r"第\s*([0-9一二三四五六七八九十百]+)\s*[章篇]")
+
+# 全书级材料：任何一节都可能要用（交叉引用、章节定位），不参与按章过滤
+GLOBAL_MATERIAL_KEYWORDS = (
+    "目录", "前言", "序言", "导言", "绪论", "总览", "全书", "索引",
+    "toc", "contents", "introduction", "preface",
+)
+
+# 大文件内的章标题：允许 `## 第 1 章 x` 与裸行 `第一章 x`（后者要求整行很短，防误判正文）
+_MATERIAL_HEADING_RE = re.compile(
+    r"^(?:#{1,4}\s*)?(?:[一二三四五六七八九十百零\d]+\s*[、.．]\s*)?"
+    r"(第\s*[0-9一二三四五六七八九十百]+\s*[章篇][^#\n]{0,50}?)\s*$"
+)
+
+
+def _cn_to_int(text: str) -> int | None:
+    """中文/阿拉伯数字归一：'1'->1, '一'->1, '十二'->12, '二十三'->23。"""
+    text = str(text or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    if text == "十":
+        return 10
+    total, num = 0, 0
+    for ch in text:
+        if ch in _CN_DIGITS:
+            num = _CN_DIGITS[ch]
+        elif ch == "十":
+            total += (num or 1) * 10
+            num = 0
+        elif ch == "百":
+            total += (num or 1) * 100
+            num = 0
+        else:
+            return None
+    result = total + num
+    return result or None
+
+
+def chapter_marker(text: str) -> str | None:
+    """从标题 / 文件名里提取归一化章号：'第一章 导论' -> '1'，无章号 -> None。
+
+    章号必须归一化后再比，否则「第 1 章」（大纲）与「第一章」（文件名）永远匹配不上，
+    按章切片会静默退化成「一节材料都拿不到」。
+    """
+    match = _CHAPTER_MARK_RE.search(str(text or ""))
+    if not match:
+        return None
+    num = _cn_to_int(match.group(1))
+    return str(num) if num else None
+
+
+def is_global_material(filename: str, body: str = "") -> bool:
+    """全书级材料（目录 / 前言 / 索引）：不按章过滤，每节都注入。"""
+    name = str(filename or "").lower()
+    return any(word.lower() in name for word in GLOBAL_MATERIAL_KEYWORDS)
+
+
+def chapter_marker_of_any(text: str) -> str | None:
+    """文件内部是否存在章结构；有则返回第一个章号，无则 None。
+
+    用于区分两种「文件名没章号」的情况：
+    - 整本书存成一个 md（有章结构）-> 应切片或跳过，不该全量注入每节；
+    - 单份无章节的讲义 / 论文（无章结构）-> 视为全书级材料，每节都注入。
+    只扫前若干行找标题，避免对超大文件做全文遍历。
+    """
+    fence: str | None = None
+    for idx, line in enumerate(str(text or "").splitlines()):
+        if idx > 4000:            # 章结构必然出现在文件前部，扫到这就够
+            break
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            marker = stripped[:3]
+            if fence is None:
+                fence = marker
+            elif stripped.startswith(fence):
+                fence = None
+            continue
+        if fence is not None:
+            continue
+        if not stripped.startswith("#") and len(stripped) > 40:
+            continue
+        match = _MATERIAL_HEADING_RE.match(stripped)
+        if not match:
+            continue
+        mark = chapter_marker(match.group(1))
+        if mark:
+            return mark
+    return None
+
+
+def slice_chapter(text: str, chapter: str) -> str | None:
+    """从含章标题的大文件里切出指定章正文；识别不到章结构时返回 None。
+
+    覆盖「整本书存成一个 md」的用法：用户不必手工拆成 12 个文件。
+    切出的片段自带章标题行，模型能知道自己读到的是哪一章。
+    """
+    target = str(chapter or "").strip()
+    if not target or not text:
+        return None
+    lines = str(text).splitlines()
+    starts: list[tuple[int, str]] = []
+    fence: str | None = None
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        # 代码块里的 # 不是标题
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            marker = stripped[:3]
+            if fence is None:
+                fence = marker
+            elif stripped.startswith(fence):
+                fence = None
+            continue
+        if fence is not None:
+            continue
+        # 裸行章标题必须够短，避免把正文里的「第三章提到…」误判成标题
+        if not stripped.startswith("#") and len(stripped) > 40:
+            continue
+        match = _MATERIAL_HEADING_RE.match(stripped)
+        if not match:
+            continue
+        mark = chapter_marker(match.group(1))
+        if mark:
+            starts.append((idx, mark))
+    if not starts:
+        return None
+    for pos, (_, mark) in enumerate(starts):
+        if mark != target:
+            continue
+        begin = starts[pos][0]
+        end = starts[pos + 1][0] if pos + 1 < len(starts) else len(lines)
+        chunk = "\n".join(lines[begin:end]).strip()
+        return chunk or None
+    return None
+
 
 
 def materials_context(
@@ -400,11 +589,27 @@ def materials_context(
     *,
     per_file_chars: int = PROMPT_PER_FILE_CHARS,
     total_chars: int = PROMPT_TOTAL_CHARS,
+    chapter: str | None = None,
+    all_chapters: list[str] | None = None,
+    global_only: bool = False,
 ) -> str:
     """把该目标的材料正文注入 prompt。
 
     默认 ``per_file_chars=0``、``total_chars=0``：不截断，文本材料以原始全文进入
     prompt。调用方显式传入正数时才执行预算，并在材料块内写明截断状态。
+
+    ``chapter`` 非空时启用**按章注入**（目前只有阅读教程规范使用）：
+    - 全书级材料（目录 / 前言 / 索引）始终全文注入；
+    - 文件名带章号且与 ``chapter`` 相同的材料全文注入；
+    - 文件名无章号但内部有章标题的大文件，切出对应章注入；
+    - 属于其它章的材料**不注入正文**，只留一行清单，避免模型以为材料不存在而编造。
+
+    ``all_chapters`` 用于生成那行清单；不传则不输出清单。
+    ``global_only=True`` 时只注入全书级材料（目录 / 前言 / 索引），一份章节正文都不给：
+    用于阅读规范的「全书认知地图」与后置全书层——它们需要全书骨架，不需要任何一章的细节。
+
+    不传 ``chapter`` 且不传 ``global_only`` 时行为与从前完全一致（全量注入），
+    练习 / 试卷规范不受影响。
     """
     rows = (
         db.query(GoalMaterial)
@@ -417,9 +622,40 @@ def materials_context(
 
     blocks: list[str] = []
     used = 0
+    target_chapter = str(chapter or "").strip()
+    skipped: list[str] = []
+
+    # global_only 兜底：没有任何全书级材料（用户只上传了各章正文）时，
+    # 过滤会把材料全部清空，全书层将拿到空上下文 —— 比 token 超标更糟，
+    # 是静默产出空壳或纯编造。此时退回全量注入（材料总量本来就不大）。
+    if global_only and not any(is_global_material(str(r.filename or "")) for r in rows):
+        global_only = False
+
     for index, row in enumerate(rows, 1):
         label = KIND_LABELS.get(row.kind or "reference", "参考资料")
         body = _material_body(db, row)
+
+        # ---- 只要全书级材料：章节正文一律跳过 ----
+        if global_only and body and not is_global_material(row.filename or ""):
+            skipped.append(str(row.filename or f"材料{index}"))
+            continue
+
+        # ---- 按章注入：只保留本章材料 + 全书级材料 ----
+        if target_chapter and body:
+            row_marker = chapter_marker(row.filename or "")
+            if row_marker is None and not is_global_material(row.filename or ""):
+                # 文件名没有章号：可能是「整本书一个文件」，尝试按内部章标题切
+                sliced = slice_chapter(body, target_chapter)
+                if sliced is not None:
+                    body = sliced
+                elif chapter_marker_of_any(body) is not None:
+                    # 文件里确有章结构、但不含本章 -> 属于别的章，跳过
+                    skipped.append(str(row.filename or f"材料{index}"))
+                    continue
+            elif row_marker is not None and row_marker != target_chapter:
+                skipped.append(str(row.filename or f"材料{index}"))
+                continue
+
         if body:
             if (row.ext or "") in TEXT_EXTENSIONS:
                 source = "原始全文"
@@ -427,6 +663,15 @@ def materials_context(
                 source = "文本抽取"
             else:
                 source = "已读取正文"
+            # 入库即被截断的材料：把「不完整」写进提示词，避免模型把前半本当成全书。
+            # source_char_count 为 0 表示旧数据未知，此时只看状态位。
+            source_chars = int(row.source_char_count or 0)
+            stored_truncated = (
+                (row.extract_status or "") == "truncated"
+                or (source_chars > 0 and source_chars > len(body))
+            )
+            if stored_truncated:
+                source = f"{source}，已被截断"
             head = (
                 f"[材料 {index}] {row.filename}（{label}，{_human_size(int(row.size or 0))}，"
                 f"{source}，{len(body)} 字）"
@@ -436,6 +681,13 @@ def materials_context(
             if truncated:
                 snippet += (
                     f"\n\n【材料内容未完整注入：仅注入前 {per_file_chars} / {len(body)} 字】"
+                )
+            elif stored_truncated:
+                total = source_chars or MAX_EXCERPT_CHARS
+                snippet += (
+                    f"\n\n【材料原文约 {total:,} 字，超过单份入库上限 "
+                    f"{MAX_EXCERPT_CHARS:,} 字，此处仅为前段；后段内容不可见，"
+                    f"不得声称已通读全文，也不得为缺失部分编造内容】"
                 )
         else:
             head = (
@@ -459,6 +711,22 @@ def materials_context(
             break
         blocks.append(block)
         used += len(block)
+
+    if (target_chapter or global_only) and skipped:
+        others = [c for c in (all_chapters or []) if str(c).strip() != target_chapter]
+        scope_desc = (
+            f"本节只注入了第 {target_chapter} 章的材料与全书级材料（目录 / 前言等）"
+            if target_chapter
+            else "本节只注入了全书级材料（目录 / 前言 / 索引），未注入任何章节正文"
+        )
+        note = (
+            f"\n\n【本次按章注入】{scope_desc}。"
+            f"以下材料未注入正文，不要引用或猜测其内容：\n"
+            + "\n".join(f"- {name}" for name in skipped)
+            + (f"\n全书章节：{', '.join(str(c) for c in others)}（仅供交叉引用时定位，正文不得展开）"
+               if others else "")
+        )
+        blocks.append(note)
     return "\n\n".join(blocks)
 
 

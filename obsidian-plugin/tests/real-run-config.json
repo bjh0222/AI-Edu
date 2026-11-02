@@ -1,0 +1,17 @@
+{
+  "material_kind": "example_source",
+  "generate_extra_exercises": false,
+  "generation_tier": "standard",
+  "material_name": "基础代数一_课后习题汇编.md",
+  "hard_constraints": "1. 变式与原题一一对应，覆盖参考习题集全部习题，不得遗漏或合并\n2. 每一章的综合题恰好十条，须融合本章两个及以上知识点\n3. 只输出题面，不输出答案、解析或提示\n4. 变式保持原题考点与难度档，只改情境、参数、对象或结论方向",
+  "domain_key": "math_logic",
+  "format_spec_id": "96b77b2e4cde4d05bb1bc0cf56d0c76a",
+  "material_type": "text/markdown",
+  "time_budget": "无上限",
+  "motivation": "已完成参考习题集一轮练习，需要通过变式与综合训练巩固各章考点、提升迁移能力",
+  "application_context": "1. 针对参考习题集的每一道课后习题，各输出两个变式题\n2. 在习题每一章输出十个综合题",
+  "title": "基础代数一 变式与综合题汇编",
+  "material_path": "D:\\BJH\\基础代数一_课后习题汇编.md",
+  "current_level": "掌握各章知识点与基本解法，已完成原习题集一轮练习",
+  "capability_level": "L3"
+}

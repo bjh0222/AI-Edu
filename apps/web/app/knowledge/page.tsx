@@ -373,13 +373,20 @@ function KnowledgeInner() {
 
   // ------------------------------------------------------------ rendering
   const shell = (
-    <div className={fullscreen ? "fixed inset-0 z-50 flex flex-col bg-white" : "flex h-[100dvh] flex-col bg-white"}>
+    <div
+      className={
+        fullscreen
+          ? "fixed inset-0 z-50 flex flex-col bg-white"
+          // 手机端让出底部标签栏高度（含手势条安全区），否则图谱下缘被标签栏压住
+          : "flex h-[calc(100dvh-56px-env(safe-area-inset-bottom))] flex-col bg-white md:h-[100dvh]"
+      }
+    >
       {/* 顶部工具栏 */}
       <div className="flex h-14 shrink-0 items-center gap-2 border-b border-line px-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="text-[11px] font-bold tracking-[1.2px] text-brand">知识网络</span>
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <span className="shrink-0 whitespace-nowrap text-[11px] font-bold tracking-[1.2px] text-brand">知识网络</span>
           <select
-            className="max-w-[220px] truncate rounded-lg border border-line bg-[#fbfcff] px-2 py-1.5 text-[12px] font-semibold text-[#24324a] outline-none focus:border-[#a69dff]"
+            className="min-w-0 max-w-[220px] flex-1 truncate rounded-lg border border-line bg-[#fbfcff] px-2 py-1.5 text-[12px] font-semibold text-[#24324a] outline-none focus:border-[#a69dff]"
             value={scopeGoal ? `goal:${scopeGoal}` : scopeDomain ? `domain:${scopeDomain}` : "global"}
             onChange={(e) => {
               const v = e.target.value;

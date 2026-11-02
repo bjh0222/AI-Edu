@@ -190,10 +190,10 @@ def test_companions_generate_in_parallel(client, monkeypatch):
     calls = {"cheatsheet": 0, "extra_exercises": 0}
 
     def make_patch(kind: str):
-        def patched(self, goal, discipline, outline_items, materials_text=""):
+        def patched(self, goal, discipline, outline_items, materials_text="", *args, **kwargs):
             calls[kind] += 1
             barrier.wait()  # 串行实现永远等不到对方 → BrokenBarrierError
-            return originals[kind](self, goal, discipline, outline_items, materials_text)
+            return originals[kind](self, goal, discipline, outline_items, materials_text, *args, **kwargs)
 
         return patched
 

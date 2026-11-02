@@ -97,13 +97,16 @@ def test_quickstart_with_extra_exercises_and_wikilinks(client):
     content = tutorial["current_version"]["content"]
     assert report_passed(tutorial)
 
-    # v2 章节结构：content 内容块非空，含必要练习
+    # v2 章节结构：content 内容块非空；设计之初的固定栏目已退役，正文不再带练习清单
     sections = content["sections"]
     assert len(sections) >= 3
     for s in sections:
         assert s.get("content"), s
         assert all(b.get("body", "").strip() for b in s["content"])
-    assert any(s.get("exercises") for s in sections)
+        assert not s.get("exercises")
+        assert not s.get("key_takeaways")
+        assert not s.get("common_errors")
+        assert not s.get("prerequisite_refs")
 
     # 配套文件都在内容里，且文件名一致
     cheat = content["cheatsheet"]
@@ -131,7 +134,7 @@ def test_quickstart_with_extra_exercises_and_wikilinks(client):
     assert r2.status_code == 200
     assert extra["filename"] + ".md" in unquote(r2.headers["content-disposition"])
     assert "参考答案" in r2.text
-    assert extra["exercises"][0]["task"] in r2.text
+    assert extra["markdown"].splitlines()[0].lstrip("# ").strip()[:12] in r2.text
     # 速查文件回链主教程（主教程导出文件名 = {目标}-教程）
     assert f"[[{goal['title']}-教程]]" in r1.text
 
@@ -154,9 +157,9 @@ def test_quickstart_without_extra_exercises(client):
     assert r2.status_code == 404
     assert r2.json()["detail"]["code"] == "exercises_not_found"
 
-    # 教程正文的必要练习不受开关影响
+    # 教程正文的「必要练习」栏目已退役：正文不再出现练习清单（额外练习文件仍受开关控制）
     sections = content["sections"]
-    assert any(s.get("exercises") for s in sections)
+    assert all(not s.get("exercises") for s in sections)
 
 
 # ---------------------------------------------------------------- 输出归一化（模型异常输出不崩溃）
@@ -184,10 +187,49 @@ def test_normalize_section_raw_handles_bad_model_output():
     assert data["content"][0]["title"] == "坏类型块"
     assert data["exercises"] == []
     assert data["mapping_criteria"] == []
-    assert len(data["common_errors"]) == 1
-    assert data["common_errors"][0]["error"] == "路径错误"
+    # 固定栏目已退役：模型即使按旧提示词输出这些字段也一律丢弃
+    assert data["common_errors"] == []
+    assert data["key_takeaways"] == []
+    assert data["prerequisite_refs"] == []
     assert len(data["sources"]) == 1
-    assert data["key_takeaways"] == ["结论1"]
+
+
+def test_normalize_section_raw_drops_meta_sections():
+    """设计之初的元栏目（使用说明/自检清单/核心结论…）整块剔除，教学内容保留。"""
+    data = _normalize_section_raw({
+        "title": "章",
+        "content": [
+            {"type": "text", "title": "使用说明", "body": "做题方式见下"},
+            {"type": "note", "title": "自检清单：怎么用这套题判断“真的会了”", "body": "四条打勾"},
+            {"type": "text", "title": "核心结论", "body": "三条结论"},
+            {"type": "text", "title": "使用说明与数据口径", "body": "改名变体也要删"},
+            {"type": "table", "title": "常见错误诊断表", "body": "改名变体也要删"},
+            {"type": "text", "title": "章末自测清单", "body": "改名变体也要删"},
+            {"type": "text", "title": "缓冲溶液的常见错误辨析", "body": "概念性内容必须保留"},
+            {"type": "text", "title": "理想气体状态方程", "body": "正文"},
+        ],
+    })
+    assert [b["title"] for b in data["content"]] == ["缓冲溶液的常见错误辨析", "理想气体状态方程"]
+
+
+def test_normalize_section_raw_strips_meta_segments_in_body():
+    """元栏目写进空标题块的 body 里（自带小标题）也要整段删除。"""
+    data = _normalize_section_raw({
+        "title": "章",
+        "content": [
+            {
+                "type": "note",
+                "title": "",
+                "body": (
+                    "### 章末自测清单\n\n| 维度 | 动作 |\n|---|---|\n| 错误诊断 | 对照 |\n\n"
+                    "### 真正的正文\n\n保留这段。"
+                ),
+            },
+        ],
+    })
+    body = data["content"][0]["body"]
+    assert "自测清单" not in body
+    assert "### 真正的正文" in body
 
 
 def test_normalize_section_raw_defaults():
@@ -527,3 +569,102 @@ def test_section_prompt_forbids_tags_and_guesses(client):
     assert "[[目标标题-知识速查]]" in user
     assert "[[目标标题-额外练习]]" in user
     assert "[[...]]" in WIKILINK_RULE and "占位" in WIKILINK_RULE
+
+
+def test_normalize_obsidian_syntax_keeps_math_wikilink_lookalikes():
+    """数学记号里的 [[...]] 不是双链：行内 $...$、$$ 围栏与矩阵写法都不得被包反引号。"""
+    from app.services.tutorials import normalize_obsidian_syntax
+
+    text = (
+        "设 $R[[x]]$ 为形式幂级数环；矩阵 $\\begin{pmatrix}1\\end{pmatrix}$ 记为 $[[a,b],[c,d]]$。\n"
+        "\n"
+        "$$\n"
+        "[[u,v],[w,z]]\n"
+        "$$\n"
+        "\n"
+        "真正的占位链接 [[x]] 应降级为行内代码。"
+    )
+    out = normalize_obsidian_syntax(text, set())
+    assert "$R[[x]]$" in out, "行内数学里的 [[x]] 记号不应被改写"
+    assert "[[a,b],[c,d]]" in out and "`[[a,b],[c,d]]`" not in out
+    assert "`[[u,v],[w,z]]`" not in out and "[[u,v],[w,z]]" in out
+    assert "`[[x]]`" in out, "非数学的占位双链仍应降级"
+
+
+def test_normalize_math_delimiters_unifies_to_dollar_signs():
+    """\\(...\\) 与 \\[...\\] 在 Obsidian 不渲染：导出前必须归一成 $ 与 $$。
+
+    截图里 (X_1,X_2)、[ \\begin{cases} … ] 这类裸文本，就是反斜杠分隔符被
+    Markdown 转义吃掉的结果。归一在落库与导出两层都做，历史版本导出也能自愈。
+    """
+    from app.services.tutorials import normalize_math_delimiters
+
+    text = "\n".join([
+        r"8. 若 \(X_1,X_2\) 都是非齐次线性方程组 \(AX=b\) 的解。",
+        r"\[",
+        r"\begin{cases}",
+        r"x_1+x_2+x_3=6,\\",
+        r"\end{cases}",
+        r"\]",
+        "代码块原样保留：",
+        "```",
+        r"\(not\ converted\)",
+        "```",
+        r"已经是 $x^2$ 与 $$y$$ 的不动。",
+    ])
+    out = normalize_math_delimiters(text)
+    assert r"\(" not in out.split("```")[0], out
+    assert "$X_1,X_2$" in out
+    assert "$AX=b$" in out
+    assert "$$\n\\begin{cases}" in out
+    assert "\\end{cases}\n$$" in out
+    assert r"\(not\ converted\)" in out, "代码围栏内不转换"
+    assert "$x^2$" in out and "$$y$$" in out
+
+
+def test_math_fence_closes_on_standalone_delimiter_line():
+    r"""单独一行的闭合符必须结束数学环境，否则其后正文全部跳过双链处理。
+
+    试卷里的行列式常写成三行：\[ / 矩阵 / \]。只按「开而未闭」翻转状态时，
+    闭合行 \] 不会把 in_math 翻回来，后续所有真断链都会被漏检（也漏改写）。
+    """
+    from app.services.tutorials import normalize_obsidian_syntax
+
+    text = "\n".join([
+        "计算",
+        r"\[",
+        r"D=\begin{vmatrix}1&2\\3&4\end{vmatrix}",
+        r"\]",
+        "公式结束后出现真断链 [[不存在的笔记]]，应当降级。",
+    ])
+    out = normalize_obsidian_syntax(text, set())
+    assert r"\begin{vmatrix}" in out, "公式内容保持原样"
+    assert "`[[不存在的笔记]]`" in out, "公式之后的正文仍要处理双链"
+    assert "### " not in out
+
+
+def test_normalize_obsidian_syntax_keeps_latex_delimiter_math():
+    r"""\(...\) 与 \[...\] 也是数学环境：里面的 [[...]] 记号不得被包反引号。
+
+    试卷里常把公式写成 \(R[[x]]\)（LaTeX 圆括号分隔符）。此前只识别 $/$$，
+    会把形式幂级数环记号当成双链降级，破坏成不可渲染的形态。
+    """
+    from app.services.tutorials import normalize_obsidian_syntax
+
+    text = "\n".join([
+        r"设 \(f\in R[[x]]\) 可逆，形式幂级数环 \(F[[x]]\) 是唯一因子分解环。",
+        r"矩阵 \[\begin{pmatrix}1&0\\0&1\end{pmatrix}\] 与 \(A[[x]]\) 同阶。",
+        r"$$R[[x]]$$ 是环",
+        r"\[ R[[x]] \]",
+        r"真正的占位链接 [[x]] 应降级为行内代码。",
+    ])
+    out = normalize_obsidian_syntax(text, set())
+    # 圆括号 / 方括号 LaTeX 记法内的 [[...]] 保持原样，不被降级成行内代码
+    assert r"\(f\in R[[x]]\)" in out
+    assert r"\(F[[x]]\)" in out
+    assert r"\(A[[x]]\)" in out
+    assert "$$R[[x]]$$" in out
+    assert r"\[ R[[x]] \]" in out
+    assert "`" not in out.split("真正的占位链接")[0], "数学记法里不得插入反引号"
+    # 公式之外的真双链仍降级为行内代码
+    assert out.count("`[[x]]`") == 1

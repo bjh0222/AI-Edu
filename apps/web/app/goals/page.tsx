@@ -11,6 +11,7 @@ import { Badge, Button, Card, Empty, Field, inputCls } from "@/components/ui";
 import { GoalExamples } from "@/components/goals/GoalExamples";
 import { PausedGenerationPanel, type PauseResumeAction } from "@/components/PausedGeneration";
 import { PendingMaterialsPanel, type PendingMaterial } from "@/components/goals/PendingMaterialsPanel";
+import { SpecPicker } from "@/components/SpecPicker";
 
 const STATUS_LABEL = PHASE_LABELS;
 
@@ -565,24 +566,16 @@ export default function GoalsPage() {
               生成内容必须逐条满足，违反任一条即视为本次交付不合格
             </span>
           </Field>
-          <Field label="格式规范">
-            <select
-              className={inputCls}
+          {/* 教程规范：分组避免把试卷/练习规范误选给教程任务；「查看规范」在手机上
+              是不打开偏好设置页就能确认规范正文的唯一途径，与 Obsidian 插件行为一致 */}
+          <div className="mb-3">
+            <SpecPicker
+              specs={formatSpecs}
               value={formatSpecId}
-              onChange={(e) => setFormatSpecId(e.target.value)}
-            >
-              <option value="auto">自动匹配（未命中时使用默认规范）</option>
-              <option value="">本次不使用特殊规范</option>
-              {formatSpecs.map((spec) => (
-                <option key={spec.id} value={spec.id}>
-                  {spec.name}{spec.is_default ? " · 默认" : ""}
-                </option>
-              ))}
-            </select>
-            <span className="text-[10px] leading-relaxed text-muted">
-              手动选择优先于自动匹配；规范会在大纲生成前绑定为本任务快照。
-            </span>
-          </Field>
+              onChange={setFormatSpecId}
+              disabled={busy}
+            />
+          </div>
           <Field label="可投入总时间">
             <input
               className={inputCls}
@@ -635,10 +628,10 @@ export default function GoalsPage() {
                 checked={form.generate_extra_exercises}
                 onChange={(e) => setForm({ ...form, generate_extra_exercises: e.target.checked })}
               />
-              生成独立的额外练习文件（含参考答案，与教程内必要练习分开）
+              生成独立的额外练习文件（含参考答案；教程正文不再内置练习栏目）
             </label>
             <span className="text-[10px] text-muted">
-              开启后会随教程生成一份 Markdown 练习集并在教程中建立双链；教程内的必要练习不受影响
+              开启后会随教程生成一份 Markdown 练习集并在教程中建立双链
             </span>
           </Field>
           <div className="mb-3 grid gap-1.5">

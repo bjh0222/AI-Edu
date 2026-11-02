@@ -170,7 +170,7 @@ function GoalForm({
             checked={form.generate_extra_exercises}
             onChange={(event) => setForm({ ...form, generate_extra_exercises: event.target.checked })}
           />
-          生成独立的额外练习文件（含参考答案，与教程内必要练习分开）
+          生成独立的额外练习文件（含参考答案；教程正文不再内置练习栏目）
         </label>
         <span className="text-[10px] text-muted">
           开启后重新生成教程时会附带一份 Markdown 练习集，并在教程中建立 Obsidian 双链

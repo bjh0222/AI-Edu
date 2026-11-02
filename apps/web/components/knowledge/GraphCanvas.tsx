@@ -40,6 +40,42 @@ interface SimNode extends GraphNode {
   fy?: number | null;
 }
 
+/**
+ * 适应画布的纯计算：给定节点位置与画布尺寸，返回居中且完整可见的变换。
+ * 放在组件外是刻意的：React Compiler 无法保留组件内 useCallback 的 memoization
+ * （fitView 里加过 setState 后报「Existing memoization could not be preserved」），
+ * 身份每渲染都变 → 依赖它的 effect 每渲染重跑 → effect 内 setTransform 连续嵌套
+ * 50 次 → Maximum update depth exceeded。纯函数没有身份，effect 依赖它不会重跑。
+ */
+function computeFitTransform(
+  pos: Record<string, { x: number; y: number }>,
+  w: number,
+  h: number,
+  fullscreen: boolean
+): { k: number; x: number; y: number } | null {
+  const ids = Object.keys(pos);
+  if (!ids.length) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const id of ids) {
+    const p = pos[id];
+    minX = Math.min(minX, p.x);
+    minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x);
+    maxY = Math.max(maxY, p.y);
+  }
+  const pad = 64;
+  const k = Math.max(
+    0.35,
+    Math.min(fullscreen ? 4 : 3, (w - pad * 2) / Math.max(1, maxX - minX), (h - pad * 2) / Math.max(1, maxY - minY))
+  );
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  return { k, x: w / 2 - cx * k, y: h / 2 - cy * k };
+}
+
 export default function GraphCanvas({
   nodes,
   edges,
@@ -60,6 +96,10 @@ export default function GraphCanvas({
   const [transform, setTransform] = useState({ x: 0, y: 0, k: 1 });
   const [positions, setPositions] = useState<Record<string, { x: number; y: number }>>({});
   const [hovered, setHovered] = useState<string | null>(null);
+  // autoFit：视图是否跟随力导向布局自动适应。用户一旦平移 / 捏合 / 缩放就交还控制权；
+  // 点「适应」、双击、切换全屏或换数据集时重新开启。用 state 而不是 ref：
+  // React Compiler 的 immutability 规则禁止在 effect 之外写「被 effect 读过的 ref」。
+  const [autoFit, setAutoFit] = useState(true);
   const simRef = useRef<SimNode[]>([]);
   const alphaRef = useRef(1);
   const edgesRef = useRef<GraphEdge[]>(edges);
@@ -67,6 +107,10 @@ export default function GraphCanvas({
   const positionsRef = useRef<Record<string, { x: number; y: number }>>({});
   const transformRef = useRef(transform);
   const dragRef = useRef<{ kind: "node" | "pan"; id?: string; sx: number; sy: number; ox: number; oy: number } | null>(null);
+  // 触屏：按 pointerId 记录活动触点，两个触点即进入捏合缩放（安卓/iOS 通用）。
+  // 只记 id 与坐标，不用 Map 之外的全局状态，避免与鼠标路径互相干扰。
+  const pointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pinchRef = useRef<{ dist: number; cx: number; cy: number; k: number; x: number; y: number } | null>(null);
   const highlightSet = useMemo(() => new Set(highlight), [highlight]);
 
   useEffect(() => {
@@ -99,6 +143,10 @@ export default function GraphCanvas({
 
   // 数据变化：重建仿真节点（跨渲染保留位置），唤醒物理循环并同步初始位置
   useEffect(() => {
+    // 换数据集（预设/范围/搜索过滤）等于换了一张图：重新自动适应。
+    // 豁免理由同 goals/page.tsx 的 load：这是与外部数据同步，不是状态级联。
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setAutoFit(true);
     const prev = new Map(simRef.current.map((n) => [n.id, n]));
     const cx = sizeRef.current.w / 2;
     const cy = sizeRef.current.h / 2;
@@ -199,46 +247,36 @@ export default function GraphCanvas({
 
   // ------------------------------------------------------------ fit / zoom
   const fitView = useCallback(() => {
-    const pos = positionsRef.current;
-    const ids = Object.keys(pos);
-    if (!ids.length) return;
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (const id of ids) {
-      const p = pos[id];
-      minX = Math.min(minX, p.x);
-      minY = Math.min(minY, p.y);
-      maxX = Math.max(maxX, p.x);
-      maxY = Math.max(maxY, p.y);
-    }
-    const w = sizeRef.current.w;
-    const h = sizeRef.current.h;
-    const pad = 64;
-    const k = Math.max(
-      0.35,
-      Math.min(fullscreen ? 4 : 3, (w - pad * 2) / Math.max(1, maxX - minX), (h - pad * 2) / Math.max(1, maxY - minY))
-    );
-    const cx = (minX + maxX) / 2;
-    const cy = (minY + maxY) / 2;
-    setTransform({ k, x: w / 2 - cx * k, y: h / 2 - cy * k });
+    // 显式点「适应」/双击：把视图交还给自动跟随，直到用户再次平移或缩放
+    setAutoFit(true);
+    const next = computeFitTransform(positionsRef.current, sizeRef.current.w, sizeRef.current.h, fullscreen);
+    if (next) setTransform(next);
   }, [fullscreen]);
 
-  // 首次有位置、切换全屏时自动适应画布
-  const fittedRef = useRef(false);
+  // 自动适应画布：力导向布局会持续展开节点，而容器尺寸（尤其手机小屏）往往
+  // 在首次 fit 之后才稳定 —— 一次性 fit 会把图谱留在角落、大半屏空白。
+  // 所以「用户没手动平移/缩放前」视图持续跟随布局；一旦用户动手就停止跟随，
+  // 避免与用户抢视图。切换全屏 / 换数据集时重新交还给自动适应。
   useEffect(() => {
-    if (!fittedRef.current && Object.keys(positions).length > 0) {
-      fittedRef.current = true;
-      fitView();
-    }
-  }, [positions, fitView]);
+    // 视图跟随物理仿真：布局每帧变化就重新居中（用户没接管视图时）。
+    // 依赖里**不能**放 fitView：React Compiler 保不住它的 memoization，身份每渲染都变，
+    // 会让本 effect 每渲染重跑、setTransform 连续嵌套 → Maximum update depth exceeded。
+    if (!autoFit || Object.keys(positions).length === 0) return;
+    const next = computeFitTransform(positionsRef.current, sizeRef.current.w, sizeRef.current.h, fullscreen);
+    if (next) setTransform(next);
+  }, [positions, autoFit, fullscreen]);
 
   useEffect(() => {
-    if (fittedRef.current) fitView();
-  }, [fullscreen, fitView]);
+    // 切换全屏：画布尺寸突变，必须重新适应并把视图交还自动跟随。
+    // 豁免理由同 goals/page.tsx 的 load：与外部（全屏状态）同步，不是状态级联。
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setAutoFit(true);
+    const next = computeFitTransform(positionsRef.current, sizeRef.current.w, sizeRef.current.h, fullscreen);
+    if (next) setTransform(next);
+  }, [fullscreen]);
 
   const zoomBy = (factor: number) => {
+    setAutoFit(false);
     setTransform((t) => {
       const maxK = fullscreen ? 4 : 3;
       const k = Math.min(maxK, Math.max(0.5, t.k * factor));
@@ -256,8 +294,10 @@ export default function GraphCanvas({
     return { x: (clientX - rect.left - t.x) / t.k, y: (clientY - rect.top - t.y) / t.k };
   };
 
-  const onNodeMouseDown = (e: React.MouseEvent, id: string) => {
+  const onNodePointerDown = (e: React.PointerEvent, id: string) => {
     e.stopPropagation();
+    // 手机上拖节点：捕获指针后，手指移出画布也不会丢事件
+    e.currentTarget.setPointerCapture?.(e.pointerId);
     const n = simRef.current.find((s) => s.id === id);
     if (!n) return;
     const p = toGraph(e.clientX, e.clientY);
@@ -267,15 +307,60 @@ export default function GraphCanvas({
     restart();
   };
 
-  const onPaneMouseDown = (e: React.MouseEvent) => {
+  const onPanePointerDown = (e: React.PointerEvent) => {
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointersRef.current.size === 2) {
+      // 第二个触点落下：进入捏合，记住起始距离与当时的变换，后续按比例缩放
+      const [a, b] = Array.from(pointersRef.current.values());
+      const rect = wrapRef.current?.getBoundingClientRect();
+      const t = transformRef.current;
+      setAutoFit(false);
+      pinchRef.current = {
+        dist: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+        cx: (a.x + b.x) / 2 - (rect?.left ?? 0),
+        cy: (a.y + b.y) / 2 - (rect?.top ?? 0),
+        k: t.k,
+        x: t.x,
+        y: t.y,
+      };
+      dragRef.current = null;
+      return;
+    }
     dragRef.current = { kind: "pan", sx: e.clientX, sy: e.clientY, ox: transform.x, oy: transform.y };
   };
 
   useEffect(() => {
-    const move = (e: MouseEvent) => {
+    const move = (e: PointerEvent) => {
+      const tracked = pointersRef.current.get(e.pointerId);
+      if (tracked) {
+        tracked.x = e.clientX;
+        tracked.y = e.clientY;
+      }
+
+      // 捏合中：两点距离比例即缩放比例，围绕两指中点缩放
+      const pinch = pinchRef.current;
+      if (pinch && pointersRef.current.size >= 2) {
+        const [a, b] = Array.from(pointersRef.current.values());
+        const rect = wrapRef.current?.getBoundingClientRect();
+        if (!rect) return;
+        const dist = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
+        const cx = (a.x + b.x) / 2 - rect.left;
+        const cy = (a.y + b.y) / 2 - rect.top;
+        const maxK = fullscreen ? 4 : 3;
+        const k = Math.min(maxK, Math.max(0.5, pinch.k * (dist / pinch.dist)));
+        setTransform({
+          k,
+          x: cx - ((pinch.cx - pinch.x) * k) / pinch.k,
+          y: cy - ((pinch.cy - pinch.y) * k) / pinch.k,
+        });
+        return;
+      }
+
       const d = dragRef.current;
       if (!d) return;
       if (d.kind === "pan") {
+        // 第一次真正平移才算「用户接管视图」：单纯点按（选中/取消）与拖动节点都不算
+        setAutoFit(false);
         setTransform((t) => ({ ...t, x: d.ox + (e.clientX - d.sx), y: d.oy + (e.clientY - d.sy) }));
       } else if (d.id) {
         const rect = wrapRef.current?.getBoundingClientRect();
@@ -289,7 +374,18 @@ export default function GraphCanvas({
         }
       }
     };
-    const up = () => {
+    const up = (e: PointerEvent) => {
+      pointersRef.current.delete(e.pointerId);
+      // 抬起一指后退出捏合；若还剩一指，把它当作新的平移起点，避免视图跳变
+      if (pinchRef.current && pointersRef.current.size < 2) {
+        pinchRef.current = null;
+        const [rest] = Array.from(pointersRef.current.values());
+        const t = transformRef.current;
+        dragRef.current = rest
+          ? { kind: "pan", sx: rest.x, sy: rest.y, ox: t.x, oy: t.y }
+          : null;
+        return;
+      }
       const d = dragRef.current;
       if (d?.kind === "node" && d.id) {
         const n = simRef.current.find((s) => s.id === d.id);
@@ -301,26 +397,45 @@ export default function GraphCanvas({
       }
       dragRef.current = null;
     };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
+    // pointer 事件带 passive 语义差异：显式 { passive: false } 才能在 move 里 preventDefault
+    window.addEventListener("pointermove", move, { passive: false });
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
     return () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
     };
-  }, [transform, restart]);
+  }, [transform, restart, fullscreen]);
 
-  const onWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    const rect = wrapRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-    setTransform((t) => {
-      const maxK = fullscreen ? 4 : 3;
-      const k = Math.min(maxK, Math.max(0.5, t.k * (e.deltaY < 0 ? 1.12 : 0.89)));
-      return { k, x: mx - ((mx - t.x) * k) / t.k, y: my - ((my - t.y) * k) / t.k };
-    });
-  };
+  const zoomAt = useCallback(
+    (clientX: number, clientY: number, factor: number) => {
+      setAutoFit(false);
+      const rect = wrapRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const mx = clientX - rect.left;
+      const my = clientY - rect.top;
+      setTransform((t) => {
+        const maxK = fullscreen ? 4 : 3;
+        const k = Math.min(maxK, Math.max(0.5, t.k * factor));
+        return { k, x: mx - ((mx - t.x) * k) / t.k, y: my - ((my - t.y) * k) / t.k };
+      });
+    },
+    [fullscreen]
+  );
+
+  // 原生 wheel 监听：React 的 onWheel 是被动注册，preventDefault 无效，
+  // 在触屏笔记本 / 安卓外接鼠标上会导致「缩放图谱的同时整页跟着滚」。
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const onWheelNative = (e: WheelEvent) => {
+      e.preventDefault();
+      zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.12 : 0.89);
+    };
+    el.addEventListener("wheel", onWheelNative, { passive: false });
+    return () => el.removeEventListener("wheel", onWheelNative);
+  }, [zoomAt]);
 
   // ------------------------------------------------------------ rendering
   const radius = (n: GraphNode) =>
@@ -357,11 +472,13 @@ export default function GraphCanvas({
   return (
     <div
       ref={wrapRef}
-      className="relative h-full w-full cursor-grab overflow-hidden bg-[#f7f9fd] active:cursor-grabbing"
-      onMouseDown={onPaneMouseDown}
-      onWheel={onWheel}
+      className="relative h-full w-full cursor-grab touch-none overflow-hidden bg-[#f7f9fd] active:cursor-grabbing"
+      onPointerDown={onPanePointerDown}
       onDoubleClick={fitView}
       onMouseLeave={() => setHovered(null)}
+      // 触屏上单指拖动画布：touch-action:none 让浏览器把触摸交给 JS 而不是滚动页面。
+      // 桌面鼠标不受影响；缩放已由原生 wheel（passive:false）与双指捏合分别接管。
+      style={{ touchAction: "none" }}
     >
       {/* 点阵背景（屏幕空间） */}
       <div
@@ -436,7 +553,7 @@ export default function GraphCanvas({
                 transform={`translate(${p.x},${p.y})`}
                 opacity={dim ? 0.12 : 1}
                 style={{ cursor: "pointer" }}
-                onMouseDown={(e) => onNodeMouseDown(e, n.id)}
+                onPointerDown={(e) => onNodePointerDown(e, n.id)}
                 onMouseEnter={() => setHovered(n.id)}
                 onClick={(e) => {
                   e.stopPropagation();

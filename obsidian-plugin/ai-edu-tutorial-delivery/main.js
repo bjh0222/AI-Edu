@@ -6,6 +6,7 @@ const {
   Setting,
   Modal,
   Notice,
+  Platform,
   normalizePath,
   requestUrl,
 } = require("obsidian");
@@ -14,6 +15,8 @@ const DEFAULT_SETTINGS = {
   apiBaseUrl: "http://127.0.0.1:8000",
   folder: "学习",
   generationTier: "standard",
+  // 格式规范选择：auto 自动匹配；"" 本次不使用特殊规范；其他值为手动选定 spec id
+  formatSpecId: "auto",
 };
 
 // 与后端 services/api/app/learning/disciplines.py 的 SUBJECTS（S01–S21）保持一致
@@ -89,6 +92,124 @@ const MATERIAL_FALLBACK_LIMITS = {
     { key: "example_source", label: "例题来源" },
   ],
 };
+
+// 规范分组：与后端 services/api/app/services/utils.py 的 GUIDANCE_SCENES（教程族）、
+// format_specs.py 的 READING_GUIDE_SCENE / exercise / exam_paper 保持一致。
+// 分组只是「选规范时不误选另一族」的界面便利；后端匹配仍只看 scene 与规范 id，
+// 所以下面新增 scene 时必须同步后端，否则新规范会掉进「其他规范」。
+const SPEC_GROUPS = [
+  {
+    key: "tutorial",
+    label: "教程规范",
+    scenes: ["default_tutorial", "knowledge_tutorial", "practical_tutorial", "reading_guide"],
+  },
+  { key: "paper", label: "练习与试卷规范", scenes: ["exercise", "exam_paper"] },
+  { key: "other", label: "其他规范", scenes: [] },
+];
+
+const SPEC_DELIVERABLE_STATUS = {
+  required: "必须",
+  on_request: "用户要求时",
+  optional: "可选",
+  forbidden: "禁止",
+};
+
+function specScene(spec) {
+  return String((spec && spec.scene) || "").trim();
+}
+
+function specGroupKey(spec) {
+  const scene = specScene(spec);
+  const hit = SPEC_GROUPS.find((group) => group.scenes.includes(scene));
+  return hit ? hit.key : "other";
+}
+
+/** 规范族别标签：阅读教程规范单独点名（后端对它走两阶段生成，语义与教程族不同）。 */
+function specGroupLabel(spec) {
+  if (specScene(spec) === "reading_guide") return "阅读教程规范";
+  const group = SPEC_GROUPS.find((item) => item.key === specGroupKey(spec));
+  return group ? group.label : "其他规范";
+}
+
+/** 按分组整理规范列表；空组不出现，自定义 scene 落到「其他规范」。 */
+function groupSpecs(specs) {
+  return SPEC_GROUPS.map((group) => ({
+    key: group.key,
+    label: group.label,
+    specs: (specs || []).filter((spec) => specGroupKey(spec) === group.key),
+  })).filter((group) => group.specs.length > 0);
+}
+
+/**
+ * 规范正文预览：段落顺序与 apps/web/lib/specs.ts 的 specPreviewMarkdown 完全一致，
+ * 而后者又对齐 llm/prompts.py:_format_spec_block 的注入顺序 —— 这样插件里看到的层级
+ * 就是网页预览的层级，也是生成时模型看到的层级。空字段整段跳过。
+ */
+function specPreviewMarkdown(spec) {
+  const data = spec || {};
+  const text = (value) => String(value == null ? "" : value).trim();
+  const listText = (value) => (Array.isArray(value) ? value.map(text).filter(Boolean).join("、") : "");
+  const deliverables = Array.isArray(data.deliverables) && data.deliverables.length
+    ? data.deliverables
+        .map((item) => `- ${text(item.name)}（${SPEC_DELIVERABLE_STATUS[item.status] || item.status || "可选"}）`)
+        .join("\n")
+    : "- 未配置结构化交付物（章节数与章名由大纲模型按知识逻辑决定）";
+  const sections = [
+    ["## 匹配与适用", [
+      `适用任务：${text(data.applicable_tasks) || "未填写"}`,
+      `适用意图：${listText(data.applicable_intents) || "未填写"}`,
+      `排除场景：${listText(data.excluded_scenarios) || "无"}`,
+      `排除意图：${listText(data.excluded_intents) || "无"}`,
+      `触发关键词：${listText(data.trigger_keywords) || "未启用"}`,
+      `排除关键词：${listText(data.excluded_keywords) || "无"}`,
+    ]],
+    ["## 输出目标与受众", [text(data.output_goal) || text(data.description) || "未填写",
+      text(data.target_reader) ? `目标受众：${text(data.target_reader)}` : ""]],
+    ["## 交付物（一个交付物一章）", [deliverables]],
+    ["## 内容结构", [text(data.content_structure)]],
+    ["## 参考示例", [text(data.reference_examples)]],
+    ["## 格式与表达", [text(data.format_rules)]],
+    ["## 必须遵守", [text(data.required_rules)]],
+    ["## 建议遵守", [text(data.suggested_rules)]],
+    ["## 可灵活调整", [text(data.flexible_rules)]],
+    ["## 禁止出现", [text(data.forbidden_rules)]],
+    ["## 验收标准", [text(data.acceptance_criteria)]],
+    ["## 自定义补充规则", [text(data.custom_markdown)]],
+  ];
+  // 头部：描述为空时不留空行。正文里刻意的空行（如 content_structure 的分段）必须原样保留，
+  // 所以这里不做全局折叠 —— 与 apps/web/lib/specs.ts 的 specPreviewMarkdown 保持一致。
+  const description = text(data.description);
+  const out = [`# ${text(data.name) || "未命名规范"}`];
+  if (description) out.push("", description);
+  out.push("");
+  sections.forEach(([heading, lines]) => {
+    const body = lines.map((line) => text(line)).filter(Boolean);
+    if (!body.length) return;
+    out.push(heading, ...body, "");
+  });
+  return out.join("\n").trimEnd();
+}
+
+/**
+ * 手机端回环地址告警：127.0.0.1 / localhost 在安卓上指向手机自己，
+ * 是「插件连不上后端」的头号原因。桌面端不需要这条提示。
+ */
+function loopbackHostWarning(baseUrl) {
+  if (!Platform.isMobile) return "";
+  const host = String(baseUrl || "")
+    .replace(/^https?:\/\//i, "")
+    .split("/")[0]
+    .split(":")[0]
+    .replace(/^\[|\]$/g, "");
+  const loopback = ["127.0.0.1", "localhost", "0.0.0.0", "::1", ""];
+  if (!loopback.includes(host.toLowerCase())) return "";
+  return (
+    `当前 API 地址是「${baseUrl || "未填写"}」。手机上 127.0.0.1 / localhost 指向手机自己，` +
+    "连不到电脑上的 AI Edu。请在插件设置里改成电脑的局域网地址（例如 http://192.168.1.20:8000）：" +
+    "电脑与手机连同一个 Wi-Fi，后端以 --host 0.0.0.0 启动（仓库的「启动 AI Edu.cmd」加 -Mobile 参数即可），" +
+    "并在电脑防火墙放行 8000 端口。"
+  );
+}
 
 function formatSize(bytes) {
   const value = Number(bytes || 0);
@@ -209,6 +330,18 @@ function rewriteWikilink(text, fromName, toName) {
   return text.replace(pattern, `$1${toName}`);
 }
 
+/**
+ * 去掉不应参与双链校验的片段：围栏代码块、行内代码、数学环境（$...$ / $$...$$）。
+ * 数学里的 [[...]] 是合法记号（形式幂级数环 R[[x]]、矩阵 [[a,b],[c,d]]），不是双链。
+ */
+function stripProtectedSpans(text) {
+  return String(text || "")
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/`[^`\n]*`/g, "")
+    .replace(/\$\$[\s\S]*?\$\$/g, "")
+    .replace(/\$[^$\n]+\$/g, "");
+}
+
 function extractWikilinks(text) {
   const links = [];
   const pattern = /!?\[\[([^\[\]\n]+)\]\]/g;
@@ -251,6 +384,12 @@ class AIEduModal extends Modal {
     // 暂存式「参考资料 / 例题来源」：目标创建成功后才真正上传
     this.pendingMaterials = [];
     this.materialLimits = MATERIAL_FALLBACK_LIMITS;
+    // 格式规范候选（打开弹窗时后台拉取）与当前选择（默认沿用插件设置）
+    this.formatSpecs = [];
+    this.formatSpecId = plugin.settings.formatSpecId || "auto";
+    // 「教程规范」一栏的展开态与后端连通性自检结果
+    this.specPreviewOpen = false;
+    this.apiProbe = null;
     this.materialKind = "reference";
     this.createdGoal = null;
     this.materialMessage = "";
@@ -327,6 +466,12 @@ class AIEduModal extends Modal {
       text: "填写后会注入价值判断、计划、验收标准、教程与配套文件的全部生成提示词；违反任一条即视为交付不合格",
     });
 
+    // 教程规范：与网站创建页同语义（自动匹配 / 本次不使用 / 手动选择），
+    // 但下拉按「教程规范 / 练习与试卷规范 / 其他规范」分组，并且能就地展开规范正文
+    // —— 手机上看不到网页端的「偏好设置 → 格式规范」，展开是唯一确认途径。
+    this.createSpecField(form);
+    this.loadFormatSpecs();
+
     // 可投入总时间
     const timeField = this.createField(form, "可投入总时间");
     this.timeBudgetEl = timeField.createEl("input", {
@@ -382,7 +527,8 @@ class AIEduModal extends Modal {
     void this.loadMaterialLimits();
 
     this.statusEl = contentEl.createDiv("ai-edu-status");
-    this.statusEl.setText("需要先启动本地 AI Edu 后端（默认 http://127.0.0.1:8000）。");
+    this.statusEl.setText(this.initialStatusText());
+    void this.probeApi();
 
     const actions = contentEl.createDiv("ai-edu-actions");
     this.submitEl = actions.createEl("button", { text: "创建并生成教程", cls: "mod-cta" });
@@ -393,13 +539,16 @@ class AIEduModal extends Modal {
     this.createOnlyEl.addEventListener("click", () => this.createOnly());
     cancel.addEventListener("click", () => this.close());
 
-    // 单行输入框里按 Enter、或任意位置按 Ctrl/Cmd+Enter 直接提交，避免长表单必须滚到底部
+    // 桌面端：单行输入框里按 Enter、或任意位置按 Ctrl/Cmd+Enter 直接提交，
+    // 避免长表单必须滚到底部。手机端只认 Ctrl/Cmd+Enter（软键盘的「回车/前往」
+    // 是输入习惯键，一按就提交会误启动一次几分钟的生成，代价太高）。
     contentEl.addEventListener("keydown", (event) => {
       if (event.key !== "Enter") return;
       const target = event.target;
       const isTextInput =
         target && target.tagName === "INPUT" && (target.type || "text") === "text";
-      if (event.ctrlKey || event.metaKey || isTextInput) {
+      const chordSubmit = event.ctrlKey || event.metaKey;
+      if (chordSubmit || (isTextInput && !Platform.isMobile)) {
         event.preventDefault();
         this.submit();
       }
@@ -426,6 +575,7 @@ class AIEduModal extends Modal {
       this.applicationEl,
       this.currentLevelEl,
       this.hardConstraintsEl,
+      this.formatSpecEl,
       this.timeBudgetEl,
       this.capabilityEl,
       this.tierEl,
@@ -437,8 +587,158 @@ class AIEduModal extends Modal {
 
     this.closeHintEl.setText("关闭窗口会清空本次填写内容；生成成功后会自动打开新教程。");
 
-    // 打开即聚焦第一个字段：键盘操作（Tab）可以按表单顺序走完
-    window.setTimeout(() => this.titleInputEl && this.titleInputEl.focus(), 50);
+    // 桌面端打开即聚焦第一个字段：键盘操作（Tab）可以按表单顺序走完。
+    // 手机端刻意不聚焦 —— 一打开就弹软键盘会把整张表单盖住，用户还得先手动收起。
+    if (!Platform.isMobile) {
+      window.setTimeout(() => this.titleInputEl && this.titleInputEl.focus(), 50);
+    }
+  }
+
+  /**
+   * 「教程规范」一栏：下拉（分组）+ 展开正文 + 当前规范的族别提示。
+   * 选择语义与网站创建页逐字一致，只是多了分组和就地查看。
+   */
+  createSpecField(form) {
+    const field = this.createField(form, "教程规范");
+    const row = field.createDiv("ai-edu-spec-row");
+    this.formatSpecEl = row.createEl("select", {
+      cls: "ai-edu-input ai-edu-spec-select",
+      attr: { "aria-label": "教程规范" },
+    });
+    const toggle = row.createEl("button", {
+      cls: "ai-edu-spec-toggle",
+      text: "查看规范",
+      attr: { type: "button", "aria-expanded": "false" },
+    });
+    toggle.addEventListener("click", () => {
+      this.specPreviewOpen = !this.specPreviewOpen;
+      this.renderSpecPreview();
+    });
+
+    this.specMetaEl = field.createEl("span", { cls: "ai-edu-hint" });
+    this.specPreviewEl = field.createDiv("ai-edu-spec-preview");
+    this.specPreviewEl.style.display = "none";
+    this.renderFormatSpecOptions();
+
+    this.formatSpecEl.addEventListener("change", () => {
+      this.formatSpecId = this.formatSpecEl.value;
+      // 换规范时保持展开态并刷新正文，用户才能立刻对比两份规范的差别
+      this.renderSpecPreview();
+    });
+    return field;
+  }
+
+  /** 当前选中的规范对象；auto / 不使用 / 已删除时返回 null。 */
+  selectedSpec() {
+    const value = this.formatSpecEl ? this.formatSpecEl.value : this.formatSpecId || "auto";
+    if (!value || value === "auto") return null;
+    return this.formatSpecs.find((spec) => spec.id === value) || null;
+  }
+
+  renderSpecPreview() {
+    if (!this.specPreviewEl || !this.specMetaEl) return;
+    const spec = this.selectedSpec();
+    const value = this.formatSpecEl ? this.formatSpecEl.value : this.formatSpecId || "auto";
+    const toggle = this.specPreviewEl.parentElement
+      ? this.specPreviewEl.parentElement.querySelector(".ai-edu-spec-toggle")
+      : null;
+
+    if (!spec) {
+      this.specMetaEl.setText(
+        value === "auto"
+          ? "自动匹配：按需求文本的关键词与语义挑选规范，未命中时使用默认规范；手动选择优先于自动匹配。"
+          : "本次不使用特殊规范：正文只受「硬性约束」与通用排版要求约束。"
+      );
+      this.specPreviewEl.empty();
+      this.specPreviewEl.style.display = "none";
+      if (toggle) {
+        toggle.disabled = true;
+        toggle.setText("查看规范");
+        toggle.setAttribute("aria-expanded", "false");
+      }
+      return;
+    }
+
+    if (toggle) toggle.disabled = false;
+    this.specMetaEl.setText(
+      `${specGroupLabel(spec)} · v${spec.version || 1}${spec.is_default ? " · 默认规范" : ""}` +
+        `${spec.is_builtin ? " · 内置" : ""}｜手动选择优先于自动匹配；规范会在大纲生成前冻结为本任务快照。`
+    );
+    if (!this.specPreviewOpen) {
+      this.specPreviewEl.empty();
+      this.specPreviewEl.style.display = "none";
+      if (toggle) {
+        toggle.setText("查看规范");
+        toggle.setAttribute("aria-expanded", "false");
+      }
+      return;
+    }
+    this.specPreviewEl.empty();
+    this.specPreviewEl.style.display = "";
+    if (toggle) {
+      toggle.setText("收起规范");
+      toggle.setAttribute("aria-expanded", "true");
+    }
+    this.specPreviewEl.createEl("pre", { cls: "ai-edu-spec-pre", text: specPreviewMarkdown(spec) });
+    this.specPreviewEl.createEl("div", {
+      cls: "ai-edu-hint",
+      text: "以上为规范全文预览，段落顺序与生成时注入提示词的顺序一致。修改请到网页端「偏好设置 → 格式规范」。",
+    });
+  }
+
+  initialStatusText() {
+    const warning = loopbackHostWarning(this.plugin.apiBase());
+    if (warning) return warning;
+    return Platform.isMobile
+      ? `手机端需与电脑同一局域网，API 地址填电脑的局域网 IP（当前：${this.plugin.apiBase() || "未设置"}）。`
+      : "需要先启动本地 AI Edu 后端（默认 http://127.0.0.1:8000）。";
+  }
+
+  /**
+   * 打开弹窗即自检后端连通性（GET /api/health），把「静默连不上」变成一句可执行的诊断。
+   * 手机端最常见的失败是 API 地址填了 127.0.0.1、后端只监听 127.0.0.1、或防火墙没放行。
+   * 自检失败绝不阻断填表：自动匹配在后端不可达时仍会回落，用户可以先把表填完。
+   */
+  async probeApi() {
+    const base = this.plugin.apiBase();
+    if (!base) {
+      this.apiProbe = { ok: false, reason: "no_base" };
+      return this.apiProbe;
+    }
+    try {
+      const response = await requestUrl({ url: `${base}/api/health`, method: "GET" });
+      const data = await readJson(response);
+      if (response.status >= 300) throw new Error(requestErrorMessage(data, response));
+      this.apiProbe = { ok: true, demo: !!(data && data.demo) };
+      if (!this.busy && this.statusEl) {
+        this.statusEl.setText(
+          `已连接 AI Edu 后端：${base}${data && data.demo ? "（演示模式，未配置模型）" : ""}`
+        );
+      }
+    } catch (error) {
+      this.apiProbe = {
+        ok: false,
+        reason: error && error.message ? error.message : String(error),
+      };
+      if (!this.busy && this.statusEl) {
+        this.statusEl.setText(this.probeFailureText(this.apiProbe.reason));
+      }
+    }
+    return this.apiProbe;
+  }
+
+  probeFailureText(reason) {
+    const base = this.plugin.apiBase() || "（未设置）";
+    const lines = [`连不上 AI Edu 后端 ${base}：${reason}`];
+    if (Platform.isMobile) {
+      lines.push(
+        "手机端排查顺序：① 电脑与手机连同一个 Wi-Fi；② API 地址改成电脑的局域网 IP（127.0.0.1 在手机上指向手机自己）；" +
+          "③ 后端以 --host 0.0.0.0 启动（「启动 AI Edu.cmd -Mobile」）；④ 电脑防火墙放行 8000 端口。"
+      );
+    } else {
+      lines.push("请先启动后端：cd services/api; .venv\\Scripts\\python.exe -m uvicorn app.main:app --port 8000");
+    }
+    return lines.join("\n");
   }
 
   createField(parent, labelText) {
@@ -677,6 +977,7 @@ class AIEduModal extends Modal {
       capability_level: this.capabilityEl.value,
       generate_extra_exercises: !!this.extraEl.checked,
       generation_tier: this.tierEl.value,
+      format_spec_id: this.formatSpecPayloadValue(),
     };
   }
 
@@ -691,6 +992,60 @@ class AIEduModal extends Modal {
         .filter(Boolean)
         .join("\n") || form.title
     );
+  }
+
+  /**
+   * 提交给后端的 format_spec_id：auto → null（自动匹配）；"" → 空串（不使用特殊规范）；
+   * 其他值 → 手动选定的规范 id。与网站创建页的映射规则完全一致。
+   */
+  formatSpecPayloadValue() {
+    const value = this.formatSpecEl ? this.formatSpecEl.value : this.formatSpecId || "auto";
+    return value === "auto" ? null : value;
+  }
+
+  renderFormatSpecOptions() {
+    if (!this.formatSpecEl) return;
+    const previous = this.formatSpecId || "auto";
+    this.formatSpecEl.empty();
+    this.formatSpecEl.createEl("option", {
+      value: "auto",
+      text: "自动匹配（未命中时使用默认规范）",
+    });
+    this.formatSpecEl.createEl("option", { value: "", text: "本次不使用特殊规范" });
+    // 分组只影响界面可读性：value 仍是规范 id，提交语义与网站创建页逐字一致
+    groupSpecs(this.formatSpecs).forEach((group) => {
+      const optgroup = this.formatSpecEl.createEl("optgroup", { attr: { label: group.label } });
+      group.specs.forEach((spec) => {
+        optgroup.createEl("option", {
+          value: spec.id,
+          text: `${spec.name}${spec.is_default ? " · 默认" : ""}`,
+        });
+      });
+    });
+    // 设置里记住的规范可能已被删除：失效时回落到自动匹配，避免提交一个不存在的 id
+    const valid =
+      previous === "auto" ||
+      previous === "" ||
+      this.formatSpecs.some((spec) => spec.id === previous);
+    this.formatSpecEl.value = valid ? previous : "auto";
+    this.formatSpecId = this.formatSpecEl.value;
+    this.renderSpecPreview();
+  }
+
+  async loadFormatSpecs() {
+    // 后台拉取规范列表；后端不可达时保留「自动匹配 / 本次不使用」两个兜底选项，不阻断填表
+    try {
+      const response = await requestUrl({
+        url: `${this.plugin.apiBase()}/api/format-specs`,
+        method: "GET",
+      });
+      const data = await readJson(response);
+      if (response.status >= 300 || !Array.isArray(data)) return;
+      this.formatSpecs = data;
+      this.renderFormatSpecOptions();
+    } catch (_) {
+      /* 忽略：列表缺失不影响提交（后端仍会自动匹配） */
+    }
   }
 
   setBusy(busy) {
@@ -712,6 +1067,7 @@ class AIEduModal extends Modal {
     }
     this.lastForm = form;
     this.plugin.settings.generationTier = form.generation_tier;
+    this.plugin.settings.formatSpecId = form.format_spec_id === null ? "auto" : form.format_spec_id;
     await this.plugin.saveSettings();
 
     // 带参考材料的提交流程：材料接口挂在目标下（/api/goals/{goal_id}/materials），
@@ -771,6 +1127,7 @@ class AIEduModal extends Modal {
     }
     this.lastForm = form;
     this.plugin.settings.generationTier = form.generation_tier;
+    this.plugin.settings.formatSpecId = form.format_spec_id === null ? "auto" : form.format_spec_id;
     await this.plugin.saveSettings();
 
     if (this.pendingMaterials.length > 0) {
@@ -868,7 +1225,9 @@ class AIEduModal extends Modal {
         url: `${this.plugin.apiBase()}/api/goals/${goal.id}/tutorials/quickstart`,
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        // 两步提交里规范不能在建目标时绑定（GoalCreate 不接受该字段），
+        // 与网站一致地在 quickstart 时传入：null 自动匹配 / "" 不使用 / id 手动
+        body: JSON.stringify({ format_spec_id: form.format_spec_id ?? this.formatSpecPayloadValue() }),
       });
       const started = await readJson(response);
       if (response.status === 409 && started?.detail?.code === "generation_paused") {
@@ -951,7 +1310,10 @@ class AIEduModal extends Modal {
         url: `${this.plugin.apiBase()}/api/goals/${this.pausedGoalId}/tutorials/quickstart`,
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pause_action: action }),
+        body: JSON.stringify({
+          pause_action: action,
+          format_spec_id: this.formatSpecPayloadValue(),
+        }),
       });
       const result = await readJson(response);
       if (response.status >= 300 || !result || !result.tutorial) {
@@ -1088,9 +1450,22 @@ class AIEduModal extends Modal {
     if (!path) return;
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!file) return;
-    const leaf = this.app.workspace.getLeaf("tab");
+    // 手机端没有标签页概念（getLeaf("tab") 是桌面语义）：传 true 让 Obsidian
+    // 自己决定在当前工作区新开一个叶子。getLeaf 也可能抛错（旧版 / 移动端权限），
+    // 这时退回当前活动叶子，保证「教程能打开」这条主路径不断。
+    let leaf;
+    try {
+      leaf = this.app.workspace.getLeaf(Platform.isMobile ? true : "tab");
+    } catch (_) {
+      leaf = this.app.workspace.getLeaf(false) || this.app.workspace.activeLeaf;
+    }
+    if (!leaf) return;
     await leaf.openFile(file);
-    this.app.workspace.revealLeaf(leaf);
+    try {
+      this.app.workspace.revealLeaf(leaf);
+    } catch (_) {
+      /* 移动端某些版本没有 revealLeaf：文件已打开，不影响结果 */
+    }
     try {
       this.app.workspace.setActiveLeaf(leaf, { focus: true });
     } catch (_) {
@@ -1153,7 +1528,7 @@ class AIEduModal extends Modal {
     this.app.vault.getMarkdownFiles().forEach((f) => known.add(f.basename));
     const broken = [];
     files.forEach((file) => {
-      extractWikilinks(file.content).forEach((target) => {
+      extractWikilinks(stripProtectedSpans(file.content)).forEach((target) => {
         const base = target.split("/").pop();
         if (!known.has(base)) broken.push(target);
       });
@@ -1254,6 +1629,17 @@ class AIEduSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+
+    if (Platform.isMobile) {
+      new Setting(containerEl)
+        .setName("手机端连接说明")
+        .setDesc(
+          "手机与电脑需在同一 Wi-Fi；API base URL 填电脑的局域网 IP（不是 127.0.0.1）。" +
+            "后端要以 --host 0.0.0.0 启动（仓库根目录「启动 AI Edu.cmd -Mobile」），" +
+            "并在电脑防火墙放行 8000 端口。网页端同理：手机浏览器打开 http://<电脑IP>:3001。" +
+            "打开生成弹窗会自动自检连通性并把失败原因写进状态行。"
+        );
+    }
 
     new Setting(containerEl)
       .setName("Default generation tier")

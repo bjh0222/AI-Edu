@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Suspense } from "react";
 import "./globals.css";
 import Sidebar from "@/components/Sidebar";
+import MobileNav from "@/components/MobileNav";
 import ThemeSync from "@/components/ThemeSync";
 import { themeBootstrap } from "@/lib/theme";
 
@@ -22,8 +23,23 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           <Suspense fallback={<aside className="hidden w-[238px] shrink-0 bg-navy md:block" />}>
             <Sidebar />
           </Suspense>
-          <main className="min-w-0 flex-1">{children}</main>
+          {/* 手机端底部标签栏固定占位，main 需留出等高内边距；桌面端 md:pb-0 抵消 */}
+          <main className="min-w-0 flex-1 pb-[calc(56px+env(safe-area-inset-bottom))] md:pb-0">
+            {children}
+          </main>
         </div>
+        {/* MobileNav 依赖 usePathname，必须包在 Suspense 内（理由同 Sidebar） */}
+        {/* fallback 也要 fixed：MobileNav 本身是 fixed 占位，流内 fallback 会多撑出 56px 空白 */}
+        <Suspense
+          fallback={
+            <nav
+              aria-hidden="true"
+              className="fixed inset-x-0 bottom-0 h-[calc(56px+env(safe-area-inset-bottom))] bg-navy md:hidden"
+            />
+          }
+        >
+          <MobileNav />
+        </Suspense>
       </body>
     </html>
   );

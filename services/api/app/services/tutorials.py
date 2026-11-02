@@ -22,6 +22,7 @@ from ..learning.teaching_profile import (
     goal_context_text,
     normalize_teaching_plan,
     parse_teaching_profile,
+    task_requirement_text,
 )
 from ..llm.service import AIService, AIServiceError
 from ..models import GenerationJob, ModelCallLog, Tutorial, TutorialVersion
@@ -45,6 +46,9 @@ from .utils import (
 )
 
 MAX_SECTIONS_HINT = 8  # 安全上限：防止异常输出撑爆成本；正常章节数由目标范围决定
+# 交付契约（结构由代码/规范确定性给定，不是模型自由发挥）允许更多章：
+# 「按材料分章，每章一份」时章节数等于材料的章数，截断会静默少交付几份成品。
+CONTRACT_MAX_SECTIONS = 24
 # 章节并发生成上限：默认 9 路（deep 挡位最多 8 节，等于全并行，把「逐节排队」的尾巴消掉）。
 # 注意：该值只在端点真能并发时才有意义——接 DeepSeek 等托管 API 可直接用默认值；
 # 若换回单卡自建端点（按队列串行处理请求，单节约 385s），必须用
@@ -101,7 +105,7 @@ def _contract_outline(contract: dict, criteria: list[dict]) -> list[dict]:
     定死结构，模型只负责把每一章写成那一项成品。
     """
     items = [str(item).strip() for item in (contract or {}).get("items") or []]
-    items = [item for item in items if item][:MAX_SECTIONS_HINT]
+    items = [item for item in items if item][:CONTRACT_MAX_SECTIONS]
     criteria_ids = [str(c["id"]) for c in criteria or [] if isinstance(c, dict) and c.get("id")]
     return [
         {
@@ -124,6 +128,102 @@ def _as_str_list(value) -> list[str]:
     return [str(x).strip() for x in value if str(x).strip()]
 
 
+_MATH_DISPLAY_RE = re.compile(r"\\\[(.*?)\\\]", re.S)
+_MATH_INLINE_RE = re.compile(r"\\\((.*?)\\\)", re.S)
+
+
+def normalize_math_delimiters(markdown: str) -> str:
+    r"""把 LaTeX 分隔符统一为 Obsidian / 常见 Markdown 渲染器都认识的 $ 与 $$。
+
+    模型会混用 \(…\) 与 \[…\]：Obsidian 里反斜杠被 Markdown 转义吃掉，
+    公式退化成裸文本（(X_1,X_2)、[ \begin{cases} … ]），多行公式还会被拆散成
+    列表项。$…$ / $$…$$ 是各渲染器的公约数，所以在落库与导出两层确定性归一，
+    不依赖模型自觉统一风格。代码围栏内的内容原样保留。
+    """
+    out: list[str] = []
+    buf: list[str] = []
+    fence: str | None = None
+
+    def flush() -> None:
+        if not buf:
+            return
+        text = "\n".join(buf)
+        text = _MATH_DISPLAY_RE.sub(lambda m: f"$$" + m.group(1) + f"$$", text)
+        text = _MATH_INLINE_RE.sub(lambda m: f"$" + m.group(1) + f"$", text)
+        out.append(text)
+        buf.clear()
+
+    for line in str(markdown or "").splitlines():
+        stripped = line.lstrip()
+        if fence is None and (stripped.startswith("```") or stripped.startswith("~~~")):
+            flush()
+            fence = stripped[:3]
+            out.append(line)
+            continue
+        if fence is not None:
+            out.append(line)
+            if stripped.startswith(fence):
+                fence = None
+            continue
+        buf.append(line)
+    flush()
+    return "\n".join(out)
+
+
+# 设计之初的固定栏目与练习册外壳元栏目：标题命中即整块剔除（落库与导出两层都拦）。
+# 外壳类（使用说明/自检清单…）任何教学内容都不会以此为名 → 前缀命中即删；
+# 栏目类（核心结论/常见错误…）概念性内容可能 legitimately 以它开头
+# （如「缓冲溶液的常见错误辨析」）→ 只删「短标题」：标题本身就是在宣告栏目，
+# 而不是在讲某个概念（判据：去掉标记后剩余不超过 6 字，如「常见错误诊断表」）。
+# 外壳类用「包含」匹配：改名变体（使用说明与数据口径 / 章末自测清单）同样要删；
+# 「做题方式」只用前缀匹配，避免误删「计算题做题方法」这类讲学科方法的标题。
+_META_SHELL_CONTAINS = ("使用说明", "自检清单", "自测清单", "真的会了", "如何使用本教程")
+_META_SHELL_STARTS = ("做题方式",)
+_META_COLUMN_MARKERS = ("核心结论", "常见错误", "前置知识", "必要练习", "对应验收标准")
+_META_COLUMN_TAIL = 6
+
+
+def _is_meta_section_title(title: str) -> bool:
+    """块标题是否是退役元栏目（含「自检清单：…」「常见错误诊断表」这类改名变体）。"""
+    text = re.sub(r"^#{1,6}\s*", "", str(title or "")).strip()
+    if not text:
+        return False
+    if text.startswith(_META_SHELL_STARTS) or any(m in text for m in _META_SHELL_CONTAINS):
+        return True
+    for marker in _META_COLUMN_MARKERS:
+        if text == marker or text.startswith(marker + "：") or text.startswith(marker + ":"):
+            return True
+        if text.startswith(marker) and len(text) - len(marker) <= _META_COLUMN_TAIL:
+            return True
+    return False
+
+
+_BODY_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+
+
+def _strip_meta_segments(body: str) -> str:
+    """删掉正文里以退役元栏目为标题的整段（标题行到下一个同级/更高级标题为止）。
+
+    模型会把「使用说明 / 章末自测清单」写进空标题块的 body 里自带小标题，
+    只过滤块标题拦不住；这里按标题层级切段删除，段内表格与说明一并带走。
+    """
+    out: list[str] = []
+    skip_level: int | None = None
+    for line in str(body or "").splitlines():
+        stripped = line.strip()
+        match = _BODY_HEADING_RE.match(stripped) if stripped else None
+        if match:
+            level = len(match.group(1))
+            if skip_level is not None and level <= skip_level:
+                skip_level = None
+            if skip_level is None and _is_meta_section_title(match.group(2)):
+                skip_level = level
+                continue
+        if skip_level is None:
+            out.append(line)
+    return "\n".join(out).strip("\n")
+
+
 def _normalize_section_raw(raw: dict) -> dict:
     """章节输出归一化：非法内容块类型回退 text；空 body 块丢弃；缺失可选字段置空。"""
     raw_blocks = raw.get("content")
@@ -140,19 +240,11 @@ def _normalize_section_raw(raw: dict) -> dict:
             "comparison", "method_summary", "diagram", "memory", "note",
         }:
             btype = "text"
-        content_blocks.append({"type": btype, "title": str(block.get("title", "") or ""), "body": body})
-    raw_errors = raw.get("common_errors")
-    common_errors = []
-    for e in raw_errors if isinstance(raw_errors, list) else []:
-        if not isinstance(e, dict):
-            continue
-        error = str(e.get("error", "") or "").strip()
-        if not error:
-            continue
-        common_errors.append({
-            "error": error,
-            "cause": str(e.get("cause", "") or ""),
-            "diagnose": str(e.get("diagnose", "") or ""),
+        content_blocks.append({
+            "type": btype,
+            "title": str(block.get("title", "") or ""),
+            # 落库前统一公式分隔符：历史版本里 \(…\) 风格在 Obsidian 不渲染
+            "body": normalize_math_delimiters(_strip_meta_segments(body)),
         })
     raw_sources = raw.get("sources")
     sources = []
@@ -167,15 +259,18 @@ def _normalize_section_raw(raw: dict) -> dict:
             "url": str(s.get("url", "") or ""),
             "note": str(s.get("note", "") or ""),
         })
+    # 设计之初的四个固定栏目（核心结论/常见错误/前置知识/必要练习）已退役：
+    # 模型即使按旧提示词输出也一律丢弃；元栏目块在落库前整块剔除。
+    content_blocks = [b for b in content_blocks if not _is_meta_section_title(b["title"])]
     return {
         "title": str(raw.get("title", "") or "")[:120],
         "purpose": str(raw.get("purpose", "") or ""),
         "content_type": _normalize_content_type(raw.get("content_type")),
         "content": content_blocks,
-        "key_takeaways": _as_str_list(raw.get("key_takeaways")),
-        "common_errors": common_errors,
-        "prerequisite_refs": _as_str_list(raw.get("prerequisite_refs")),
-        "exercises": _as_str_list(raw.get("exercises")),
+        "key_takeaways": [],
+        "common_errors": [],
+        "prerequisite_refs": [],
+        "exercises": [],
         "sources": sources,
         "mapping_criteria": [str(x) for x in raw.get("mapping_criteria", [])] if isinstance(raw.get("mapping_criteria"), list) else [],
     }
@@ -278,8 +373,16 @@ def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
     snapshot = format_specs_service.active_snapshot(goal)
     authoritative_spec = format_specs_service.authoritative_snapshot(goal)
     if snapshot:
-        snapshot = format_specs_service.apply_task_overrides(snapshot, goal_context_text(goal))
+        # 任务文本含 hard_constraints：决定交付结构的要求通常写在硬性约束里
+        requirement_text = task_requirement_text(goal)
+        materials_for_mode = materials_service.materials_context(db, goal.id)
+        snapshot = format_specs_service.apply_task_overrides(snapshot, requirement_text)
+        snapshot = format_specs_service.apply_chapter_split(
+            snapshot, requirement_text, materials_for_mode
+        )
         goal.format_spec_snapshot = jdump(snapshot)
+        # 快照刚被改写（交付物可能已按章拆分）：教程标题与结构判定都要用最新快照
+        authoritative_spec = format_specs_service.authoritative_spec_dict(snapshot)
 
     job = GenerationJob(goal_id=goal.id, job_type="tutorial_outline", status="running", progress=10, stage="生成大纲")
     db.add(job)
@@ -295,23 +398,40 @@ def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
     db.commit()  # 先落库，让本次调用的 token / 训练样本能关联到 tutorial_id
     ai.tutorial_id = tutorial.id
     materials_text = materials_service.materials_context(db, goal.id)
+    # 选定规范后独占结构权限；未选规范时才使用旧画像契约。
+    contract = format_specs_service.contract_for_goal(goal)
     try:
-        data = ai.outline(
-            goal, profile, [{"id": c["id"], "statement": c["statement"]} for c in criteria], materials_text
-        )
-        raw_sections = data.get("sections")
-        if not isinstance(raw_sections, list):
-            raise AIServiceError("模型输出的章节大纲不是列表，请重试")
-        outline = _normalize_outline_items(raw_sections[:MAX_SECTIONS_HINT])
-        if not outline:
-            raise AIServiceError("模型输出缺少有效章节大纲，请重试")
-        teaching_plan = normalize_teaching_plan(
-            data.get("teaching_plan"), parse_teaching_profile(context_text=goal_context_text(goal))
-        )
-        # 选定规范后独占结构权限；未选规范时才使用旧画像契约。
-        contract = format_specs_service.contract_for_goal(goal)
-        if contract:
+        try:
+            data = ai.outline(
+                goal, profile, [{"id": c["id"], "statement": c["statement"]} for c in criteria], materials_text
+            )
+            raw_sections = data.get("sections")
+            if not isinstance(raw_sections, list):
+                raise AIServiceError("模型输出的章节大纲不是列表，请重试")
+            outline = _normalize_outline_items(raw_sections[:MAX_SECTIONS_HINT])
+            if not outline:
+                raise AIServiceError("模型输出缺少有效章节大纲，请重试")
+            teaching_plan = normalize_teaching_plan(
+                data.get("teaching_plan"), parse_teaching_profile(context_text=goal_context_text(goal))
+            )
+            if contract:
+                outline = _contract_outline(contract, criteria)
+        except AIServiceError as exc:
+            # 确定性兜底：格式规范模式下章节结构本就由交付契约定死（模型输出的
+            # sections 会被丢弃），teaching_plan 也有基于画像硬约束的规则化兜底。
+            # 此时一次偶发的模型失败（截断 / 限流 / 解析）不该让整条「一键生成」在
+            # 前几步成功后报废；非规范模式下大纲是结构的唯一来源，保持原有失败语义。
+            if contract is None:
+                raise
+            logger.warning(
+                "大纲模型调用失败，回退交付契约结构（goal=%s）：%s", goal.id, str(exc)[:200]
+            )
+            job.stage = "大纲模型调用失败，按交付契约生成结构"
+            db.commit()
             outline = _contract_outline(contract, criteria)
+            teaching_plan = normalize_teaching_plan(
+                {}, parse_teaching_profile(context_text=goal_context_text(goal))
+            )
         content = {"format_spec": snapshot, "teaching_plan": teaching_plan, "outline": outline, "sections": []}
         if contract:
             content["delivery_contract"] = contract
@@ -454,7 +574,8 @@ def _companion_task(
         if kind == "cheatsheet":
             payload = ai.cheatsheet(goal, profile, outline, materials_text)
         else:
-            payload = ai.extra_exercises(goal, profile, outline, materials_text)
+            exercise_spec = format_specs_service.get_exercise_spec_dict(db)
+            payload = ai.extra_exercises(goal, profile, outline, materials_text, exercise_spec)
         usage = dict(ai.usage_last)
         db.commit()  # 短事务：调用日志 / 训练样本尽快落库并释放写锁
         return kind, payload, usage
@@ -845,6 +966,264 @@ def _merge_section_usage(results: dict[int, dict]) -> dict:
     usage["usage_source"] = source
     return usage
 
+# ------------------------------------------------------------------ 阅读教程规范：两阶段生成
+#
+# 只有 scene == READING_GUIDE_SCENE 时启用。其它规范走原有的「一批全并行 + 全量注入材料」
+# 路径，行为逐字不变（这是本次改动的硬边界，见 test_reading_guide_two_phase）。
+#
+# 为什么需要两阶段：阅读规范的全书层内容（思想背景 / 学术争鸣 / 总结）在语义上依赖各章
+# 导读的产出，但章节是并行生成的、互相看不见对方正文（只拿到 prior_titles）。把它们塞进
+# 同一批并行任务，必然复现练习规范「参考答案」章的故障：那一节没见过任何题目，只能幻觉，
+# 实测仅产出 1196 字符却烧掉 11095 completion_tokens。
+# 解法是把全书层挪到所有章节完成之后，喂给它各章概要（不是全书原文，成本极低）。
+
+READING_CHAPTER_DIGEST_CHARS = 3000      # 单章概要喂给全书层的上限
+READING_DIGEST_TOTAL_CHARS = 30000       # 全部章概要合计上限（约 2.1 万 token，单次调用可承受）
+READING_PREFER_BLOCK_RE = re.compile(r"概要|概览|小结|导读")
+# 概要段落的结束标记：遇到「深度导读 / 核心概念详解」这类明确进入细节的标题就停，
+# 避免把深度层的大段内容也喂给全书层（既挤占预算，又让全书层陷进细节丢掉全局视角）。
+READING_DIGEST_STOP_RE = re.compile(r"深度导读|核心概念|关键句段|论证结构|难点辨析|思想关联")
+_HEADING_LINE_RE = re.compile(r"^(#{2,6})\s+(.+?)\s*$")
+
+
+def _extract_summary_segment(body: str, limit: int) -> str:
+    """从一整块 body 里抽出「概要」段落。
+
+    阅读规范要求「一节只输出一个 content 块」，所以概要不是独立的块、而是 body 里的
+    一个 `### 本章概要` 小标题段。只按块标题找会全部落空，退化成「从头截 300 字」，
+    把深度导读的细节一起喂给后置全书层——既挤占 token 预算，又让全书层陷进细节、
+    丢掉它本该有的全局视角。
+
+    取法：定位标题含「概要」的小标题行，取到下一个**同级或更浅**标题、
+    或命中 READING_DIGEST_STOP_RE 的标题、或 limit 为止。
+    """
+    lines = str(body or "").splitlines()
+    start = None
+    start_level = 0
+    fence: str | None = None
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            marker = stripped[:3]
+            fence = marker if fence is None else (None if stripped.startswith(fence) else fence)
+            continue
+        if fence is not None:
+            continue
+        match = _HEADING_LINE_RE.match(stripped)
+        if not match:
+            continue
+        if start is None:
+            heading_text = match.group(2)
+            # 「深度导读」含「导读」会被 PREFER 误命中，必须排除
+            if READING_PREFER_BLOCK_RE.search(heading_text) and not READING_DIGEST_STOP_RE.search(heading_text):
+                start = idx + 1
+                start_level = len(match.group(1))
+            continue
+        # 已经在概要段内：遇到同级/更浅标题，或深度层标题，就结束
+        if len(match.group(1)) <= start_level or READING_DIGEST_STOP_RE.search(match.group(2)):
+            end = idx
+            break
+    else:
+        end = len(lines)
+
+    if start is None:
+        return ""
+    segment = "\n".join(lines[start:end]).strip()
+    if len(segment) > limit:
+        segment = segment[:limit] + "\n…（本章概要已截断）"
+    return segment
+
+
+def _reading_chapters_of(outline: list[dict]) -> dict[int, str]:
+    """大纲索引 -> 归一化章号；没有章号的节不在结果里。
+
+    章号来自节标题（材料章节名逐字进入大纲，所以标题里必然带「第 N 章」）。
+    归一化是必须的：大纲写「第 1 章」而文件名写「第一章」，不归一就永远匹配不上，
+    按章注入会静默退化成「一节材料都拿不到」。
+    """
+    result: dict[int, str] = {}
+    for idx, item in enumerate(outline or []):
+        mark = materials_service.chapter_marker(str(item.get("title", "") or ""))
+        if mark:
+            result[idx] = mark
+    return result
+
+
+def _reading_phase_plan(outline: list[dict]) -> dict:
+    """把大纲切成 章节层 / 全书层 两段，并给出章号映射。
+
+    判据只看「节标题里有没有章号」，是确定性的，不依赖模型自觉：
+      - 带章号的节 -> chapters（第一批并行，各吃自己那一章）
+      - 其余全书级节（认知地图 / 阅读路线 / 思想背景 / 争鸣…）-> book_level
+        （第二批，**最后**生成，吃各章概要）
+
+    为什么全书层一律放最后、而不是按文档位置把开头的放前面：
+    「全书认知地图 / 阅读路线」要写核心思想、思维导图、章节依赖，必须知道每章**实际**讲了什么。
+    若与章节层同批并行，它们只能拿到目录名去猜，还会与章节层互相看不见 → 重演
+    pipeline.md §4 那个故障（全书层说「第一章讲 X」，第一章实际讲 Y）。
+    放最后、吃各章概要，既符合用户「最后生成全书层」的要求，也让它有真凭实据。
+    生成顺序与文档顺序解耦：results 按 index 排序合并，全书认知地图仍排在导出文档最前。
+
+    没有任何章号时（例如导读一篇论文、或材料没有章结构）返回 fallback=True：
+    此时按章注入无从谈起，退回原有的全量注入 + 单批并行，不启用两阶段。
+    """
+    chapters = _reading_chapters_of(outline)
+    if not chapters:
+        return {"fallback": True, "chapters": [], "book_level": [], "marks": {}}
+    chapter_idx = sorted(chapters)
+    book_level = [i for i in range(len(outline)) if i not in chapters]
+    return {
+        "fallback": False,
+        "chapters": chapter_idx,
+        "book_level": book_level,
+        "marks": chapters,
+    }
+
+
+def _truncate_before_deep_dive(body: str, limit: int) -> str:
+    """兜底截取：即使没有「概要」小标题，也必须在深度层标题前停下。
+
+    _reading_digest 的第 3 级兜底原本是「从头截 N 字」。但模型漏写 `### 本章概要`
+    时，这一截会把「深度导读 / 核心概念详解 / 关键句段解读」的大段细节全部吞进 digest：
+    一是挤占后置全书层的 token 预算（细节动辄数千字），二是让本该有全局视角的
+    全书层陷进细节里。所以在第一个深度层标题处切断，只保留它之前的内容。
+    """
+    text = str(body or "")
+    fence: str | None = None
+    for idx, line in enumerate(text.splitlines()):
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            marker = stripped[:3]
+            fence = marker if fence is None else (None if stripped.startswith(fence) else fence)
+            continue
+        if fence is not None:
+            continue
+        match = _HEADING_LINE_RE.match(stripped)
+        if match and READING_DIGEST_STOP_RE.search(match.group(2)):
+            text = "\n".join(text.splitlines()[:idx])
+            break
+    text = text.strip()
+    if not text:
+        # 整块 body 第一个标题就是深度层（模型既没写概要小标题、也没有前置正文）：
+        # 不能返回空串 —— digest_block 会因此整章跳过，全书层将完全不知道这一章存在，
+        # 直接违背「思想完整性」。退回开头片段并显式标注不可靠，让全书层知道有缺口。
+        head = str(body or "").strip()[: min(400, limit)]
+        if not head.strip():
+            return ""
+        return head + "\n…（本章缺「本章概要」小节，以上为开头片段，不足以免凭此判断全章）"
+    if len(text) > limit:
+        text = text[:limit] + "\n…（本章概要已截断）"
+    return text
+
+
+def _reading_digest(section: dict, limit: int = READING_CHAPTER_DIGEST_CHARS) -> str:
+    """从一章的成品里抽出「概要」，喂给后置全书层。
+
+    三级取法，从最可靠到最兜底：
+    1. 块标题就含「概要 / 小结 / 导读」-> 直接取该块（规范早期按块拆分的形态）；
+    2. 一节一块时，概要是 body 里的 `### 本章概要` 小标题段 -> 按标题层级切段抽取；
+    3. 两者都找不到 -> 从头截取（并在超限时标注截断）。
+
+    第 2 级是必须的：阅读规范要求「一节只输出一个 content 块」，此时块标题等于章名
+    （如「第一章 导论」），第 1 级必然落空。若直接跳到第 3 级「从头截 3000 字」，
+    会把深度导读的大段细节一起喂进后置全书层 —— 既挤占 token 预算，又让本该有全局
+    视角的那一节陷进细节里。
+    """
+    blocks = [b for b in (section.get("content") or []) if isinstance(b, dict)]
+    if not blocks:
+        return ""
+
+    # 1. 块标题直接就是概要层
+    # 必须排除 STOP：「深度导读」含「导读」二字，会被 PREFER 误命中，
+    # 而它恰恰是细节层，喂进后置全书层会挤占预算并把全局视角拖进细节。
+    def _is_summary_block(b: dict) -> bool:
+        title = str(b.get("title", "") or "")
+        return bool(READING_PREFER_BLOCK_RE.search(title)) and not READING_DIGEST_STOP_RE.search(title)
+
+    preferred = [b for b in blocks if _is_summary_block(b)]
+    if preferred:
+        parts: list[str] = []
+        used = 0
+        for block in preferred:
+            body = str(block.get("body", "") or "").strip()
+            if not body:
+                continue
+            piece = body[:limit - used] if used + len(body) > limit else body
+            if not piece.strip():
+                break
+            parts.append(piece)
+            used += len(piece)
+            if used >= limit:
+                break
+        if parts:
+            return "\n\n".join(parts)
+
+    # 2. 一节一块：在 body 里按小标题切出概要段
+    collected: list[str] = []
+    used = 0
+    for block in blocks:
+        body = str(block.get("body", "") or "")
+        segment = _extract_summary_segment(body, limit - used)
+        if not segment:
+            continue
+        collected.append(segment)
+        used += len(segment)
+        if used >= limit:
+            break
+    if collected:
+        return "\n\n".join(collected)
+
+    # 3. 兜底：模型没写概要小标题，从头取，但仍须在深度层标题前停下（否则吞入大段细节）
+    fallback: list[str] = []
+    used = 0
+    for block in blocks:
+        title = str(block.get("title", "") or "").strip()
+        body = str(block.get("body", "") or "").strip()
+        if not body:
+            continue
+        piece = _truncate_before_deep_dive(body, max(0, limit - used))
+        if not piece.strip():
+            continue
+        piece = f"【{title}】\n{piece}" if title else piece
+        fallback.append(piece)
+        used += len(piece)
+        if used >= limit:
+            break
+    return "\n\n".join(fallback)
+
+
+def _reading_digest_block(outline: list[dict], results: dict[int, dict], indices: list[int]) -> str:
+    """把各章概要拼成一个材料块，作为后置全书层的注入材料。
+
+    这里刻意不注入全书原文：后置全书层的职责是「整合各章导读」，而各章导读本身就是
+    从原文提炼出来的。12 章 × 3000 字 ≈ 3.6 万字 ≈ 2.5 万 token，单次调用完全可承受；
+    换成全书原文则是 28 万 token，直接超窗口。
+    """
+    chunks: list[str] = []
+    total = 0
+    for idx in indices:
+        result = results.get(idx)
+        if not result:
+            continue
+        section = result.get("section") or {}
+        title = str(section.get("title") or (outline[idx].get("title", "") if idx < len(outline) else ""))
+        digest = _reading_digest(section)
+        if not digest:
+            continue
+        piece = f"\n\n===== {title} =====\n{digest}"
+        if total + len(piece) > READING_DIGEST_TOTAL_CHARS:
+            chunks.append("\n\n（其余章节概要因长度上限未注入，不得声称已通读全书）")
+            break
+        chunks.append(piece)
+        total += len(piece)
+    if not chunks:
+        return ""
+    return (
+        "【各章导读概要（由本次生成的章节层产出，供全书层整合；不是原著原文，"
+        "不得据此编造原文未出现的内容）】" + "".join(chunks)
+    )
+
+
 
 def _generate_section_task(
     *,
@@ -857,6 +1236,8 @@ def _generate_section_task(
     prior_titles: list[str],
     materials_text: str,
     outline_titles: list[str] | None = None,
+    chapter: str | None = None,
+    all_chapters: list[str] | None = None,
 ) -> dict:
     """并发生成的单节任务：独立 Session + 独立 AIService。
 
@@ -875,6 +1256,13 @@ def _generate_section_task(
         ai = AIService(db, goal_id=goal_id, tutorial_id=tutorial_id, job_id=job_id)
         section_id = uuid.uuid4().hex[:8]
         ai.section_id = section_id
+        # 阅读教程规范章节层：本节只注入自己那一章 + 全书级材料（目录/前言）。
+        # 全书层不经过这里——它在第二批由 worker 直接传 digest_block 作为 materials_text。
+        # 其它规范 chapter 恒为 None，仍用传进来的全量 materials_text，行为不变。
+        if chapter:
+            materials_text = materials_service.materials_context(
+                db, goal_id, chapter=chapter, all_chapters=all_chapters or []
+            )
         criteria_by_id = {c["id"]: c for c in criteria_dicts}
         mapped = [criteria_by_id[cid] for cid in item.get("criteria_ids", []) if cid in criteria_by_id]
         # 配套文件名在生成章节时已确定（见 _generate_companions），提前注入，避免模型猜错双链目标；
@@ -933,7 +1321,10 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         if goal is None:
             _fail_job(db, job_id, "goal_not_found")
             return
-        materials_text = materials_service.materials_context(db, goal.id)
+        # materials_text 惰性计算：阅读规范按章注入，全程用不到全量材料（章节走 chapter、
+        # 前置全书层走 global_only、后置全书层走各章概要、配套文件被 suppress），
+        # 对整本书（40 万字）白读一遍全量是纯浪费。只有非阅读规范才在下方计算全量。
+        materials_text = ""
         criteria_dicts = goals_service.confirmed_criteria(db, goal.id)
         version = db.get(TutorialVersion, tutorial.current_version_id) if tutorial.current_version_id else None
         content = jload(version.content_json, {"outline": [], "sections": []}) if version else {}
@@ -992,11 +1383,43 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         total = len(outline)
         results: dict[int, dict] = {}
         failures: list[tuple[int, Exception]] = []
+
+        # ---- 阅读教程规范：两阶段 + 按章注入（其它规范 phase["fallback"]=True，逐字走原路径）----
+        reading_spec = content.get("format_spec") or jload(goal.format_spec_snapshot or "", {})
+        reading_mode = format_specs_service.is_reading_guide(reading_spec)
+        phase = (
+            _reading_phase_plan(outline) if reading_mode
+            else {"fallback": True, "chapters": [], "book_level": [], "marks": {}}
+        )
+        if phase["fallback"]:
+            reading_mode = False
+        reading_marks = phase["marks"]
+        # 非阅读规范（含阅读规范 fallback：无章号论文导读）走原有全量注入路径，行为逐字不变。
+        # reading 模式不预取全量：章节层在子线程内按 chapter 取本章，全书层在第二批取各章概要。
+        if not reading_mode:
+            materials_text = materials_service.materials_context(db, goal.id)
+
+        def _chapter_for(idx: int) -> str | None:
+            return reading_marks.get(idx) if reading_mode else None
+
+        def _materials_for(idx: int) -> str:
+            """第一批该拿什么材料。
+
+            reading 模式：第一批只有章节层，子线程内用 chapter 参数按章重取，这里传空串占位。
+            非 reading 模式：全量注入，行为与从前逐字一致。
+            """
+            if reading_mode:
+                return ""
+            return materials_text
+
         _update_job(
             db,
             job_id,
             progress=5,
-            stage=f"并发生成 {total} 节（最多 {MAX_SECTION_WORKERS} 路）",
+            stage=(
+                f"并发生成 {total} 节（章节层按章注入材料，全书层后置；最多 {MAX_SECTION_WORKERS} 路）"
+                if reading_mode else f"并发生成 {total} 节（最多 {MAX_SECTION_WORKERS} 路）"
+            ),
             status="running",
         )
         db.commit()
@@ -1005,8 +1428,16 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         # 配套文件只依赖大纲，不依赖章节 → 与章节同池并行：
         # 章节先入队占满工作线程，配套任务随后排队接档，消除「全部章节完成后
         # 再串行等 1-2 次模型往返」的尾巴；复用同一个池子，模型峰值并发仍 ≤ 3 路。
+        # 第一批：reading 模式只有章节层（全书层留到第二批吃各章概要）；
+        # 非 reading 模式是全部节（原有单批行为，first_batch == 全部 outline）。
+        first_batch = (
+            [(idx, outline[idx]) for idx in phase["chapters"]]
+            if reading_mode
+            else list(enumerate(outline))
+        )
         with ThreadPoolExecutor(
-            max_workers=min(MAX_SECTION_WORKERS, total), thread_name_prefix="section"
+            max_workers=min(MAX_SECTION_WORKERS, max(1, len(first_batch))),
+            thread_name_prefix="section",
         ) as pool:
             futures = {
                 pool.submit(
@@ -1023,10 +1454,12 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
                     criteria_dicts=criteria_dicts,
                     # 并发下「前置章节标题」取大纲静态切片，避免依赖完成顺序
                     prior_titles=outline_titles[:idx],
-                    materials_text=materials_text,
+                    materials_text=_materials_for(idx),
                     outline_titles=outline_titles,
+                    chapter=_chapter_for(idx),
+                    all_chapters=list(reading_marks.values()),
                 ): idx
-                for idx, item in enumerate(outline)
+                for idx, item in first_batch
             }
             companion_futures = (
                 {}
@@ -1077,6 +1510,72 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
                         job.stage = f"已完成 {len(results)}/{total} 节：{last_title}"[:200]
                 db.commit()
 
+        # ---- 阅读教程规范 第二阶段：全书层（认知地图 / 阅读路线 / 思想背景 / 争鸣…）----
+        # 全部放最后生成、统一吃各章概要：它们都要知道每章**实际**讲了什么，
+        # 与章节层并行只能凭目录名猜，还会互相看不见（pipeline.md §4 的老故障）。
+        # 生成顺序与文档顺序解耦：results 按 index 排序合并，全书认知地图仍排在导出最前。
+        book_indices = phase["book_level"] if reading_mode else []
+        if book_indices and not failures:
+            digest_block = _reading_digest_block(outline, results, phase["chapters"])
+            _update_job(
+                db, job_id, progress=86,
+                stage=f"整合各章概要，生成全书层 {len(book_indices)} 节",
+            )
+            db.commit()
+            book_failures: list[tuple[int, Exception]] = []
+            with ThreadPoolExecutor(
+                max_workers=min(MAX_SECTION_WORKERS, len(book_indices)),
+                thread_name_prefix="reading-book",
+            ) as book_pool:
+                book_futures = {
+                    book_pool.submit(
+                        _generate_section_task,
+                        tutorial_id=tutorial.id,
+                        goal_id=goal.id,
+                        job_id=job_id,
+                        index=idx,
+                        item={
+                            **outline[idx],
+                            "_teaching_plan": teaching_plan,
+                            "_deliverable": (
+                                contract_items[idx] if idx < len(contract_items) else None
+                            ),
+                        },
+                        criteria_dicts=criteria_dicts,
+                        # 全书层能看到所有章节标题（它本来就要整合全书）
+                        prior_titles=outline_titles[:idx],
+                        # 关键：注入的是各章概要，不是全书原文（40 万字 ≈ 28 万 token 会超窗口）
+                        materials_text=digest_block,
+                        outline_titles=outline_titles,
+                        # 全书层不按章注入：显式写死这两个参数，避免后来者误以为它
+                        # 与第一批共用同一套材料契约（chapter 非空会让子线程重新按章取材料）
+                        chapter=None,
+                        all_chapters=[],
+                    ): idx
+                    for idx in book_indices
+                }
+                for future in as_completed(book_futures):
+                    idx = book_futures[future]
+                    try:
+                        results[idx] = future.result()
+                    except Exception as exc:  # noqa: BLE001  先收齐其余节再统一判定失败
+                        book_failures.append((idx, exc))
+                        continue
+                    # 逐节落盘：全书层中途失败也不丢已完成的章节层
+                    draft.content_json = jdump(
+                        {
+                            "format_spec": content.get("format_spec")
+                            or jload(goal.format_spec_snapshot or "", {}),
+                            "teaching_plan": teaching_plan,
+                            "outline": outline,
+                            "sections": [results[i]["section"] for i in sorted(results)],
+                            **({"delivery_contract": contract} if contract else {}),
+                        }
+                    )
+                    db.commit()
+            if book_failures:
+                failures.extend(book_failures)
+
         if failures:
             # 章节已失败：取消仍在排队的配套任务（正在跑的等它自然结束），省 token 也省限流额度
             for companion_future in companion_futures:
@@ -1094,6 +1593,12 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         _update_job(db, job_id, progress=90, stage="质量检查")
         db.commit()
         sections = [results[i]["section"] for i in sorted(results)]
+        # 后置全书层的 token 也要计入草稿统计，否则账面少算第二阶段消耗
+        usage = _merge_section_usage(results)
+        draft.prompt_tokens = usage["prompt_tokens"]
+        draft.completion_tokens = usage["completion_tokens"]
+        draft.total_tokens = usage["total_tokens"]
+        draft.usage_source = usage["usage_source"]
         new_content = {
             "format_spec": content.get("format_spec") or jload(goal.format_spec_snapshot or "", {}),
             "teaching_plan": teaching_plan,
@@ -1314,6 +1819,7 @@ def normalize_obsidian_syntax(markdown: str, allowed_links: set[str]) -> str:
     allowed = {name.strip().removesuffix(".md") for name in allowed_links if name}
     lines: list[str] = []
     fence: str | None = None
+    in_math = False
     for line in markdown.splitlines():
         stripped = line.lstrip()
         if stripped.startswith("```") or stripped.startswith("~~~"):
@@ -1325,6 +1831,28 @@ def normalize_obsidian_syntax(markdown: str, allowed_links: set[str]) -> str:
             lines.append(line)
             continue
         if fence is not None:
+            lines.append(line)
+            continue
+        # 数学环境里的 [[...]] 是合法记号（如形式幂级数环 R[[x]]、矩阵 [[a,b],[c,d]]），
+        # 不是双链：$$ 与 \[ 围栏、行内 $...$ / \(...\) / \[...\] 一律跳过，
+        # 否则反引号会插进公式，把 \(R[[x]]\) 破坏成不可渲染的形态
+        if stripped.count("$$") % 2 == 1:
+            in_math = not in_math
+            lines.append(line)
+            continue
+        # \[ ... \] 围栏同样是数学环境：里面的 [[x]] 是记号，不是双链。
+        # 按「开/闭」净差翻转状态：同一行自闭合时不翻转（否则单行公式之后的内容
+        # 会被误判为数学环境）；单独一行只有闭合符 \] 时也必须翻回来，
+        # 否则其后所有正文都会跳过双链与标签处理，真断链就漏检了。
+        opens = stripped.count("\\[")
+        closes = stripped.count("\\]")
+        if opens > closes:
+            in_math = True
+            lines.append(line)
+            continue
+        if closes > opens:
+            in_math = False  # 闭合行上可能还带正文，继续走后面的处理
+        if in_math:
             lines.append(line)
             continue
 
@@ -1342,7 +1870,15 @@ def normalize_obsidian_syntax(markdown: str, allowed_links: set[str]) -> str:
                 return part  # 标题行
             return INLINE_TAG_RE.sub(lambda m: f"`{m.group(0)}`", part)
 
-        pieces = re.split(r"(`[^`\n]*`)", line)
+        # 行内代码与四种数学记法（$$…$$ / \[…\] / \(…\) / $…$）都不做双链、标签处理
+        pieces = re.split(
+            r"(`[^`\n]*`"
+            r"|\$\$[^$\n]*\$\$"
+            r"|\\\[[^\n]*?\\\]"
+            r"|\\\([^\n]*?\\\)"
+            r"|\$[^$\n]+\$)",
+            line,
+        )
         for idx, piece in enumerate(pieces):
             if idx % 2 == 1:
                 continue
@@ -1407,7 +1943,7 @@ def _render_block(block: dict, lines: list[str]) -> None:
     btype = str(block.get("type", "text") or "text")
     title = str(block.get("title", "") or "").strip()
     heading = title or _BLOCK_HEADINGS.get(btype, "讲解")
-    body = str(block.get("body", "") or "").strip()
+    body = _strip_meta_segments(str(block.get("body", "") or "")).strip()
     if btype == "key_point":
         lines.append(f"### {heading}")
         lines.append("")
@@ -1431,32 +1967,8 @@ def _render_section_v2(s: dict, lines: list[str]) -> None:
         lines.append(f"> {s['purpose']}")
         lines.append("")
     for block in s.get("content", []):
-        if isinstance(block, dict):
+        if isinstance(block, dict) and not _is_meta_section_title(block.get("title", "")):
             _render_block(block, lines)
-    if s.get("key_takeaways"):
-        lines.append("### 核心结论")
-        lines.append("")
-        for item in s["key_takeaways"]:
-            lines.append(f"- {item}")
-        lines.append("")
-    if s.get("common_errors"):
-        lines.append("### 常见错误")
-        lines.append("")
-        for e in s["common_errors"]:
-            lines.append(f"- **{e.get('error', '')}** — 原因：{e.get('cause', '')}；排查：{e.get('diagnose', '')}")
-        lines.append("")
-    if s.get("prerequisite_refs"):
-        lines.append("### 前置知识")
-        lines.append("")
-        for p in s["prerequisite_refs"]:
-            lines.append(f"- {p}")
-        lines.append("")
-    if s.get("exercises"):
-        lines.append("### 必要练习")
-        lines.append("")
-        for e in s["exercises"]:
-            lines.append(f"- [ ] {e}")
-        lines.append("")
 
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
@@ -1481,16 +1993,21 @@ def _dequote_document_body(body: str) -> str:
     return "\n".join(dequoted)
 
 
-def _normalize_deliverable_body(body: str) -> str:
-    """去掉文档级 H1，并把内部标题降一级，避免与交付物标题同层冲突。"""
+def _normalize_deliverable_body(body: str, min_level: int = 3) -> str:
+    """去掉文档级 H1，并把内部标题层级归一到 min_level 起步、保留相对层次。
+
+    固定「降一级」不够：模型在不同章节会分别用 ##/###/#### 起笔，降级后得到深浅
+    不一的题型标题（同一份文档里第 1 章是 ####、第 6 章是 ###）。按本节自己的最小
+    标题层级平移到 ###，既避免与交付物标题（##）同层，也让各章题型标题深度一致。
+    """
     text = _dequote_document_body(str(body or "")).strip()
     if not text:
         return ""
-    lines = text.splitlines()
-    normalized: list[str] = []
+    # 第一遍：识别代码块与文档级 H1，记录各标题的层级与「是否在代码块内」
+    entries: list[tuple[str, int | None]] = []  # (原始行, 标题层级 or None)
     fence: str | None = None
     removed_document_title = False
-    for line in lines:
+    for line in text.splitlines():
         stripped = line.lstrip()
         if stripped.startswith("```") or stripped.startswith("~~~"):
             marker = stripped[:3]
@@ -1498,21 +2015,31 @@ def _normalize_deliverable_body(body: str) -> str:
                 fence = marker
             elif stripped.startswith(fence):
                 fence = None
-            normalized.append(line)
+            entries.append((line, None))
             continue
         if fence is not None:
-            normalized.append(line)
+            entries.append((line, None))
             continue
         match = _HEADING_RE.match(line)
         if not match:
-            normalized.append(line)
+            entries.append((line, None))
             continue
         level = len(match.group(1))
         if level == 1 and not removed_document_title:
             removed_document_title = True
             continue
-        new_level = min(6, max(3, level + 1))
-        normalized.append("#" * new_level + " " + match.group(2))
+        entries.append((line, level))
+    # 平移到 ### 起步：offset 可正可负，最深层级仍受 H6 限制
+    heading_levels = [level for _line, level in entries if level]
+    offset = (min_level - min(heading_levels)) if heading_levels else 0
+    normalized: list[str] = []
+    for line, level in entries:
+        if level is None or not offset:
+            normalized.append(line)
+            continue
+        new_level = min(6, max(min_level, level + offset))
+        match = _HEADING_RE.match(line)
+        normalized.append("#" * new_level + " " + (match.group(2) if match else line))
     while normalized and not normalized[0].strip():
         normalized.pop(0)
     while normalized and not normalized[-1].strip():
@@ -1533,32 +2060,106 @@ def _render_deliverable_blocks(section: dict, lines: list[str]) -> None:
             body_lines.pop(0)
         if body_lines:
             first = _norm_ws(re.sub(r"^#{1,6}\s*", "", body_lines[0]))
+            first = _norm_ws(_ORDINAL_PREFIX_RE.sub("", first))
             if first and first in (
-                _norm_ws(block.get("title", "")),
-                section_title,
+                _norm_ws(_ORDINAL_PREFIX_RE.sub("", str(block.get("title", "")))),
+                _norm_ws(_ORDINAL_PREFIX_RE.sub("", section_title)),
             ):
                 body_lines.pop(0)
                 while body_lines and not body_lines[0].strip():
                     body_lines.pop(0)
         body = "\n".join(body_lines)
         block_title = str(block.get("title", "") or "").strip()
-        has_heading = any(_HEADING_RE.match(line) for line in body.splitlines())
-        if block_title and block_title not in _GENERIC_BLOCK_TITLES and not has_heading:
+        # 块标题与交付物标题同名（含序号差异）时不再重复输出小标题
+        same_as_section = _norm_ws(_ORDINAL_PREFIX_RE.sub("", block_title)) == _norm_ws(
+            _ORDINAL_PREFIX_RE.sub("", section_title)
+        )
+        title_wanted = bool(
+            block_title and block_title not in _GENERIC_BLOCK_TITLES and not same_as_section
+        )
+        # 正文已用首行标题表达过块标题（上面刚去重）时不再补一层；
+        # 正文的小标题是块标题的下级分组时，块标题必须保留，并把正文降一级嵌套，
+        # 否则「参考答案」块里的「### 一、选择题」会与题面的同名标题混为一谈。
+        first_body_heading = _norm_ws(
+            _ORDINAL_PREFIX_RE.sub(
+                "",
+                re.sub(r"^#{1,6}\s*", "", next(
+                    (ln.strip() for ln in body.splitlines() if _HEADING_RE.match(ln)), ""
+                )),
+            )
+        )
+        title_already_expressed = bool(first_body_heading) and first_body_heading == _norm_ws(
+            _ORDINAL_PREFIX_RE.sub("", block_title)
+        )
+        if title_wanted and not title_already_expressed:
             lines.append(f"### {block_title}")
             lines.append("")
+            # 块标题占 ###：正文标题从 #### 起步，形成正确层级
+            body = _normalize_deliverable_body(body, min_level=4)
+        elif title_wanted:
+            body = _normalize_deliverable_body(body, min_level=3)
         if body:
             lines.append(body)
             lines.append("")
 
 
+_ORDINAL_PREFIX_RE = re.compile(r"^[一二三四五六七八九十百零\d]+[、.．]\s*")
+
+
+def _template_headings(format_spec: dict | None) -> dict[str, str]:
+    """规范模板里的**章级**标题（含中文序号）：节标题 → 模板标题行。
+
+    规范的 content_structure 是排版的唯一模板来源（如「## 一、易错辨析」）。
+    渲染时若只按交付物名输出「## 易错辨析」，序号就丢了，导出与模板不一致。
+
+    只收 `##` 级：这张表的键要与**节标题**比对，而节标题一律渲染成 `## 中文序号、`。
+    收更深层级会让模板里的**内层小标题名**混进键集合 —— 一旦大纲模型把某节命名为
+    「本章概要」「难点辨析」这类内层名，就会命中并原样输出成 `### 本章概要`，
+    章级 `##` 序号凭空消失、整篇层级错位。阅读教程规范的 content_structure 里有
+    27 个内层标题，撞上任何一个都会静默错版。
+    """
+    result: dict[str, str] = {}
+    structure = str((format_spec or {}).get("content_structure", "") or "")
+    for line in structure.splitlines():
+        match = _HEADING_RE.match(line.strip())
+        if not match or len(match.group(1)) != 2:
+            continue
+        name = _norm_ws(_ORDINAL_PREFIX_RE.sub("", match.group(2)))
+        if name and name not in result:
+            result[name] = f"## {match.group(2)}"
+    return result
+
+
 def _render_format_spec_document(content: dict, goal, sections: list[dict], lines: list[str]) -> None:
     """按选定规范输出单一文档，不添加教程目录、第 N 节和通用教学栏目。"""
+    headings = _template_headings(content.get("format_spec"))
     lines.append(f"# {goal.title}")
     lines.append("")
-    for section in sections:
+    # 配套文件双链（教程族规范会生成速查/额外练习；练习/试卷规范抑制配套，此块自然为空）
+    cheatsheet = content.get("cheatsheet") or {}
+    exercises_file = content.get("extra_exercises") or {}
+    companion = []
+    if cheatsheet.get("sections"):
+        companion.append(f"[[{cheatsheet.get('filename') or _safe_filename(goal.title) + '-知识速查'}]]（知识速查）")
+    if exercises_file.get("exercises"):
+        companion.append(
+            f"[[{exercises_file.get('filename') or _safe_filename(goal.title) + '-额外练习'}]]（额外练习）"
+        )
+    if companion:
+        lines.append("## 配套文件")
+        lines.append("")
+        for item in companion:
+            lines.append(f"- {item}")
+        lines.append("")
+    for idx, section in enumerate(sections, 1):
         title = str(section.get("title", "") or "").strip()
         if title:
-            lines.append(f"## {title}")
+            heading = headings.get(_norm_ws(title))
+            if heading is None:
+                # 模板没有该章标题（如按材料分章交付）：统一补中文序号，
+                # 保证「## 一、…」「## 二、…」全篇同式，不再出现有的章带序号有的不带
+                heading = f"## {format_specs_service.cn_numeral(idx)}、{title}"
+            lines.append(heading)
             lines.append("")
         _render_deliverable_blocks(section, lines)
 
@@ -1596,9 +2197,6 @@ def _render_section_v1(s: dict, lines: list[str]) -> None:
         for e in s["examples"]:
             lines.append(f"- {e}")
         lines.append("")
-    if s.get("exercises"):
-        lines.append("### 练习")
-        lines.append("")
         for e in s["exercises"]:
             lines.append(f"- [ ] {e}")
         lines.append("")
@@ -1607,9 +2205,6 @@ def _render_section_v1(s: dict, lines: list[str]) -> None:
         lines.append("")
         lines.append(f"- {s['variation_task']}")
         lines.append("")
-    if s.get("common_errors"):
-        lines.append("### 常见错误")
-        lines.append("")
         for e in s["common_errors"]:
             lines.append(f"- **{e.get('error', '')}** — 原因：{e.get('cause', '')}；排查：{e.get('diagnose', '')}")
         lines.append("")
@@ -1617,6 +2212,18 @@ def _render_section_v1(s: dict, lines: list[str]) -> None:
 
 def _tutorial_base_name(goal) -> str:
     return f"{_safe_filename(goal.title)}-教程"
+
+
+def _finalize_markdown(markdown: str, allowed_links: set[str]) -> str:
+    """导出统一收尾：公式分隔符归一 → Obsidian 双链/标签降级 → 松散列表间距。
+
+    顺序有讲究：先把 \\(…\\)/\\[…\\] 换成 $…$/$$…$$，
+    normalize_obsidian_syntax 的数学围栏判定就只需面对一种风格，历史版本里
+    混用的分隔符也不会漏网。
+    """
+    return _expand_loose_list_spacing(
+        normalize_obsidian_syntax(normalize_math_delimiters(markdown), allowed_links)
+    )
 
 
 def export_markdown(db: Session, tutorial_id: str) -> tuple[str, str]:
@@ -1634,12 +2241,15 @@ def export_markdown(db: Session, tutorial_id: str) -> tuple[str, str]:
     content = align_section_titles(prune_foreign_section_blocks(content))
 
     lines: list[str] = []
-    if format_specs_service.authoritative_spec_dict(format_spec):
+    if str((format_spec or {}).get("name", "") or "").strip():
         _render_format_spec_document(content, goal, content.get("sections", []), lines)
+        allowed = {_tutorial_base_name(goal)}
+        if cheatsheet.get("sections"):
+            allowed.add(cheatsheet.get("filename") or f"{_safe_filename(goal.title)}-知识速查")
+        if exercises_file.get("exercises"):
+            allowed.add(exercises_file.get("filename") or f"{_safe_filename(goal.title)}-额外练习")
         filename = f"{_tutorial_base_name(goal)}.md"
-        return filename, _expand_loose_list_spacing(
-            normalize_obsidian_syntax("\n".join(lines), {_tutorial_base_name(goal)})
-        )
+        return filename, _finalize_markdown("\n".join(lines), allowed)
 
     lines.append(f"# {tutorial.title}")
     lines.append("")
@@ -1682,9 +2292,7 @@ def export_markdown(db: Session, tutorial_id: str) -> tuple[str, str]:
     if exercises_file.get("exercises"):
         allowed_links.add(exercises_file.get("filename") or f"{_safe_filename(goal.title)}-额外练习")
     filename = f"{_tutorial_base_name(goal)}.md"
-    return filename, _expand_loose_list_spacing(
-        normalize_obsidian_syntax("\n".join(lines), allowed_links)
-    )
+    return filename, _finalize_markdown("\n".join(lines), allowed_links)
 def export_cheatsheet(db: Session, tutorial_id: str) -> tuple[str, str]:
     """导出配套知识速查文件。未生成时 404。"""
     tutorial = _get_tutorial(db, tutorial_id)
@@ -1715,13 +2323,11 @@ def export_cheatsheet(db: Session, tutorial_id: str) -> tuple[str, str]:
         lines.append("")
 
     filename = f"{cheatsheet.get('filename') or _safe_filename(goal.title) + '-知识速查'}.md"
-    return filename, _expand_loose_list_spacing(
-        normalize_obsidian_syntax("\n".join(lines), {_tutorial_base_name(goal)})
-    )
+    return filename, _finalize_markdown("\n".join(lines), {_tutorial_base_name(goal)})
 
 
 def export_extra_exercises(db: Session, tutorial_id: str) -> tuple[str, str]:
-    """导出独立额外练习文件（用户开启选项时生成）。未生成时 404。"""
+    """导出独立额外练习文件（练习生成规范排版的 Markdown 成品）。未生成时 404。"""
     tutorial = _get_tutorial(db, tutorial_id)
     goal = _goal_for(db, tutorial.goal_id)
     version = _current_version(db, tutorial)
@@ -1729,60 +2335,27 @@ def export_extra_exercises(db: Session, tutorial_id: str) -> tuple[str, str]:
         raise HTTPException(status_code=409, detail={"code": "no_content", "message": "教程尚无内容"})
     content = jload(version.content_json, {})
     extra = content.get("extra_exercises") or {}
-    exercises = extra.get("exercises") or []
-    if not exercises:
+    markdown = str(extra.get("markdown", "") or "").strip()
+    if not markdown:
         raise HTTPException(
             status_code=404,
             detail={"code": "exercises_not_found", "message": "该教程没有额外练习文件（可在学习目标中开启后重新生成）"},
         )
-
-    lines: list[str] = []
-    lines.append(f"# {extra.get('title') or f'{goal.title} · 额外练习'}")
-    lines.append("")
-    lines.append(f"> 配套教程：[[{_tutorial_base_name(goal)}]]")
-    lines.append(">")
-    if extra.get("intro"):
-        for row in str(extra["intro"]).splitlines():
-            lines.append(f"> {row}")
-        lines.append(">")
-    lines.append("> 参考答案集中在本文件末尾，建议先独立完成再对照。")
-    lines.append("")
-
-    level = _LEVEL_LABELS.get(normalize_level(goal.capability_level), "独立应用")
-    lines.append(f"难度基准：{level}（{normalize_level(goal.capability_level)}）")
-    lines.append("")
-    lines.append("## 题目")
-    lines.append("")
-    for ex in exercises:
-        num = ex.get("number") or ""
-        lines.append(f"### 练习 {num}")
-        lines.append("")
-        lines.append(str(ex.get("task", "")))
-        lines.append("")
-        if ex.get("requirements"):
-            lines.append(f"- 要求：{ex['requirements']}")
-        if ex.get("hint"):
-            lines.append(f"- 提示：{ex['hint']}")
-        lines.append("")
-
-    lines.append("---")
-    lines.append("")
-    lines.append("## 参考答案与自检标准")
-    lines.append("")
-    for ex in exercises:
-        num = ex.get("number") or ""
-        lines.append(f"### 练习 {num} 参考")
-        lines.append("")
-        lines.append(str(ex.get("solution", "")))
-        lines.append("")
-    if extra.get("answers_note"):
-        lines.append(f"> {extra['answers_note']}")
-        lines.append("")
-
+    tutorial_name = _tutorial_base_name(goal)
+    header = [
+        f"> 配套教程：[[{tutorial_name}]]",
+        ">",
+        "> 本文件按「练习生成规范」排版：一节一章，题号节内连续，答案在本节末尾。",
+        "",
+    ]
+    body_lines = markdown.splitlines()
+    if body_lines and body_lines[0].startswith("# "):
+        body_lines = body_lines[1:]
+        while body_lines and not body_lines[0].strip():
+            body_lines.pop(0)
+    lines_out = [f"# {extra.get('title') or f'{goal.title} · 额外练习'}", ""] + header + body_lines
     filename = f"{extra.get('filename') or _safe_filename(goal.title) + '-额外练习'}.md"
-    return filename, _expand_loose_list_spacing(
-        normalize_obsidian_syntax("\n".join(lines), {_tutorial_base_name(goal)})
-    )
+    return filename, _finalize_markdown("\n".join(lines_out), {tutorial_name})
 
 
 def mark_delivery(db: Session, tutorial_id: str, payload) -> dict:

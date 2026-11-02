@@ -127,12 +127,6 @@ export interface ContentBlock {
   body: string;
 }
 
-export interface CommonErrorItem {
-  error: string;
-  cause: string;
-  diagnose: string;
-}
-
 /** 用户画像硬性约束的核验结果：repaired=true 表示首稿违规、定向重写后已通过。 */
 export interface RuleCheck {
   repaired: boolean;
@@ -146,10 +140,6 @@ export interface Section {
   purpose?: string;
   content_type?: string;
   content?: ContentBlock[];
-  key_takeaways?: string[];
-  prerequisite_refs?: string[];
-  common_errors?: CommonErrorItem[];
-  exercises?: string[];
   sources?: { title: string; url: string; note: string }[];
   mapping_criteria: string[];
   rule_check?: RuleCheck;
@@ -177,18 +167,14 @@ export interface Cheatsheet {
 
 export interface ExtraExerciseItem {
   number: number;
-  task: string;
-  requirements?: string;
-  hint?: string;
-  solution?: string;
 }
 
 export interface ExtraExercises {
   filename?: string;
   title: string;
-  intro?: string;
+  /** 练习生成规范排版的整份 Markdown 成品 */
+  markdown?: string;
   exercises: ExtraExerciseItem[];
-  answers_note?: string;
   rule_check?: RuleCheck;
 }
 
@@ -431,8 +417,10 @@ export interface Material {
   size: number;
   status: string;
   error_message: string;
-  extract_status: string; // ok / empty / unsupported / failed / pending
+  extract_status: string; // ok / empty / unsupported / failed / pending / truncated
   char_count: number;
+  /** 文件原文字数；大于 char_count 表示入库时被截断，后段内容不可见 */
+  source_char_count: number;
   note: string;
   created_at?: string;
   excerpt_preview: string;

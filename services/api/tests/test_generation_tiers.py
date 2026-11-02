@@ -78,7 +78,7 @@ def test_one_shot_fast_generation_and_focused_export(client):
     markdown = export.text
     assert markdown.startswith("#")
     assert "ai_edu:" not in markdown
-    assert "## 目录" in markdown
+    assert "## 一、" in markdown  # 规范渲染器：章标题带中文序号，不再输出「目录」块
     assert "## 验收标准" not in markdown
     assert "## 质量报告" not in markdown
     assert "由 AI Edu 生成" not in markdown
