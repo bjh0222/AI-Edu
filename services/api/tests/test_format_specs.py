@@ -506,6 +506,59 @@ def test_exam_noun_regex_stays_in_sync_with_unit_noun_regex():
         assert not _EXAM_NOUN_RE.search(name), f"{name} 不该触发卷面自检"
 
 
+def test_exam_type_names_come_from_material_not_a_fixed_enum():
+    """回归：试卷题型不固定，来源由「有无例题来源材料」决定，行为按客观/主观二分。
+
+    用户要求：题型根据上传资料（例题来源）确定；没有资料时默认覆盖全部题型。
+    旧的封闭枚举（「名称只能取：选择题 / 判断题 / …」）会让材料里的「计算题」
+    「名词解释」「简答题」判为违规，或逼模型改写成同义词 —— 与材料脱节。
+    但枚举当初要防的是「同一份文档各节各写各的」（v5 真实故障：计算题 /
+    计算分析题 / 计算与证明题 / 诊断题 / 变式题 七章一式），所以一致性判据
+    不能丢，只是从「取自固定清单」换成「取自材料、全文档同一套」。
+
+    同时：题型名一旦动态化，依赖题型名字面的答案详略与题后留白规则会全部落空，
+    必须改为按「客观题/主观题」的作答形态归类，材料写什么名都能落进确定分支。
+    """
+    from app.services import format_specs as fs
+
+    exam = next(item for item in fs._BUILTINS if item["scene"] == "exam_paper")
+    rules = exam["format_rules"] + exam["required_rules"] + exam["acceptance_criteria"]
+
+    # ① 封闭枚举已废除：不得再要求「只能取」固定清单
+    assert "名称只能取" not in rules, "封闭枚举仍在，材料里的题型名会被判违规"
+
+    # ② 三档题型来源规则齐全，且顺序明确（有材料 → 材料无划分 → 无材料）
+    for fragment in ("题型来源规则", "例题来源", "没有注入任何材料"):
+        assert fragment in rules, f"缺题型来源规则片段：{fragment}"
+    # 逐字沿用，不许改写成同义词（这是「与例题来源一致」的可执行表述）
+    assert "不改写成同义词" in rules
+    # 默认档必须覆盖全部题型
+    assert "默认覆盖全部题型" in rules
+
+    # ③ 一致性判据仍在：全文档同一套题型名，且与分值分布表一致
+    assert "全文档同一套" in rules
+    assert "同一套题型名" in exam["required_rules"]
+
+    # ④ 答案详略与留白改为按客观/主观，不再依赖题型名字面
+    for fragment in ("客观题", "主观题"):
+        assert fragment in rules, f"缺客观/主观归类：{fragment}"
+    assert "选择题、判断题、填空题 → 只给答案" not in exam["required_rules"], \
+        "答案详略仍按固定题型名映射，材料题型会落空"
+    assert "解答题、证明题、综合题 → 给答案" not in exam["required_rules"]
+    # 无法归类时有确定兜底，不留自由裁量
+    assert "无法确定时按主观题处理" in rules
+
+    # ⑤ custom_markdown 里留白规则同步改口径，且不得再有重复块
+    cm = exam["custom_markdown"]
+    assert "题后留白规则" in cm
+    assert cm.count("**判断题排版规则**") == 1, "判断题排版规则重复注入"
+    assert cm.count("题后留白规则") == 1, "留白规则重复注入"
+
+    # ⑥ 模板与正反例都给了「按材料题型」的形态，模型不只见过默认六题型
+    assert "名词解释" in exam["content_structure"]
+    assert "名词解释" in exam["reference_examples"]
+
+
 def test_exam_section_prompt_carries_paper_surface_rules():
     """试卷节提示词必须同时带上：规范的卷内四段结构 + 代码侧卷面自检。
 
@@ -528,16 +581,16 @@ def test_exam_section_prompt_carries_paper_surface_rules():
         goal, get_profile("math_logic"),
         {"title": "线性代数期中模拟试卷", "_deliverable": "线性代数期中模拟试卷"}, [], [],
     )
-    # 规范侧：卷内四段结构、题型枚举、禁止项、正反例
+    # 规范侧：卷内四段结构、题型来源规则、禁止项、正反例
     for fragment in (
         "一节 = 一整份卷",
         "| 题型 | 题号 | 题量 | 每题分值 | 小计 |",
-        "解答题 / 证明题 / 综合题 / 参考答案",
+        "题型来源规则",
         "禁止「第 I 部分」「Part 1」一类前缀",
         "禁止自拟答案小节名",
         "概念标注",
         "参考答案单独成节",
-        "解答题与证明题 3 行",
+        "客观题/主观题",
         "每题不超过 6 行",
         "禁止使用 \\(…\\)",
     ):
@@ -1624,3 +1677,99 @@ def test_template_headings_only_collects_h2_so_inner_headings_cannot_hijack_chap
         "content_structure": "# 练习名称\n\n## 一、易错辨析\n\n## 二、训练\n",
     }
     assert _template_headings(spec2) == {"易错辨析": "## 一、易错辨析", "训练": "## 二、训练"}
+
+
+def test_reading_digest_total_covers_all_chapters_without_dropping():
+    """18 章（第一卷规模）必须全部进入 digest，不得静默丢弃后面的章。
+
+    曾固定 3000 字/章 + 30000 字合计上限：18 章需 54000 字，后 8 章被截掉，
+    于是「核心概念索引」漏条目、「阅读路线」漏章节，且无任何提示。
+    现在单章额度随章数自适应收缩。
+    """
+    from app.services import tutorials as T
+
+    n = 18
+    outline = [{"title": f"第{i+1}篇"} for i in range(n)]
+    results = {
+        i: {"section": {"title": f"第{i+1}篇", "content": [
+            {"type": "text", "title": f"第{i+1}篇",
+             "body": "### 本章概要\n\n" + "核心内容。" * 500 + "\n### 深度导读\n细节"}]}}
+        for i in range(n)
+    }
+    blk = T._reading_digest_block(outline, results, list(range(n)))
+    missing = [i + 1 for i in range(n) if f"第{i+1}篇" not in blk]
+    assert not missing, f"这些章被静默丢弃：{missing}"
+    assert len(blk) <= T.READING_DIGEST_TOTAL_CHARS + 2000
+    # 超大规模才允许截断，且必须显式声明
+    big = T._reading_digest_block(
+        [{"title": f"第{i+1}篇"} for i in range(80)],
+        {i: results[i % n] | {"section": {**results[i % n]["section"], "title": f"第{i+1}篇"}}
+         for i in range(80)},
+        list(range(80)),
+    )
+    assert "其余章节概要因长度上限未注入" in big
+def test_reading_section_blocks_are_merged_back_to_one(client):
+    """回归：阅读规范里被模型拆成多块的节，必须确定性合并回单块。
+
+    真实故障（毛选第一卷第八篇）：模型把一章拆成「深度导读 · 核心概念详解」等 5 个
+    自拟标题的块。_render_deliverable_blocks 发现块标题未被正文首行表达，就给每块多插
+    一层 `### {块标题}` 并把正文压到 `####`，于是第八篇的标题层级比其它 17 篇深一级。
+    合并在生成落库与导出两处都做，历史坏数据重导出也能修复。
+    """
+    from types import SimpleNamespace
+
+    from app.services.tutorials import _merge_reading_section_blocks, _render_format_spec_document
+
+    broken = {
+        "title": "第八篇 必须注意经济工作",
+        "content": [
+            {"type": "text", "title": "本章概要", "body": "### 本章概要\n\n概要正文。"},
+            {"type": "text", "title": "深度导读 · 核心概念详解",
+             "body": "### 深度导读\n\n#### 核心概念详解\n\n内容。"},
+            {"type": "text", "title": "深度导读 · 思想关联", "body": "#### 思想关联\n\n内容。"},
+        ],
+    }
+    merged = _merge_reading_section_blocks(broken)
+    assert len(merged["content"]) == 1
+    assert merged["content"][0]["title"] == "第八篇 必须注意经济工作"  # 块标题=节标题
+    body = merged["content"][0]["body"]
+    assert "### 本章概要" in body and "### 深度导读" in body and "#### 思想关联" in body
+
+    # 单块节原样返回（幂等）
+    single = {"title": "x", "content": [{"type": "text", "title": "x", "body": "### 本章概要\n\ny"}]}
+    assert _merge_reading_section_blocks(single) is single
+
+    # 渲染层级：合并后与正常单块节一致（### 本章概要 / ### 深度导读，不被压成 ####）
+    spec = {"name": "阅读教程规范", "scene": "reading_guide", "deliverables": []}
+    normal = {"title": "第九篇 怎样分析农村阶级",
+              "content": [{"type": "text", "title": "第九篇 怎样分析农村阶级",
+                           "body": "### 本章概要\n\n概要。\n\n### 深度导读\n\n#### 核心概念详解\n\n内容。"}]}
+    lines: list[str] = []
+    _render_format_spec_document(
+        {"format_spec": spec, "delivery_contract": None, "sections": [merged, normal]},
+        SimpleNamespace(title="导读"), [merged, normal], lines,
+    )
+    md = "\n".join(lines)
+    heads = [ln for ln in md.splitlines() if ln.startswith("#")]
+    # 合并后第八篇的「本章概要」应是 ###，不是被块标题挤成的 ####
+    assert "### 本章概要" in heads, heads
+    assert not any(h == "### 深度导读 · 核心概念详解" for h in heads), heads
+
+
+def test_merge_only_applies_to_reading_guide(client):
+    """合并必须只对 reading_guide 生效：练习规范刻意用多块（易错辨析 + 训练）。"""
+    from app.services.utils import align_section_titles
+    from app.services.tutorials import _merge_reading_section_blocks
+
+    exercise_section = {
+        "title": "第二章 训练",
+        "content": [
+            {"type": "text", "title": "易错辨析", "body": "### 一、易错辨析\n\n判断题。"},
+            {"type": "text", "title": "训练", "body": "### 二、训练\n\n基础题。"},
+        ],
+    }
+    # 直接调合并函数会合并（它是纯函数）；关键是**调用点**用 is_reading_guide 门控。
+    # 这里验证门控判据本身对练习规范为 False。
+    from app.services import format_specs as fs
+    assert fs.is_reading_guide({"scene": "exercise"}) is False
+    assert fs.is_reading_guide({"scene": "reading_guide"}) is True

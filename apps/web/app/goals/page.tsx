@@ -366,6 +366,15 @@ export default function GoalsPage() {
     }
   };
 
+  const unarchive = async (goal: Goal) => {
+    try {
+      await api.post(`/api/goals/${goal.id}/unarchive`, {});
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   const purge = async (goal: Goal) => {
     if (
       !window.confirm(
@@ -484,6 +493,14 @@ export default function GoalsPage() {
                         {g.title}
                         <span className="ml-2 text-[10px] text-muted">{g.domain_name}</span>
                       </div>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void unarchive(g)}
+                        className="shrink-0 text-[11px] font-semibold text-brand hover:underline disabled:opacity-40"
+                      >
+                        恢复
+                      </button>
                       <button
                         type="button"
                         disabled={busy}

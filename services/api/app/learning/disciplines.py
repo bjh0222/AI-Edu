@@ -20,6 +20,13 @@ class DisciplineProfile:
     common_errors: list[str] = field(default_factory=list)
     source_requirements: list[str] = field(default_factory=list)
     tutorial_requirements: list[str] = field(default_factory=list)
+    # 该学科能达到的**工具验证层级**（VAL 视角）：决定 tool_verify 用哪条路径。
+    #   symbolic          = 可符号验算（数学：sympy）            → VAL L3
+    #   executable        = 可执行验证（计算机：静态检查+命令存在性）→ VAL L3-L4
+    #   symbolic_partial  = 部分可符号验算（化学：仅配平+电荷守恒）→ VAL L3（限可配平部分）
+    #   none              = 无形式化手段（生物等）→ 回落 Tier-2 模型 + Tier-3 人工，VAL L0-L2
+    # 只有本字段 != none 的学科，tool_verify 才会尝试工具验证；否则直接 undecidable。
+    verify_capability: str = "none"
 
 
 COMPUTER_CLI = DisciplineProfile(
@@ -54,6 +61,7 @@ COMPUTER_CLI = DisciplineProfile(
         "示例可复制执行，并说明执行环境",
         "包含失败示例与排查步骤",
     ],
+    verify_capability="executable",
 )
 
 MATH_DATA = DisciplineProfile(
@@ -89,7 +97,9 @@ MATH_DATA = DisciplineProfile(
         "提供可复算示例与反例/边界条件",
         "明确结论的限制",
     ],
+    verify_capability="symbolic",
 )
+
 
 GENERIC = DisciplineProfile(
     key="general",
@@ -125,9 +135,75 @@ GENERIC = DisciplineProfile(
     ],
 )
 
+# 化学与生物：简化处理（用户 2026-11 明确「化生相关配置工作做简化处理」）。
+# 化学只做**配平 + 电荷守恒**这一类纯代码、零依赖、零假阳性的客观验证（symbolic_partial），
+# 计量计算等需要 sympy 转写的部分暂不做（转写失败风险高）。生物无形式化手段（none），
+# 一律回落 Tier-2 模型核验 + Tier-3 人工。两者只给最小可用的学科差异，不为凑字段而编造。
+CHEMISTRY = DisciplineProfile(
+    key="chemistry_materials",
+    display_name="化学与材料",
+    goal_types=["理解反应原理", "掌握计算与配平", "完成实验设计"],
+    artifact_types=["balanced_equation", "calculation", "experiment_design"],
+    practice_templates=[
+        "配平给定反应式并说明电子/原子守恒依据",
+        "完成一次计量计算并核对单位与有效数字",
+        "判断一个反应能否发生并给出依据",
+    ],
+    assessment_rubrics=[
+        "方程式配平：原子数与净电荷左右守恒",
+        "计量计算：单位、有效数字与数量级正确",
+        "原理判断：能说明反应方向与限度的依据",
+    ],
+    common_errors=[
+        "配平未守恒电荷", "忽略反应条件（温度/催化剂/相态）",
+        "单位换算错误", "混淆物质的量与质量", "把可逆反应当完全反应",
+    ],
+    source_requirements=[
+        "反应式与数据以权威教材或手册为准",
+        "热力学/动力学数据标注来源与条件",
+    ],
+    tutorial_requirements=[
+        "每个反应式配平后给出守恒核对",
+        "计算题给出单位与有效数字处理",
+    ],
+    verify_capability="symbolic_partial",
+)
+
+BIOLOGY = DisciplineProfile(
+    key="biology_life",
+    display_name="生物与生命科学",
+    goal_types=["理解生命过程机制", "掌握实验与推理", "形成系统认识"],
+    artifact_types=["explanation", "experiment_design", "diagram_analysis"],
+    practice_templates=[
+        "解释一个生命过程的机制与调控",
+        "设计一个对照实验并说明变量控制",
+        "从数据或图表得出有依据的结论",
+    ],
+    assessment_rubrics=[
+        "机制解释：能说明过程、调控与因果关系",
+        "实验设计：变量控制与对照设置合理",
+        "证据推理：结论与证据匹配，不过度外推",
+    ],
+    common_errors=[
+        "混淆相关与因果", "实验缺对照或变量不单一",
+        "过度外推结论", "术语使用不精确", "忽略尺度（分子/细胞/个体）差异",
+    ],
+    source_requirements=[
+        "结论以权威教材或同行评议文献为准",
+        "区分既定事实、主流假说与争议观点",
+    ],
+    tutorial_requirements=[
+        "机制讲解标明尺度与层次",
+        "实验类内容说明变量、对照与预期结果",
+    ],
+    verify_capability="none",
+)
+
 PROFILES: dict[str, DisciplineProfile] = {
     COMPUTER_CLI.key: COMPUTER_CLI,
     MATH_DATA.key: MATH_DATA,
+    CHEMISTRY.key: CHEMISTRY,
+    BIOLOGY.key: BIOLOGY,
     GENERIC.key: GENERIC,
 }
 
@@ -144,8 +220,8 @@ SUBJECTS: list[tuple[str, str, DisciplineProfile]] = [
     ("math_logic", "数学、逻辑与统计", MATH_DATA),
     ("cs_it", "计算机科学与信息技术", COMPUTER_CLI),
     ("physics_astronomy", "物理与天文学", GENERIC),
-    ("chemistry_materials", "化学与材料", GENERIC),
-    ("biology_life", "生物与生命科学", GENERIC),
+    ("chemistry_materials", "化学与材料", CHEMISTRY),
+    ("biology_life", "生物与生命科学", BIOLOGY),
     ("earth_environment", "地球、环境与气候", GENERIC),
     ("engineering_manufacturing", "工程与制造", GENERIC),
     ("health_sport", "医学、健康与运动", GENERIC),

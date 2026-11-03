@@ -22,10 +22,13 @@ build/
 *.db-journal
 *.sqlite3
 data/
-services/api/tests/test_materials/
-services/api/tests/test_backups/
-services/api/tests/test_model_settings.json
-services/api/tests/test_aiedu.db*
+# 测试隔离产物：conftest 支持 AIEDU_TEST_SUFFIX，为每个测试进程建独立的
+# test_aiedu{_SUFFIX}.db / test_materials{_SUFFIX} / test_backups{_SUFFIX} /
+# test_model_settings{_SUFFIX}.json（并行跑测试互不争库）。通配覆盖所有后缀变体。
+services/api/tests/test_materials*/
+services/api/tests/test_backups*/
+services/api/tests/test_model_settings*.json
+services/api/tests/test_aiedu*.db*
 # pip 中断留下的临时目录（pip-build-tracker-* / pip-install-* / pip-ephem-wheel-cache-*）
 services/api/pip-*/
 # 本地调试用的临时库

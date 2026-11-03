@@ -9,9 +9,18 @@
 ai-edu/
 ├─ apps/web/                # Next.js 前端（App Router + TypeScript + Tailwind）
 ├─ services/api/            # FastAPI 后端（SQLite + SQLAlchemy + Pydantic）
+│  └─ app/
+│     ├─ services/          # 业务层：tutorials · materials · knowledge · format_specs
+│     │                     #   质量校验：exam_check · exam_verify · tool_verify
+│     │                     #              quote_check · practice_check · spec_check
+│     │                     #   命题知识库：proposition
+│     ├─ llm/               # prompts（提示词）· service（AIService）· context_layers（层级×维度装配 + EXPLAIN 观测）
+│     ├─ api/               # 路由：goals · tutorials · knowledge · proposition · ...
+│     └─ learning/          # disciplines（学科画像）· engine · levels · teaching_profile
 ├─ docs/                    # architecture.md · decisions.md · user-guide.md
 ├─ scripts/                 # 开发辅助脚本
 ├─ legacy/phase0/           # 阶段 0（Markdown 教程流水线）资产存档，仅参考
+├─ obsidian-plugin/         # Obsidian 教程投递插件
 ├─ .env.example
 ├─ .gitignore
 └─ README.md
@@ -87,6 +96,15 @@ cd services/api
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
+并行跑测试时用 `AIEDU_TEST_SUFFIX` 给每个进程一套独立的库 / 材料 / 备份路径，避免
+fixture 的 `drop_all` 互相删表：
+
+```powershell
+$env:AIEDU_TEST_SUFFIX="_A"; .\.venv\Scripts\python.exe -m pytest tests/test_exam_check.py -q
+```
+
+这些隔离产物已被 `.gitignore` 覆盖，不会进仓库。
+
 ### 5. 故障排查
 
 **后端一启动就报 `ImportError: DLL load failed while importing _row_cy`（或每个请求 500）**
@@ -114,7 +132,7 @@ INFO:     [aiedu] 数据库：sqlite:///D:/.../services/api/data/aiedu.db
 
 学习目标详情页按此阶段流组织（阶段条 + 「上一步/下一步」导航），前后端共用同一阶段顺序：后端 `app/learning/engine.py` 的 `PHASES`，前端 `apps/web/lib/goal-phases.ts` 的单一事实来源。先定验收标准、再生成教程：确认后的验收标准会进入教程验收，教程生成为流程终点。
 
-计算机/命令行 与 数学/数据分析 两种学科配置共用同一学习引擎，通过 DisciplineProfile 体现差异。
+学科配置（DisciplineProfile）决定练习类型、验收方法、常见错误与**工具验证能力**（`verify_capability`）。已定制四个：计算机 / 命令行（`executable`，静态检查 + 命令存在性）、数学 / 数据分析（`symbolic`，sympy 符号验算）、化学与材料（`symbolic_partial`，仅配平与电荷守恒）、生物与生命科学（`none`，回落模型核验与人工）；其余一级领域共用通用画像。
 
 ## 测试版新增能力
 
@@ -125,8 +143,124 @@ INFO:     [aiedu] 数据库：sqlite:///D:/.../services/api/data/aiedu.db
 
 详见 [`docs/交付说明-四项改造.md`](docs/交付说明-四项改造.md) 与 [`docs/architecture.md`](docs/architecture.md)。
 
+## 生成质量保障体系
+
+生成内容的质量不靠「提示词里写要求 + 模型自觉」，而是分层校验：**能用代码判定的绝不交给模型**。
+这条分工来自项目既有裁决（ADR-015 / ADR-018：确定性规则 + 代码定结构），实测也反复印证——
+一份 5 套卷的试卷，账目类错误（声明 20 题实际 25 题、题号按题型重置、满分各行之和 96 ≠ 100）
+提示词约束不住，代码一次判定即可。
+
+### 分层（按验证的确定性从高到低）
+
+| 层 | 模块 | 管什么 | 成本 |
+|---|---|---|---|
+| **Tier-0 账目** | `services/exam_check.py` | 题号连续、分值表账目、答案题号集合、题型枚举、答案小节名、占位文字、跨卷母题重复与答案冲突 | 纯代码，零 token |
+| **Tier-0 规范专项** | `services/quote_check.py`<br>`services/practice_check.py` | 阅读规范：摘录是否逐字出自材料（虚构引文）、章节定位、页码可核实<br>实践规范：步骤三要素、代码块语法、命令是否存在 | 纯代码，零 token |
+| **Tier-1 工具验证** | `services/tool_verify.py` | 数学题用 **sympy 独立验算**答案；化学查配平与电荷守恒；计算机做静态检查与命令存在性 | 本地子进程，零 token |
+| **Tier-2 模型核验** | `services/exam_verify.py` | 盲解（不给模型看答案）→ 与卷面答案比对 → 冲突仲裁 | 每卷 1~2 次模型往返 |
+| **Tier-3 人工** | 前端质量报告 | 上述各层只标记不改写的问题 | 用户复核 |
+
+`services/spec_check.py` 是**分派器**：按规范 scene 把内容路由到对应校验器
+（`exam_paper`/`exercise` → 账目，`reading_guide` → 摘录溯源，`practical_tutorial` → 步骤与代码），
+避免把试卷的判据套到导读上。
+
+### 自动修复：只改一次，且改了什么必须可见
+
+Tier-0 会**就地改写**章节正文，但严格受限：
+
+- **只修无歧义的**：裸题号 `7.` → `**7.**`、答案小节名统一为 `### 参考答案`、分值括注按分值表回填、
+  占位文字删除、账目以「题面实际分值之和」为准重算。
+- **不修有歧义的**：题号重复时**不重编号**（旧号→新号映射会多对一坍缩，导致答案与题目错配）；
+  同一题型各题分值不一致时**不改账目**（「每题分值」列在数学上无法表达事实，改哪边都是武断决定）。
+- **一轮为限**：修完即止，不迭代。二次运行不产生任何改动（幂等，有测试锁定）。
+- **可追溯**：每条违规带 `code` / `rule` / `basis`（指向规范具体条文）/ `fixed` / `severity`，
+  写进 `quality_report.exam_check` 并暴露给前端。
+
+Tier-1/Tier-2 改写答案时更保守：**只改客观题**（选择/判断/填空），且只采信
+sympy 算出的确定值或 high 置信仲裁；解答题与证明题的答案是成段步骤，一律只标记不改写。
+
+### 严重度分级：不让噪音淹没真信号
+
+`blocking`（账目对不上、题号断裂、答案冲突、答案区写「需核验」、虚构引文、代码语法错）
+会让教程标记为「待改进」；`advisory`（留白行数、母题重复、记法风格）只提示。
+实测一份 5 套卷有 42 处留白偏差、10 处母题重复，而真正严重的答案冲突只有 2 处——
+若都算进 `passed`，几乎每份卷子都「待改进」，真信号反而看不见。
+
+### 提示词 EXPLAIN：让「注入了什么」可见
+
+每次模型调用会反向解析它的 user prompt，记录**实际注入了哪些块、各占多少字符、
+在 prompt 的什么位置、优先级顺序是否自洽**，随 `TrainingRecord.context_json` 落库
+（`llm/context_layers.py` 的 `analyze_prompt`）。
+
+这补上了 agent 运行时六职责（observation / context / control / action / state / verification）里
+项目此前唯一薄弱的一项：过去只知道花了多少 token（`ModelCallLog`），不知道注入了什么。
+ADR-018 那类故障（条件从句被误分类、约束静默失效）若有 EXPLAIN 当场就能看见，
+不必事后写进 `decisions.md` 复盘。
+
+注入块按「层级 × 维度」组织（借 CSS cascade 模型）：优先级不是一条全序，而是
+**内容维度**（范围 / 题量 / 难度 / 事实）与**结构维度**（标题 / 栏目 / 排版 / 交付构成）
+各自一条全序。只有两个块声称**同一维度**的权威时才构成潜在冲突——这正是 ADR-018 的
+教训：硬约束要「内容」、格式规范要「结构」，本就该各管一段，不是需要裁决的矛盾。
+
+位置不变量有测试保护：命题规律、格式规范等关键块必须排在长材料**之后**（落在末尾区）。
+实测整本书场景（材料约 20 万字符）命题块在 99.6%、格式规范在 99.3%——依据是长上下文
+的注意力分布（Lost in the Middle / CRE：中部区域利用率最低、易与填充文本混淆）。
+
+## 命题知识库
+
+让系统积累自己的命题经验，而不是每次出题都像第一次。四张表（`models.py`）：
+
+| 表 | 作用 |
+|---|---|
+| `ItemModel` | **母题**：`radicals`（决定难度与认知要求的结构元素）/ `incidentals`（可变表面特征）/ `solution_template`（参数化解法） |
+| `ItemInstance` | 母题代入一组具体参数后的**同构题**实例，答案由模板机械求解 |
+| `DesignPrinciple` | 提炼出的命题规律，三态 `proposed` / `confirmed` / `rejected` |
+| `QualityRecord` | Tier-0/1/2 发现的缺陷回流，是命题规律的冷启动素材 |
+
+结构取自自动命题生成（AIG）的 **item model / radicals / isomorphs** 范式与**变式教学理论**
+（概念性变式 / 过程性变式）。它解决的是一个实测缺陷：同一母题在一份文档里出现 5 次、
+给出 4 个不同答案（`x=ln(t+√(1+t²)), y=arctan t` → √2 / √2⁄2 / −2 / √2），
+根因是每次都独立重新生成。同构变式的答案改为**代入模板机械求解**后，同母题必然同答案结构。
+
+闭环（`services/proposition.py` + `api/proposition.py`，10 条路由）：
+
+```
+生成 → Tier-0/1 发现缺陷 → 回流 QualityRecord
+     → distill 确定性聚类（同学科同缺陷 ≥3 次）→ DesignPrinciple(proposed)
+     → 人工 review → confirmed → 注入下次命题提示词（1200 字符预算裁剪）
+```
+
+三条硬约束：**只有 `confirmed` 才注入**（未经人核实的经验不得影响交付）；
+提炼出的规律**必须绑定具体错误码、出现次数与母题指纹**（不许「要注意答案正确性」这类空话）；
+被驳回的规律**不因再攒证据而复活**。
+
+> 冷启动状态：抽出的母题 `solution_template` 为空，需人工补录后才能产出同构变式
+> （`PATCH /api/proposition/item-models/{id}`）。模板不自动生成——让模型「看着题写个解法模板」
+> 等于把答案正确性交回模型，正是要消除的漂移源。
+
+### 已知限制（当前状态，非缺陷）
+
+- **Tier-1 只覆盖可符号化的题目**：数学（sympy）与化学配平能确定性判定；几何证明、
+  概念辨析、文字题无法形式化，一律回落 Tier-2 模型核验与 Tier-3 人工。
+  转写失败（题目翻不成 sympy）也回落，**绝不把「转写不出来」当成「题目错了」**。
+- **Tier-2 的模型自评可信度有限**：同一模型多次调用的独立信息增益接近于零
+  （多裁判面板实测 9 个前沿模型仅相当于 2.18 张有效独立票）。所以 Tier-2 的结论
+  **不单独驱动答案改写**，只有 Tier-1 的确定性结果或 high 置信仲裁才改。
+- **`context_layers.py` 的 EXPLAIN 已接入，装配（assemble）待 A/B 后接入**：EXPLAIN（反向解析
+  每次调用实际注入了哪些块、各占多少、优先级顺序是否自洽）已挂进 `AIService._record`，随
+  `TrainingRecord.context_json` 落库，补上了 harness 六职责里唯一薄弱的 observation。但把
+  `prompts.py` 的 f-string 拼装改写成 `assemble()` 会改变 prompt 字节（现有各块紧邻拼接 vs
+  assemble 用空行连接），需先做 A/B 测量——静态规范块前移能命中提示词缓存（约 8,300 token ×
+  每章），而靠后更符合长上下文的注意力分布，两个方向相反，不能靠推理定案。
+- **命题知识库处于冷启动**：母题的 `solution_template` 需人工补录后才能产出同构变式；
+  `procedural` / `conceptual` 两类变式的答案留空（`verified_by="none"`），需独立验证链路。
+- **演示模式（未配置模型）下 Tier-1/Tier-2 跳过**：Tier-0 账目与规范校验始终生效（纯代码）。
+
 ## 近期更新
 
+- **生成质量保障体系（本次）**：新增 Tier-0 账目校验（`exam_check`，18 个错误码）、规范专项校验（`quote_check` 摘录溯源 / `practice_check` 步骤与代码，经 `spec_check` 按 scene 分派）、Tier-1 工具验证（`tool_verify`，数学走 sympy 独立验算）、Tier-2 盲解核验（`exam_verify`，工具优先于模型）。修复了规范主模板自身的账目错误（示例分值表各行之和 96 却写满分 100，模型忠实照抄导致 4/5 卷满分对不上）。后端测试 680 项。
+- **命题知识库（本次）**：新增 `ItemModel` / `ItemInstance` / `DesignPrinciple` / `QualityRecord` 四表与 `services/proposition.py`、`api/proposition.py`（10 条路由），按 AIG 的 item model（radicals / incidentals / isomorphs）与变式教学理论组织；质量缺陷自动回流并可提炼成命题规律，确认后注入后续命题。
+- **学科配置扩展（本次）**：新增化学与材料（`symbolic_partial`）、生物与生命科学（`none`）两个定制画像，并为所有学科增加 `verify_capability` 字段作为工具验证的分派依据。
 - **流程重构（提示词优化）**：目标详情页收敛为「目标定义 → 价值诊断 → 学习计划 → 验收标准 → 教程学习」五阶段单一流程，移除独立的评估/反馈/实践/知识更新子页；教程 v2 生成管线重写（章节生成、等级难度、LLM JSON 修复，见 `services/api/app/services/tutorials.py`、`app/learning/levels.py`、`app/llm/`）。
 - **统一生成任务轮询**：`apps/web/lib/job-poll.ts` 收拢「一键生成 / 章节生成 / 配套文件补齐」的轮询逻辑，修复重复轮询、页面卸载后泄漏、任务卡死无限轮询三类问题（默认约 20 分钟上限）。
 - **稳定性与性能（加速）**：数据加载加请求序号竞态保护，旧响应不再覆盖新数据；教程页在章节后台生成期间自动刷新（约 4 分钟上限）；单节重生成期间互斥禁用，避免并发生成互相覆盖版本。

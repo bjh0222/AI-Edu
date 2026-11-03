@@ -196,11 +196,102 @@ export interface QualityCheck {
   detail: string;
 }
 
+/** exam_check 的一条违规（错误码见 services/api/app/services/exam_check.py 的 CODES） */
+export interface ExamViolation {
+  code: string;
+  rule: string;
+  /** 判定依据：指向格式规范里的具体条文 */
+  basis: string;
+  detail: string;
+  auto_fixable: boolean;
+  /** 本轮是否已被代码修好（自动修复只跑一轮） */
+  fixed: boolean;
+  severity: "blocking" | "advisory" | string;
+}
+
+export interface ExamSectionCheck {
+  title: string;
+  /** exam=试卷规范 / exercise=练习规范 / null=非卷类章节，未参与校验 */
+  spec: string | null;
+  /** 代码是否就地改写了这一节的正文 */
+  changed: boolean;
+  fixed: number;
+  violations: ExamViolation[];
+}
+
+/**
+ * L0 卷面账目校验结果。
+ * 会就地改写章节正文（题号、分值括注、答案小节名、账目），因此必须展示改了什么。
+ */
+export interface ExamCheckReport {
+  sections: ExamSectionCheck[];
+  extra_exercises: ExamSectionCheck | null;
+  /** 跨卷一致性：E017 母题重复 / E018 同母题不同答案 */
+  cross: ExamViolation[];
+}
+
+/** 单节的规范专项校验结果（阅读摘录溯源 / 实践步骤与代码） */
+export interface SpecSectionCheck {
+  title: string;
+  passed: boolean;
+  blocking: number;
+  advisory: number;
+  codes: Record<string, number>;
+  violations: ExamViolation[];
+  error?: string;
+}
+
+/** L1 盲解核验：对单份卷的结果（会改写客观题答案，故必须可追溯） */
+export interface ExamVerifyPaper {
+  title: string;
+  spec: string;
+  /** 盲解核验的题目数 */
+  verified: number;
+  /** 盲解与卷面答案的冲突（已送仲裁） */
+  conflicts: Record<string, unknown>[];
+  /** 题目本身缺陷（如选项不完备：真值不在任何选项里） */
+  defects: Record<string, unknown>[];
+  /** 本轮已自动改正的客观题答案 */
+  applied: Record<string, unknown>[];
+  /** 未改写的项及原因（主观题不改、置信度不足不改） */
+  skipped: Record<string, unknown>[];
+  changed: boolean;
+  error?: string;
+}
+
+export interface ExamVerifyReport {
+  enabled: boolean;
+  demo: boolean;
+  skipped?: string;
+  verified_total: number;
+  conflicts_total: number;
+  applied_total: number;
+  errors: string[];
+  papers: ExamVerifyPaper[];
+}
+
+/**
+ * 按规范 scene 分派的专项校验：
+ * quote = 阅读教程规范（摘录溯源，Q001 虚构引文是 blocking）
+ * practice = 实践性教程规范（步骤三要素、代码语法 P002 是 blocking）
+ * null = 本 scene 无专项校验（讲解型教程；试卷类走 exam_check）
+ */
+export interface SpecCheckReport {
+  kind: "quote" | "practice" | null;
+  passed: boolean;
+  blocking: number;
+  advisory: number;
+  sections: SpecSectionCheck[];
+}
+
 export interface QualityReport {
   passed?: boolean;
   checks?: QualityCheck[];
   issues?: string[];
   coverage?: Record<string, number>;
+  exam_check?: ExamCheckReport | null;
+  exam_verify?: ExamVerifyReport | null;
+  spec_check?: SpecCheckReport | null;
 }
 
 export interface TeachingProfileRule {

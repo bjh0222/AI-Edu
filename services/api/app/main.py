@@ -98,7 +98,10 @@ app.include_router(api_router)
 
 
 @app.exception_handler(AIServiceError)
-async def ai_error_handler(_, exc: AIServiceError):
+async def ai_error_handler(_: Request, exc: AIServiceError):
+    # 模型调用失败（欠费 / 认证 / 限流 / 超时…）统一 502。此前这里静默返回，
+    # errors.log 里查不到任何痕迹，用户只看到客户端一句通用报错——补一行日志。
+    logger.warning("模型调用失败（502）：%s", exc)
     return JSONResponse(status_code=502, content={"code": "llm_error", "message": str(exc)})
 
 

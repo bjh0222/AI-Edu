@@ -61,10 +61,15 @@ EXTRACT_LABELS: dict[str, str] = {
 }
 
 
-MAX_EXCERPT_CHARS = settings.material_max_text_chars  # 入库正文上限（默认 20 万字，可配），仅防极端文件
+MAX_EXCERPT_CHARS = settings.material_max_text_chars  # 入库正文上限（默认 0 = 不截断；设正数才启用），仅防极端文件
 PROMPT_PER_FILE_CHARS = settings.material_prompt_per_file_chars  # 0 = 单份材料不截断
 PROMPT_TOTAL_CHARS = settings.material_prompt_total_chars  # 0 = 全部材料不截断
 PDF_MAX_PAGES = 500  # PDF 抽取的页数保险丝，防极端大文件拖死请求
+CONTRACT_LISTING_MAX = 64  # 规划阶段篇名清单上限：够列一整卷的篇目，拦住异常材料
+# 阅读模式下全书级材料（目录/前言）注入上限：目录全文 3 万字在**每个**阶段都注入，
+# 既浪费 token，也更容易触发网关的内容审查（实测《毛选》目录全文被自建网关 502）。
+# 前 2000 字足够给出全书骨架 + 篇清单（篇清单另行全量列出），章节正文不受此限。
+READING_GLOBAL_MAX_CHARS = 2000
 CHUNK_SIZE = 1024 * 256
 
 
@@ -498,6 +503,102 @@ def chapter_marker(text: str) -> str | None:
     return str(num) if num else None
 
 
+def heading_lines(text: str) -> list[tuple[int, int, str]]:
+    """返回 (行号, 标题级别, 标题文本)；跳过代码块内的 # 行。
+
+    阅读教程规范的「按篇切片」靠它定位篇标题：材料没有「第N章/篇」编号时
+    （如《毛选》卷文件 `# 第二卷 → ## 时期 → ### 篇`），章号路径整体失效，
+    按章注入会静默退化成每节注入全书（实测 27 万字 ≈ 19 万 token → 502）。
+    """
+    out: list[tuple[int, int, str]] = []
+    fence: str | None = None
+    for idx, line in enumerate(str(text or "").splitlines()):
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            marker = stripped[:3]
+            if fence is None:
+                fence = marker
+            elif stripped.startswith(fence):
+                fence = None
+            continue
+        if fence is not None:
+            continue
+        match = re.match(r"^(#{1,6})\s+(.*?)\s*$", stripped)
+        if match:
+            out.append((idx, len(match.group(1)), match.group(2).strip()))
+    return out
+
+
+def _norm_title(title: str) -> str:
+    """篇名归一：去尾注星号与空白，保证大纲标题与正文标题能互相对上。"""
+    return re.sub(r"\s+", " ", str(title or "").strip().rstrip("*").strip())
+
+
+def piece_titles(text: str, min_pieces: int = 2, max_pieces: int = 64) -> list[str]:
+    """从单份大材料里提取「篇」级标题（阅读规范按篇分节的结构事实来源）。
+
+    判据（确定性，不靠模型）：取 2..6 级里最浅的、满足
+    「本级标题数 >= min_pieces 且 > 上一级标题数 * 2」的层级。
+    《毛选》卷文件（1 个卷标题 / 2 个时期 / 30 篇 / 百余小节）会命中「篇」级：
+    时期级只有 2 个标题不满足 >= min_pieces，篇级 30 > 2*2 满足。
+    普通「# 书 → ## 章x12 → ### 节x60」的书命中章级（12 >= 2 且 12 > 1*2），
+    但这类书通常带「第N章」编号，会先走章号路径，轮不到这里。
+    找不到时返回 []，调用方退回原有行为（全量注入），绝不静默产出错结构。
+    """
+    heads = heading_lines(text)
+    if not heads:
+        return []
+    counts: dict[int, int] = {}
+    for _idx, level, _title in heads:
+        counts[level] = counts.get(level, 0) + 1
+    chosen = 0
+    for level in range(2, 7):
+        if counts.get(level, 0) >= min_pieces and counts.get(level, 0) > counts.get(level - 1, 0) * 2:
+            chosen = level
+            break
+    if not chosen:
+        return []
+    titles: list[str] = []
+    seen: set[str] = set()
+    for _idx, level, title in heads:
+        if level != chosen:
+            continue
+        norm = _norm_title(title)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        titles.append(norm)
+        if len(titles) >= max_pieces:
+            break
+    return titles if len(titles) >= min_pieces else []
+
+
+def slice_by_title(text: str, title: str) -> str | None:
+    """切出指定标题对应的整段正文（到下一个同级或更高级标题为止）。
+
+    与 slice_chapter 同思路，但按篇名而不是章号定位：用于阅读规范在
+    「材料无章号」时按篇注入。切出的片段自带篇标题行，模型知道自己在读哪一篇。
+    """
+    target = _norm_title(title)
+    if not target or not text:
+        return None
+    lines = str(text).splitlines()
+    heads = heading_lines(text)
+    starts = [
+        (idx, level, _norm_title(t)) for idx, level, t in heads if _norm_title(t) == target
+    ]
+    if not starts:
+        return None
+    begin, level, _ = starts[0]
+    end = len(lines)
+    for idx, lvl, _t in heads:
+        if idx > begin and lvl <= level:
+            end = idx
+            break
+    chunk = "\n".join(lines[begin:end]).strip()
+    return chunk or None
+
+
 def is_global_material(filename: str, body: str = "") -> bool:
     """全书级材料（目录 / 前言 / 索引）：不按章过滤，每节都注入。"""
     name = str(filename or "").lower()
@@ -592,6 +693,8 @@ def materials_context(
     chapter: str | None = None,
     all_chapters: list[str] | None = None,
     global_only: bool = False,
+    piece: str | None = None,
+    global_max_chars: int | None = None,
 ) -> str:
     """把该目标的材料正文注入 prompt。
 
@@ -603,6 +706,10 @@ def materials_context(
     - 文件名带章号且与 ``chapter`` 相同的材料全文注入；
     - 文件名无章号但内部有章标题的大文件，切出对应章注入；
     - 属于其它章的材料**不注入正文**，只留一行清单，避免模型以为材料不存在而编造。
+
+    ``piece`` 非空时启用**按篇注入**（阅读规范在材料无「第N章/篇」编号时的路径）：
+    全书级材料全文注入；正文里含该篇标题的材料切出该篇注入；不含的材料只留清单行。
+    与 ``chapter`` 互斥使用（chapter 优先），语义与按章注入完全同构。
 
     ``all_chapters`` 用于生成那行清单；不传则不输出清单。
     ``global_only=True`` 时只注入全书级材料（目录 / 前言 / 索引），一份章节正文都不给：
@@ -623,6 +730,9 @@ def materials_context(
     blocks: list[str] = []
     used = 0
     target_chapter = str(chapter or "").strip()
+    # 在循环外归一一次：循环内可能整轮 continue（global_only 跳过），
+    # 若把 target_piece 的赋值留在循环里，后面的清单行会 NameError。
+    target_piece = _norm_title(piece or "")
     skipped: list[str] = []
 
     # global_only 兜底：没有任何全书级材料（用户只上传了各章正文）时，
@@ -639,6 +749,16 @@ def materials_context(
         if global_only and body and not is_global_material(row.filename or ""):
             skipped.append(str(row.filename or f"材料{index}"))
             continue
+
+        # ---- 按篇注入：只保留含本篇的材料 + 全书级材料 ----
+        if not target_chapter and target_piece and body:
+            if not is_global_material(row.filename or ""):
+                sliced = slice_by_title(body, target_piece)
+                if sliced is not None:
+                    body = sliced
+                else:
+                    skipped.append(str(row.filename or f"材料{index}"))
+                    continue
 
         # ---- 按章注入：只保留本章材料 + 全书级材料 ----
         if target_chapter and body:
@@ -657,6 +777,20 @@ def materials_context(
                 continue
 
         if body:
+            # 阅读模式的全书级材料限长：骨架 + 篇清单足够定位，正文逐字性由章节层保证。
+            # 只在按篇/按章/全书层（即阅读模式的三种取法）下生效，全量路径不受影响。
+            if (
+                global_max_chars
+                and global_max_chars > 0
+                and (target_chapter or target_piece or global_only)
+                and is_global_material(row.filename or "")
+                and len(body) > global_max_chars
+            ):
+                body = (
+                    body[:global_max_chars]
+                    + f"\n\n【全书级材料较长，此处仅注入前 {global_max_chars} 字骨架；"
+                    "完整篇目见文末清单，正文逐字内容由各篇注入提供】"
+                )
             if (row.ext or "") in TEXT_EXTENSIONS:
                 source = "原始全文"
             elif (row.ext or "") in {".pdf", ".docx"}:
@@ -712,15 +846,21 @@ def materials_context(
         blocks.append(block)
         used += len(block)
 
-    if (target_chapter or global_only) and skipped:
-        others = [c for c in (all_chapters or []) if str(c).strip() != target_chapter]
+    if (target_chapter or target_piece or global_only) and skipped:
+        # 清单是给用户/模型看的：piece:: 前缀是内部切片键，展示时去掉
+        _strip = lambda c: str(c)[len("piece::"):] if str(c).startswith("piece::") else str(c)
+        others = [_strip(c) for c in (all_chapters or []) if _strip(c).strip() != _strip(target_chapter).strip()]
         scope_desc = (
             f"本节只注入了第 {target_chapter} 章的材料与全书级材料（目录 / 前言等）"
             if target_chapter
-            else "本节只注入了全书级材料（目录 / 前言 / 索引），未注入任何章节正文"
+            else (
+                f"本节只注入了「{target_piece}」一篇的正文与全书级材料（目录 / 前言等）"
+                if target_piece
+                else "本节只注入了全书级材料（目录 / 前言 / 索引），未注入任何章节正文"
+            )
         )
         note = (
-            f"\n\n【本次按章注入】{scope_desc}。"
+            f"\n\n【本次按{'章' if target_chapter else ('篇' if target_piece else '全书级')}注入】{scope_desc}。"
             f"以下材料未注入正文，不要引用或猜测其内容：\n"
             + "\n".join(f"- {name}" for name in skipped)
             + (f"\n全书章节：{', '.join(str(c) for c in others)}（仅供交叉引用时定位，正文不得展开）"
@@ -728,6 +868,67 @@ def materials_context(
         )
         blocks.append(note)
     return "\n\n".join(blocks)
+
+
+def materials_for_planning(db: Session, goal_id: str, snapshot=None) -> str:
+    """规划类阶段（价值诊断 / 学习计划 / 大纲）该注入多少材料。
+
+    这些阶段只需要知道「材料是什么、覆盖哪些范围」，不需要逐字读全书；
+    而它们都在**章节生成之前**执行，一旦全量注入，整本书会在第一步就把上下文撑爆。
+    实测：《毛选》第一卷 19 个文件合计约 22 万字符 ≈ 15.4 万 token，
+    diagnose / plan / outline 三步都会在章节层跑起来之前失败。
+
+    阅读教程规范（按篇/章分文件上传）只注入全书级材料（目录 / 前言），
+    篇名清单由 `chapter_marker` 从文件名读出，几百字符就够定出全部节标题。
+    其它规范行为与从前逐字一致（全量注入）。
+    """
+    from . import format_specs as format_specs_service
+
+    if format_specs_service.is_reading_guide(snapshot):
+        scoped = materials_context(
+            db, goal_id, global_only=True, global_max_chars=READING_GLOBAL_MAX_CHARS
+        )
+        names = [
+            re.sub(r"\.[A-Za-z0-9]+$", "", str(row.filename or "")).strip()
+            for row in (
+                db.query(GoalMaterial)
+                .filter(GoalMaterial.goal_id == goal_id, GoalMaterial.status == "ready")
+                .order_by(GoalMaterial.created_at.asc())
+                .all()
+            )
+        ]
+        chapters = sorted(
+            {n for n in names if chapter_marker(n)},
+            key=lambda x: (int(chapter_marker(x) or 0), x),
+        )
+        if not chapters:
+            # 文件名无章号（整卷一个大文件）：用正文篇标题做清单，
+            # 否则诊断 / 计划阶段完全不知道这卷有哪些篇，只能凭空猜结构。
+            from ..models import GoalMaterial as _GM
+
+            for row in (
+                db.query(_GM)
+                .filter(_GM.goal_id == goal_id, _GM.status == "ready")
+                .order_by(_GM.created_at.asc())
+                .all()
+            ):
+                if is_global_material(str(row.filename or "")):
+                    continue
+                titles = piece_titles(_material_body(db, row))
+                if titles:
+                    chapters = titles[:CONTRACT_LISTING_MAX]
+                    break
+        if chapters:
+            listing = "\n".join(f"- {name}" for name in chapters)
+            scoped = (
+                (scoped + "\n\n" if scoped else "")
+                + f"【本次上传的分篇材料清单（共 {len(chapters)} 篇，逐篇文件名）】\n"
+                + listing
+                + "\n\n（以上仅为篇名清单：规划阶段不需要正文，正文会在生成每一篇时按篇注入。）"
+            )
+        return scoped
+    return materials_context(db, goal_id)
+
 
 
 def materials_source_refs(db: Session, goal_id: str) -> list[str]:

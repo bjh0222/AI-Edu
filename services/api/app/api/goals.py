@@ -58,6 +58,11 @@ def archive_goal(
     return goals_service.archive_goal(db, goal_id)
 
 
+@router.post("/goals/{goal_id}/unarchive", response_model=GoalOut, tags=["goals"])
+def unarchive_goal(goal_id: str, db: Session = Depends(get_db)):
+    return goals_service.unarchive_goal(db, goal_id)
+
+
 @router.get("/goals/{goal_id}/diagnose", response_model=GoalAssessmentOut | None, tags=["goals"])
 def get_diagnosis(goal_id: str, db: Session = Depends(get_db)):
     return goals_service.get_assessment(db, goal_id)

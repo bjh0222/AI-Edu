@@ -93,7 +93,10 @@ export default function GraphCanvas({
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ w: 900, h: 560 });
-  const [transform, setTransform] = useState({ x: 0, y: 0, k: 1 });
+  // userView：用户手动平移 / 缩放 / 捏合后的视图。自动适应期间不写它 ——
+  // 自动视图在渲染时由纯函数 computeFitTransform 派生（见下），effect 里零 setState，
+  // 从根上消除「effect 内 setTransform → 嵌套更新 → Maximum update depth exceeded」。
+  const [userView, setUserView] = useState({ x: 0, y: 0, k: 1 });
   const [positions, setPositions] = useState<Record<string, { x: number; y: number }>>({});
   const [hovered, setHovered] = useState<string | null>(null);
   // autoFit：视图是否跟随力导向布局自动适应。用户一旦平移 / 捏合 / 缩放就交还控制权；
@@ -105,7 +108,8 @@ export default function GraphCanvas({
   const edgesRef = useRef<GraphEdge[]>(edges);
   const sizeRef = useRef(size);
   const positionsRef = useRef<Record<string, { x: number; y: number }>>({});
-  const transformRef = useRef(transform);
+  // 初始为中性视图；首个渲染后由下方 effect 同步为生效视图（transform 声明在后面）
+  const transformRef = useRef({ x: 0, y: 0, k: 1 });
   const dragRef = useRef<{ kind: "node" | "pan"; id?: string; sx: number; sy: number; ox: number; oy: number } | null>(null);
   // 触屏：按 pointerId 记录活动触点，两个触点即进入捏合缩放（安卓/iOS 通用）。
   // 只记 id 与坐标，不用 Map 之外的全局状态，避免与鼠标路径互相干扰。
@@ -125,6 +129,12 @@ export default function GraphCanvas({
     positionsRef.current = positions;
   }, [positions]);
 
+  // 生效视图：自动适应期间每帧由布局派生；用户接管后固定为 userView。
+  const autoTransform = useMemo(
+    () => computeFitTransform(positions, size.w, size.h, fullscreen),
+    [positions, size, fullscreen]
+  );
+  const transform = autoFit && autoTransform ? autoTransform : userView;
   useEffect(() => {
     transformRef.current = transform;
   }, [transform]);
@@ -144,7 +154,7 @@ export default function GraphCanvas({
   // 数据变化：重建仿真节点（跨渲染保留位置），唤醒物理循环并同步初始位置
   useEffect(() => {
     // 换数据集（预设/范围/搜索过滤）等于换了一张图：重新自动适应。
-    // 豁免理由同 goals/page.tsx 的 load：这是与外部数据同步，不是状态级联。
+    // 值未变时 React 直接 bail out，不构成级联渲染（豁免同 goals/page.tsx 的 load）。
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setAutoFit(true);
     const prev = new Map(simRef.current.map((n) => [n.id, n]));
@@ -250,40 +260,29 @@ export default function GraphCanvas({
     // 显式点「适应」/双击：把视图交还给自动跟随，直到用户再次平移或缩放
     setAutoFit(true);
     const next = computeFitTransform(positionsRef.current, sizeRef.current.w, sizeRef.current.h, fullscreen);
-    if (next) setTransform(next);
+    if (next) setUserView(next);
   }, [fullscreen]);
 
   // 自动适应画布：力导向布局会持续展开节点，而容器尺寸（尤其手机小屏）往往
   // 在首次 fit 之后才稳定 —— 一次性 fit 会把图谱留在角落、大半屏空白。
-  // 所以「用户没手动平移/缩放前」视图持续跟随布局；一旦用户动手就停止跟随，
-  // 避免与用户抢视图。切换全屏 / 换数据集时重新交还给自动适应。
+  // 所以「用户没手动平移/缩放前」生效视图每帧由 autoTransform 派生（渲染时纯计算，
+  // 不写 state）；一旦用户平移 / 捏合 / 缩放就固定为 userView，不再与用户抢视图。
+  // 切换全屏 / 换数据集时把视图交还自动适应（autoFit=true）。
   useEffect(() => {
-    // 视图跟随物理仿真：布局每帧变化就重新居中（用户没接管视图时）。
-    // 依赖里**不能**放 fitView：React Compiler 保不住它的 memoization，身份每渲染都变，
-    // 会让本 effect 每渲染重跑、setTransform 连续嵌套 → Maximum update depth exceeded。
-    if (!autoFit || Object.keys(positions).length === 0) return;
-    const next = computeFitTransform(positionsRef.current, sizeRef.current.w, sizeRef.current.h, fullscreen);
-    if (next) setTransform(next);
-  }, [positions, autoFit, fullscreen]);
-
-  useEffect(() => {
-    // 切换全屏：画布尺寸突变，必须重新适应并把视图交还自动跟随。
-    // 豁免理由同 goals/page.tsx 的 load：与外部（全屏状态）同步，不是状态级联。
+    // 切换全屏：画布尺寸突变，把视图交还自动适应（autoTransform 会立刻用新尺寸）。
+    // 值未变时 React 直接 bail out，不构成级联渲染（豁免同 goals/page.tsx 的 load）。
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setAutoFit(true);
-    const next = computeFitTransform(positionsRef.current, sizeRef.current.w, sizeRef.current.h, fullscreen);
-    if (next) setTransform(next);
   }, [fullscreen]);
 
   const zoomBy = (factor: number) => {
     setAutoFit(false);
-    setTransform((t) => {
-      const maxK = fullscreen ? 4 : 3;
-      const k = Math.min(maxK, Math.max(0.5, t.k * factor));
-      const cx = sizeRef.current.w / 2;
-      const cy = sizeRef.current.h / 2;
-      return { k, x: cx - ((cx - t.x) * k) / t.k, y: cy - ((cy - t.y) * k) / t.k };
-    });
+    const t = transformRef.current;
+    const maxK = fullscreen ? 4 : 3;
+    const k = Math.min(maxK, Math.max(0.5, t.k * factor));
+    const cx = sizeRef.current.w / 2;
+    const cy = sizeRef.current.h / 2;
+    setUserView({ k, x: cx - ((cx - t.x) * k) / t.k, y: cy - ((cy - t.y) * k) / t.k });
   };
 
   // ------------------------------------------------------------ interactions
@@ -326,7 +325,8 @@ export default function GraphCanvas({
       dragRef.current = null;
       return;
     }
-    dragRef.current = { kind: "pan", sx: e.clientX, sy: e.clientY, ox: transform.x, oy: transform.y };
+    const t0 = transformRef.current;
+    dragRef.current = { kind: "pan", sx: e.clientX, sy: e.clientY, ox: t0.x, oy: t0.y };
   };
 
   useEffect(() => {
@@ -348,7 +348,7 @@ export default function GraphCanvas({
         const cy = (a.y + b.y) / 2 - rect.top;
         const maxK = fullscreen ? 4 : 3;
         const k = Math.min(maxK, Math.max(0.5, pinch.k * (dist / pinch.dist)));
-        setTransform({
+        setUserView({
           k,
           x: cx - ((pinch.cx - pinch.x) * k) / pinch.k,
           y: cy - ((pinch.cy - pinch.y) * k) / pinch.k,
@@ -361,7 +361,7 @@ export default function GraphCanvas({
       if (d.kind === "pan") {
         // 第一次真正平移才算「用户接管视图」：单纯点按（选中/取消）与拖动节点都不算
         setAutoFit(false);
-        setTransform((t) => ({ ...t, x: d.ox + (e.clientX - d.sx), y: d.oy + (e.clientY - d.sy) }));
+        setUserView((t) => ({ ...t, x: d.ox + (e.clientX - d.sx), y: d.oy + (e.clientY - d.sy) }));
       } else if (d.id) {
         const rect = wrapRef.current?.getBoundingClientRect();
         if (!rect) return;
@@ -413,13 +413,12 @@ export default function GraphCanvas({
       setAutoFit(false);
       const rect = wrapRef.current?.getBoundingClientRect();
       if (!rect) return;
+      const t = transformRef.current;
       const mx = clientX - rect.left;
       const my = clientY - rect.top;
-      setTransform((t) => {
-        const maxK = fullscreen ? 4 : 3;
-        const k = Math.min(maxK, Math.max(0.5, t.k * factor));
-        return { k, x: mx - ((mx - t.x) * k) / t.k, y: my - ((my - t.y) * k) / t.k };
-      });
+      const maxK = fullscreen ? 4 : 3;
+      const k = Math.min(maxK, Math.max(0.5, t.k * factor));
+      setUserView({ k, x: mx - ((mx - t.x) * k) / t.k, y: my - ((my - t.y) * k) / t.k });
     },
     [fullscreen]
   );
@@ -624,7 +623,10 @@ export default function GraphCanvas({
         </button>
         <button
           type="button"
-          onClick={() => setTransform({ x: 0, y: 0, k: 1 })}
+          onClick={() => {
+            setAutoFit(false);
+            setUserView({ x: 0, y: 0, k: 1 });
+          }}
           className="min-w-[42px] text-[11px] font-semibold text-[#39455d] hover:text-brand"
           title="回到 100%"
         >

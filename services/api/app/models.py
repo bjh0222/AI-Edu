@@ -424,3 +424,116 @@ class TrainingRecord(Base):
     # （sqlite3.OperationalError: unable to open database file）。有索引则走索引序，
     # 不产生临时文件，分页也从「全表排序」变成 O(limit)。
     created_at = Column(String(40), default=lambda: _now().isoformat(), index=True)
+
+
+# ============================================================ 命题知识库（P2）
+#
+# 设计依据（见架构调研汇报）：AIG 的 item model（radicals / incidentals / isomorphs，
+# 起源于 Bormuth 1960s）+ 变式教学理论（顾泠沅：概念性变式 / 过程性变式）+ 复用
+# KnowledgeProposal 的三态 review 语义（proposed / confirmed / rejected，ADR-010）。
+#
+# 为什么 ItemModel 与 ItemInstance 分表（这是本设计的核心，不是规范化洁癖）：
+# 实测那份微积分卷里，同一母题 `x=ln(t+sqrt(1+t^2)), y=arctan t` 出现 5 次、给出
+# 4 个不同答案（sqrt2 / sqrt2/2 / -2 / sqrt2），`f_n=x^n+2nx-2` 出现 4 次给出
+# e / e^2 / e^-1 三个答案。根因是每次都**独立重新生成**。分表后，决定答案结构的
+# radicals 只在 ItemModel 存一份，同构变式（isomorph）的答案由 solution_template
+# 代入新的 incidentals **机械求解**得到，从架构上消除「同母题答案漂移」。
+#
+# 项目规范一贯禁止溯源括注（内置试卷生成规范 forbidden_rules：「禁止标注题目来源、
+# 原题编号，或（原题…）（对应第 N 题的变式…）等溯源括注」），所以变式↔原题的对应
+# 关系**不能写在输出 Markdown 里，只能存在 ItemInstance.item_model_id**。
+# 注：曾有一份「变式与综合题汇编规范」（data/spec_variant_v2.json）已于 2026-10-31
+# 停用，数据库中已无此规范；本模块不依赖它，radicals/incidentals 的区分来自 AIG 与
+# 变式教学理论本身，不来自任何特定规范。
+
+
+class ItemModel(Base, TimestampMixin):
+    """题目模型（母题）：一组同构题共享的结构，是「模仿能力」的载体。"""
+
+    __tablename__ = "item_models"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    domain_key = Column(String(50), default="general", index=True)
+    title = Column(String(200), default="")          # 母题名，如「参数方程 x=ln(t+√(1+t²)),y=arctan t 求导」
+    chapter = Column(String(200), default="")        # 所属章节（逐字取自材料）
+    knowledge_points = Column(Text, default="[]")    # JSON list[str]
+    # radicals：决定难度与认知要求的结构元素（AIG 术语）。exam_check._definition_index
+    # 抽出的定义式指纹就是 radicals 的自动来源。
+    radicals = Column(Text, default="{}")            # JSON dict
+    # incidentals：可变表面特征的**槽位定义**（不是具体值），如 {"参数":"n","情境":"数列极限"}
+    incidentals = Column(Text, default="{}")         # JSON dict
+    # solution_template：参数化解法（sympy 表达式 + 步骤骨架）。同构变式据此机械求答案。
+    solution_template = Column(Text, default="")
+    answer_expr = Column(Text, default="")           # 答案的参数化表达式（sympy 可 evalf）
+    difficulty = Column(String(20), default="")      # 难度档：basic/intermediate/advanced 或自由文本
+    # provenance：manual（用户上传典型题）/ ai_constructed（AI 构造，无法核实出处）/ material（材料原题）
+    provenance = Column(String(30), default="manual")
+    status = Column(String(20), default="draft")     # draft / confirmed / archived
+    source_ref = Column(Text, default="")            # 来源出处（材料名/页码/URL，可空）
+
+
+class ItemInstance(Base, TimestampMixin):
+    """同构题实例：ItemModel 代入一组具体 incidentals 后的一道题。"""
+
+    __tablename__ = "item_instances"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    item_model_id = Column(String(36), ForeignKey("item_models.id"), index=True)
+    incidental_values = Column(Text, default="{}")   # JSON dict：本次实例化的参数值
+    stem = Column(Text, default="")                  # 题面 Markdown
+    answer = Column(Text, default="")                # 答案（同构变式由 solution_template 机械求解）
+    # variation_type：isomorph（同构，radicals 不变）/ procedural（过程性，放松条件、难度递减）
+    # / conceptual（概念性，故意改 radicals，含反例/非例）。三类验证方式不同，见 proposition.py。
+    variation_type = Column(String(20), default="isomorph")
+    # verified_by：tool_symbolic / tool_executable / model / human / none
+    verified_by = Column(String(30), default="none")
+    verified_at = Column(String(40), default="")
+    source_tutorial_id = Column(String(36), nullable=True, index=True)
+
+
+class DesignPrinciple(Base, TimestampMixin):
+    """命题规律：从 QualityRecord / 典型题分析提炼出的可迁移经验。
+
+    复用 KnowledgeProposal 的三态语义（proposed/confirmed/rejected）：只有 confirmed
+    态才注入提示词（未验证的经验不得影响交付），与 ConceptRelation 的三态一致。
+    """
+
+    __tablename__ = "design_principles"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    domain_key = Column(String(50), default="general", index=True)
+    statement = Column(Text, default="")             # 规律文本（注入提示词的就是它）
+    principle_type = Column(String(20), default="discipline")  # general（跨学科）/ discipline（学科）
+    scope_knowledge_points = Column(Text, default="[]")        # JSON list[str]；空=全学科通用
+    positive_refs = Column(Text, default="[]")       # JSON list：正例来源（QualityRecord.id / ItemModel.id）
+    negative_refs = Column(Text, default="[]")       # JSON list：反例来源
+    evidence_count = Column(Integer, default=0)      # 支撑证据数（达阈值才建议 confirm）
+    status = Column(String(20), default="proposed")  # proposed / confirmed / rejected
+    rationale = Column(Text, default="")
+    reviewed_at = Column(String(40), default="")
+
+
+class QualityRecord(Base):
+    """质量记录：L0（exam_check）/ L1（exam_verify）/ Tier-1（tool_verify）发现的缺陷回流。
+
+    是 DesignPrinciple 的冷启动素材——不需要用户先上传典型题，系统生成时发现的
+    「答案算错」「选项不完备」「同题多解」自动沉淀于此，跨版本累积。
+    """
+
+    __tablename__ = "quality_records"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    domain_key = Column(String(50), default="general", index=True)
+    goal_id = Column(String(36), nullable=True, index=True)
+    tutorial_id = Column(String(36), nullable=True, index=True)
+    version = Column(Integer, default=0)
+    # source：l0_account / l0_cross / l1_defect / l1_fixed / tool_refuted / tool_undecidable
+    source = Column(String(20), default="")
+    code = Column(String(20), default="")            # E018 / DEFECT / ...
+    paper_title = Column(String(200), default="")
+    question_number = Column(Integer, default=0)
+    motif = Column(String(200), default="")          # 定义式指纹（exam_check.question_motifs）
+    detail = Column(Text, default="")
+    severity = Column(String(20), default="")        # blocking / advisory
+    question_text = Column(Text, default="")         # 题干截断（供人复核，不存全文）
+    created_at = Column(String(40), default=lambda: _now().isoformat(), index=True)

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 
@@ -19,8 +20,11 @@ from ..model_settings import runtime_settings
 from ..learning import demo
 from ..learning.teaching_profile import check_rule_compliance, parse_teaching_profile
 from ..models import ModelCallLog, TrainingRecord
+from . import context_layers
 from . import prompts
 from .provider import LLMError, OpenAICompatibleProvider
+
+logger = logging.getLogger("aiedu")
 
 
 class AIServiceError(Exception):
@@ -142,6 +146,35 @@ def goal_context_text(goal) -> str:
     return "\n".join(f"{name}：{value}" for name, value in fields if value)
 
 
+# EXPLAIN 的体积上限：注入块清单是诊断信息，不该让 training_records 无节制膨胀。
+# 单块只记 layer/title/chars/position 四个字段，正常一次调用识别到 8~12 块。
+_EXPLAIN_MAX_BLOCKS = 40
+
+
+def _explain_prompt(user: str, *, stage: str = "") -> dict[str, Any]:
+    """对一次模型调用的 user prompt 做 EXPLAIN，返回可落库的紧凑 dict。
+
+    任何异常都吞掉并返回最小结构：EXPLAIN 是**观测**功能，绝不能因为诊断代码出错
+    而让生成调用失败（这是质量增强环节的通用约定，与 exam_verify / proposition 回流一致）。
+    """
+    try:
+        explanation = context_layers.analyze_prompt(user, stage=stage)
+    except Exception as exc:  # noqa: BLE001  观测失败不得影响主流程
+        logger.warning("prompt EXPLAIN 失败（stage=%s）：%s", stage, exc)
+        return {"stage": stage, "error": str(exc)[:120]}
+    data = explanation.to_dict()
+    if len(data.get("blocks") or []) > _EXPLAIN_MAX_BLOCKS:
+        data["blocks"] = data["blocks"][:_EXPLAIN_MAX_BLOCKS]
+        data["blocks_truncated"] = True
+    # 顺序违例是**真 bug 信号**（注入块的优先级与它出现的位置不一致，模型可能静默
+    # 裁决错方向）。这里主动打警告，不等用户去翻 quality_report 才发现。
+    if data.get("order_violations"):
+        logger.warning(
+            "prompt 注入顺序违例（stage=%s）：%s", stage, "; ".join(data["order_violations"][:3])
+        )
+    return data
+
+
 class AIService:
     def __init__(
         self,
@@ -213,6 +246,11 @@ class AIService:
                     "tutorial_id": self.tutorial_id,
                     "section_id": self.section_id,
                     "demo": self.is_demo,
+                    # EXPLAIN：这次调用**实际注入了什么**。此前只有 token 数（ModelCallLog），
+                    # 知道花了多少钱却不知道注入了哪些块、各占多少、优先级顺序对不对——
+                    # ADR-018 那类故障（条件从句被丢进 forbidden 分支、约束静默失效）
+                    # 只能事后复盘。有了它，注入构成随每次调用落库、可查询。
+                    "prompt_explain": _explain_prompt(user, stage=feature),
                 }
                 self.db.add(
                     TrainingRecord(
@@ -364,6 +402,24 @@ class AIService:
             return data
         raise last_exc if last_exc else AIServiceError("模型输出缺少有效大纲")
 
+    def _proposition_hints(self, goal) -> str:
+        """取该学科已确认的命题规律，作为软建议注入命题类提示词。
+
+        冷启动（无 confirmed 规律）返回空串 → prompts._proposition_block 完全不出现，
+        对既有提示词零影响。任何异常都吞掉返回空串：命题规律是增强，取不到不该阻断生成。
+        self.db 为 None（demo 或未绑定会话）时直接返回空串。
+        """
+        if self.db is None or self.is_demo:
+            return ""
+        try:
+            from ..services import proposition as proposition_service
+
+            return proposition_service.principles_for_injection(
+                self.db, getattr(goal, "domain_key", "") or "general"
+            )
+        except Exception:  # noqa: BLE001  命题规律取用失败不阻断章节 / 练习生成
+            return ""
+
     def _section_payload(
         self, goal, discipline, item, criteria_list, prior_titles, materials_text: str,
         companion_names: list[str] | None, retry_violations: list[str] | None = None,
@@ -371,7 +427,7 @@ class AIService:
     ) -> dict:
         system, user = prompts.section(
             goal, discipline, item, criteria_list, prior_titles, materials_text, companion_names,
-            retry_violations, truncated=truncated,
+            retry_violations, truncated=truncated, proposition_hints=self._proposition_hints(goal),
         )
         data = self._real_json(
             "section", system, user,
@@ -452,7 +508,8 @@ class AIService:
 
         def produce(violations):
             system, user = prompts.extra_exercises(
-                goal, discipline, outline_items, materials_text, violations, exercise_spec
+                goal, discipline, outline_items, materials_text, violations, exercise_spec,
+                proposition_hints=self._proposition_hints(goal),
             )
             markdown = self._real_text("extra_exercises", system, user, goal)
             from ..services.utils import parse_exercise_numbers
@@ -468,6 +525,69 @@ class AIService:
             }
 
         return _rule_checked(produce, lambda data: str(data.get("markdown", "")))
+
+    # ------------------------------------------------------------ 试卷盲解核验
+
+    def verify_questions(self, goal, discipline, paper_title: str, questions: list[dict]) -> list[dict]:
+        """盲解核验：**不给模型看参考答案**，让它独立解题。
+
+        questions 由 exam_check.build_verification_payload 构造（已剔除答案区）。
+        返回 results 列表；模型漏题不报错，缺失的题由调用方当作「未核验」处理——
+        核验是质量增强环节，不该因为它不完整而让整份卷子生成失败。
+        """
+        if self.is_demo:
+            return []
+        if not questions:
+            return []
+        system, user = prompts.verify_paper_questions(goal, discipline, paper_title, questions)
+        data = self._real_json("exam_verify", system, user, ("results",), goal)
+        results = data.get("results")
+        return results if isinstance(results, list) else []
+
+    def transcribe_for_tools(self, goal, discipline, paper_title: str, items: list[dict]) -> dict[int, str]:
+        """把「题目 + 卷面答案」转写成 sympy 断言代码，供 tool_verify 执行判定。
+
+        **为什么转写要把答案给模型看**（与盲解刻意相反）：盲解阶段不给答案是为了防确认
+        偏误；转写阶段的任务不是「判断答案对不对」，而是「把题面与答案翻译成 sympy
+        表达式」——翻译任务给不给答案都不产生偏误，反而必须给（断言式要把答案写进断言）。
+        真正的防偏误发生在下一步：判定由 sympy 执行，模型没有裁量权。
+
+        返回 {题号: sympy_code}；模型漏掉的题不在字典里，调用方按 undecidable 处理。
+        """
+        if self.is_demo or not items:
+            return {}
+        from ..services import tool_verify
+
+        system = tool_verify.SYMPY_ASSERTION_CONTRACT
+        user = tool_verify.build_transcription_request(items)
+        data = self._real_json("tool_transcribe", system, user, ("items",), goal)
+        out: dict[int, str] = {}
+        for entry in data.get("items") or []:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                num = int(entry.get("number"))
+            except (TypeError, ValueError):
+                continue
+            if entry.get("unformalizable"):
+                continue
+            code_text = str(entry.get("sympy_code") or "").strip()
+            if code_text:
+                out[num] = code_text
+        return out
+
+    def arbitrate_answers(self, goal, discipline, paper_title: str, conflicts: list[dict]) -> list[dict]:
+        """答案冲突仲裁：盲解与卷面不一致时，重新独立求解并判定谁对。
+
+        必须有这一步，不能直接采信盲解：盲解模型自己也会算错。直接按盲解改答案，
+        等于用一次未经验证的计算覆盖另一次未经验证的计算。
+        """
+        if self.is_demo or not conflicts:
+            return []
+        system, user = prompts.verify_answer_conflict(goal, discipline, paper_title, conflicts)
+        data = self._real_json("exam_arbitrate", system, user, ("verdicts",), goal)
+        verdicts = data.get("verdicts")
+        return verdicts if isinstance(verdicts, list) else []
 
     def format_spec_match(self, requirement: str, candidates: list[dict]) -> dict:
         """少量候选规范的语义匹配；失败由 format_specs 服务回退默认规范。"""

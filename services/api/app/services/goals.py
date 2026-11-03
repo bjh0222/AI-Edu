@@ -277,6 +277,21 @@ def patch_goal(db: Session, goal_id: str, payload) -> dict:
     if completed is not None:
         goal.completed = bool(completed)
         goal.completed_at = datetime.now(timezone.utc).isoformat() if completed else ""
+    # GoalPatch 早就声明了 archived，但这里一直没实现：归档后的目标无法经 API 恢复，
+    # 用户只能改库。补上。
+    archived = getattr(payload, "archived", None)
+    if archived is not None:
+        goal.archived = bool(archived)
+    db.commit()
+    return goal_dict(goal)
+
+
+def unarchive_goal(db: Session, goal_id: str) -> dict:
+    """恢复已归档目标。_get_goal 对归档目标返回 404，所以这里直接 db.get。"""
+    goal = db.get(LearningGoal, goal_id)
+    if goal is None:
+        raise HTTPException(status_code=404, detail={"code": "goal_not_found", "message": "学习目标不存在"})
+    goal.archived = False
     db.commit()
     return goal_dict(goal)
 
@@ -291,7 +306,11 @@ def archive_goal(db: Session, goal_id: str) -> dict:
 def diagnose_goal(db: Session, goal_id: str, ai: AIService) -> dict:
     goal = _get_goal(db, goal_id)
     profile = get_profile(goal.domain_key)
-    materials_text = materials_service.materials_context(db, goal.id)
+    # 规划阶段只需要「材料是什么」，不需要整本书：阅读规范按篇上传时全量注入
+    # 会在第一步就把上下文撑爆（实测 19 个文件 ≈15.4 万 token）。
+    materials_text = materials_service.materials_for_planning(
+        db, goal.id, jload(goal.format_spec_snapshot or "", {})
+    )
     data = ai.diagnose(goal, profile, materials_text)
 
     assessment = (
@@ -396,7 +415,11 @@ def get_plan(db: Session, goal_id: str) -> dict | None:
 def generate_plan(db: Session, goal_id: str, ai: AIService) -> dict:
     goal = _get_goal(db, goal_id)
     profile = get_profile(goal.domain_key)
-    materials_text = materials_service.materials_context(db, goal.id)
+    # 规划阶段只需要「材料是什么」，不需要整本书：阅读规范按篇上传时全量注入
+    # 会在第一步就把上下文撑爆（实测 19 个文件 ≈15.4 万 token）。
+    materials_text = materials_service.materials_for_planning(
+        db, goal.id, jload(goal.format_spec_snapshot or "", {})
+    )
     data = ai.plan(goal, profile, materials_text)
     raw_steps = data.get("steps")
     if not isinstance(raw_steps, list):

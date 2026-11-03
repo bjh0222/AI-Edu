@@ -1,0 +1,16 @@
+{
+  "title": "毛泽东选集第一卷导读",
+  "domain_key": "philosophy_ethics",
+  "motivation": "第一卷收录第一次和第二次国内革命战争时期的著作，思想密度高、历史背景陌生，需要一份既辅助精读又能独立把握核心思想的导读",
+  "application_context": "为《毛泽东选集》第一卷生成深度导读：逐篇给出概要与深度解读，并产出全书认知地图、阅读路线与思想背景学术争鸣",
+  "current_level": "已通读部分篇目，但对全书思想脉络、各篇论证与历史背景缺乏系统把握",
+  "time_budget": "无上限",
+  "hard_constraints": "只导读第一卷，不涉及其它卷；材料已按篇拆分上传，每篇一节，不得合并或遗漏篇目",
+  "capability_level": "L3",
+  "generation_tier": "standard",
+  "format_spec_id": "c83058b2d32d421bb05dfb25d0ea86ac",
+  "material_dir": "D:\\桌面\\dsh\\ai-edu\\services\\api\\data\\reading_input",
+  "material_kind": "reference",
+  "material_type": "text/markdown",
+  "generate_extra_exercises": false
+}

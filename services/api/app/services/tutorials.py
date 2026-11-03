@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..model_settings import runtime_settings
 from ..learning.disciplines import get_profile
 from ..learning.engine import check_structure
@@ -27,6 +28,10 @@ from ..learning.teaching_profile import (
 from ..llm.service import AIService, AIServiceError
 from ..models import GenerationJob, ModelCallLog, Tutorial, TutorialVersion
 from . import goals as goals_service
+from . import exam_check as exam_check_service
+from . import exam_verify as exam_verify_service
+from . import proposition as proposition_service
+from . import spec_check as spec_check_service
 from . import format_specs as format_specs_service
 from . import knowledge as knowledge_service
 from . import materials as materials_service
@@ -48,7 +53,9 @@ from .utils import (
 MAX_SECTIONS_HINT = 8  # 安全上限：防止异常输出撑爆成本；正常章节数由目标范围决定
 # 交付契约（结构由代码/规范确定性给定，不是模型自由发挥）允许更多章：
 # 「按材料分章，每章一份」时章节数等于材料的章数，截断会静默少交付几份成品。
-CONTRACT_MAX_SECTIONS = 24
+# 交付/导读节数保险丝。阅读导读的节数由材料篇数决定（《毛选》单卷 30 篇 + 全书层 2 节），
+# 24 会静默丢篇；64 仍足以拦住异常材料（几百个标题）把生成成本撑爆。
+CONTRACT_MAX_SECTIONS = 64
 # 章节并发生成上限：默认 9 路（deep 挡位最多 8 节，等于全并行，把「逐节排队」的尾巴消掉）。
 # 注意：该值只在端点真能并发时才有意义——接 DeepSeek 等托管 API 可直接用默认值；
 # 若换回单卡自建端点（按队列串行处理请求，单节约 385s），必须用
@@ -365,6 +372,133 @@ def _criteria_list(db: Session, goal_id: str) -> list[dict]:
         )
     return confirmed
 
+def _reading_outline_from_materials(
+    db: Session, goal_id: str, criteria: list[dict]
+) -> list[dict] | None:
+    """阅读教程规范：直接从材料名生成确定性大纲，**不调模型**。
+
+    为什么必须绕开大纲模型（三个都是实测阻塞，不是理论担忧）：
+    1. 节数上限：`MAX_SECTIONS_HINT = 8` 会硬截断 `raw_sections[:8]`。第一卷 18 篇
+       + 3 个全书层 = 21 节，模型输出的后 13 节会被静默丢掉。
+    2. 输出预算：大纲提示词写死「整份 JSON 控制在 1500 字以内」，而 21 节的最小
+       JSON ≈ 4000 字符 → 必然被截断 → 整份 JSON 无法解析 → 本次生成作废。
+    3. 材料预算：`generate_outline` 原本把**全部材料**塞进大纲调用
+       （`materials_context(db, goal.id)`，无 chapter 参数）。整卷 218,552 字符
+       ≈ 153,000 token，直接超上下文窗口。而大纲只需要篇名，274 字符就够。
+
+    篇名逐字取自材料，既不用模型猜、也不会漏篇或改写篇名。这与试卷规范的
+    `apply_chapter_split`（按材料章节定死交付物）是同一个思路。
+
+    认不出篇目时返回 None，交回大纲模型（宁可退回全量注入，也不要静默产出错结构）。
+    """
+    from ..models import GoalMaterial
+
+    rows = (
+        db.query(GoalMaterial)
+        .filter(GoalMaterial.goal_id == goal_id, GoalMaterial.status == "ready")
+        .order_by(GoalMaterial.created_at.asc())
+        .all()
+    )
+    names: list[str] = []
+    for row in rows:
+        stem = re.sub(r"\.[A-Za-z0-9]+$", "", str(row.filename or "")).strip()
+        if stem and materials_service.chapter_marker(stem):
+            names.append(stem)
+    if not names:
+        # 文件名里没有「第N章/篇」编号：先看是不是「整卷一个大文件」——
+        # 从正文按篇标题定节（《毛选》卷文件 # 卷 → ## 时期 → ### 篇，篇级约 30 个）。
+        # 只扫标题行，不把正文拉进 prompt；篇名逐字取自材料，不用模型猜。
+        for row in rows:
+            if materials_service.is_global_material(str(row.filename or "")):
+                continue
+            body = materials_service._material_body(db, row)
+            titles = materials_service.piece_titles(body)
+            if titles:
+                names.extend(titles)
+                break
+    if not names:
+        # 仍没有：退回从全书级材料（目录/前言）的标题提取
+        names = format_specs_service.material_chapters(
+            materials_service.materials_context(db, goal_id, global_only=True)
+        )
+    if not names:
+        return None
+
+    # 去重后按篇号排序：用户可能乱序上传，靠编号而不是上传顺序
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for name in sorted(
+        names, key=lambda x: (int(materials_service.chapter_marker(x) or 0), x)
+    ):
+        if name in seen:
+            continue
+        seen.add(name)
+        ordered.append(name[:120])
+    if not ordered:
+        return None
+    # 与契约模式同样的总量保险丝，避免异常材料撑爆生成成本
+    ordered = ordered[:CONTRACT_MAX_SECTIONS]
+
+    criteria_ids = [str(c["id"]) for c in criteria or [] if isinstance(c, dict) and c.get("id")]
+    titles = (
+        list(format_specs_service.READING_BOOK_LEVEL_HEAD)
+        + ordered
+        + list(format_specs_service.READING_BOOK_LEVEL_TAIL)
+    )
+    return [
+        {
+            "id": uuid.uuid4().hex[:8],
+            "title": title,
+            "purpose": f"阅读教程交付单元：{title}",
+            "content_type": "application",
+            "summary": "",
+            # 全书层与章节层都承载全部验收标准：阅读规范不按节拆验收点
+            "criteria_ids": list(criteria_ids),
+        }
+        for title in titles
+    ]
+
+
+
+def _save_outline_version(db: Session, goal, tutorial, content: dict, ai, *, job_id=None) -> dict:
+    """把大纲落成一个 TutorialVersion，收尾 job 并触发知识网络后台提取。
+
+    两条大纲路径共用（模型路径 / 阅读规范的确定性路径），避免两份落库逻辑漂移。
+    """
+    usage = dict(ai.usage_last)
+    version = TutorialVersion(
+        tutorial_id=tutorial.id,
+        version=1,
+        content_json=jdump(content),
+        prompt_version="v1",
+        model_provider="demo" if ai.is_demo else "openai-compatible",
+        model_name="demo" if ai.is_demo else "configured",
+        quality_report=jdump({}),
+        source_refs=jdump(materials_service.materials_source_refs(db, goal.id)),
+        prompt_tokens=usage.get("prompt_tokens", 0),
+        completion_tokens=usage.get("completion_tokens", 0),
+        total_tokens=usage.get("total_tokens", 0),
+        usage_source=usage.get("usage_source", ""),
+    )
+    db.add(version)
+    db.flush()
+    tutorial.current_version_id = version.id
+    set_status_at_least(goal, "learning")
+    # 教程生成即更新知识网络：改为后台线程执行，大纲响应不再多等 1 次模型往返
+    # （失败不阻断教程交付；提取内部有指纹去重，重复触发不会重复烧钱）
+    job = db.get(GenerationJob, job_id) if job_id else None
+    if job is not None:
+        job.status = "done"
+        job.progress = 100
+        job.stage = "大纲完成（知识网络后台更新中）"
+        job.prompt_tokens = usage.get("prompt_tokens", 0)
+        job.completion_tokens = usage.get("completion_tokens", 0)
+        job.total_tokens = usage.get("total_tokens", 0)
+        job.usage_source = usage.get("usage_source", "")
+    db.commit()  # 先提交并结束本事务，后台提取线程才能读到刚写入的版本
+    _extract_knowledge_async(goal.id, tutorial.id, version.id)
+    return {"tutorial": tutorial_dict(db, tutorial), "job": job, "demo": ai.is_demo}
+
 
 def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
     goal = _goal_for(db, goal_id)
@@ -375,7 +509,12 @@ def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
     if snapshot:
         # 任务文本含 hard_constraints：决定交付结构的要求通常写在硬性约束里
         requirement_text = task_requirement_text(goal)
-        materials_for_mode = materials_service.materials_context(db, goal.id)
+        # 阅读教程规范不用 apply_chapter_split（它靠「单元检测卷」这类成品名词判定，
+        # 导读任务永远不命中），所以不必为它把整本书拉进内存——那是 218,552 字符。
+        materials_for_mode = (
+            "" if format_specs_service.is_reading_guide(snapshot)
+            else materials_service.materials_context(db, goal.id)
+        )
         snapshot = format_specs_service.apply_task_overrides(snapshot, requirement_text)
         snapshot = format_specs_service.apply_chapter_split(
             snapshot, requirement_text, materials_for_mode
@@ -397,9 +536,38 @@ def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
     db.add(tutorial)
     db.commit()  # 先落库，让本次调用的 token / 训练样本能关联到 tutorial_id
     ai.tutorial_id = tutorial.id
-    materials_text = materials_service.materials_context(db, goal.id)
     # 选定规范后独占结构权限；未选规范时才使用旧画像契约。
     contract = format_specs_service.contract_for_goal(goal)
+
+    # 阅读教程规范：大纲由材料名确定性生成，不调模型、不注入整本书。
+    # 理由见 _reading_outline_from_materials 的三条实测阻塞（节数上限 8 / JSON 预算
+    # 1500 字 / 大纲阶段无材料预算）。认不出篇目时 reading_outline 为 None，
+    # 自动落回下面的模型路径，行为与从前一致。
+    reading_outline = (
+        _reading_outline_from_materials(db, goal.id, criteria)
+        if format_specs_service.is_reading_guide(snapshot) else None
+    )
+    if reading_outline:
+        teaching_plan = normalize_teaching_plan(
+            {}, parse_teaching_profile(context_text=goal_context_text(goal))
+        )
+        content = {
+            "format_spec": snapshot,
+            "teaching_plan": teaching_plan,
+            "outline": reading_outline,
+            "sections": [],
+        }
+        if contract:
+            content["delivery_contract"] = contract
+        job = db.get(GenerationJob, job.id)
+        if job is not None:
+            job.stage = f"按材料确定性生成 {len(reading_outline)} 节大纲（未调大纲模型）"
+        db.commit()
+        return _save_outline_version(db, goal, tutorial, content, ai, job_id=job.id if job else None)
+
+    # 走到这里说明没能确定性定出篇目（非阅读规范，或阅读规范认不出篇目）：
+    # 阅读规范退而求其次也只注入全书级材料 + 篇名清单，避免把整本书塞进大纲调用。
+    materials_text = materials_service.materials_for_planning(db, goal.id, snapshot)
     try:
         try:
             data = ai.outline(
@@ -435,40 +603,7 @@ def generate_outline(db: Session, goal_id: str, ai: AIService) -> dict:
         content = {"format_spec": snapshot, "teaching_plan": teaching_plan, "outline": outline, "sections": []}
         if contract:
             content["delivery_contract"] = contract
-        usage = dict(ai.usage_last)
-
-        version = TutorialVersion(
-            tutorial_id=tutorial.id,
-            version=1,
-            content_json=jdump(content),
-            prompt_version="v1",
-            model_provider="demo" if ai.is_demo else "openai-compatible",
-            model_name="demo" if ai.is_demo else "configured",
-            quality_report=jdump({}),
-            source_refs=jdump(materials_service.materials_source_refs(db, goal.id)),
-            prompt_tokens=usage.get("prompt_tokens", 0),
-            completion_tokens=usage.get("completion_tokens", 0),
-            total_tokens=usage.get("total_tokens", 0),
-            usage_source=usage.get("usage_source", ""),
-        )
-        db.add(version)
-        db.flush()
-        tutorial.current_version_id = version.id
-        set_status_at_least(goal, "learning")
-        # 教程生成即更新知识网络：改为后台线程执行，大纲响应不再多等 1 次模型往返
-        # （失败不阻断教程交付；提取内部有指纹去重，重复触发不会重复烧钱）
-        job = db.get(GenerationJob, job.id)
-        if job is not None:
-            job.status = "done"
-            job.progress = 100
-            job.stage = "大纲完成（知识网络后台更新中）"
-            job.prompt_tokens = usage.get("prompt_tokens", 0)
-            job.completion_tokens = usage.get("completion_tokens", 0)
-            job.total_tokens = usage.get("total_tokens", 0)
-            job.usage_source = usage.get("usage_source", "")
-        db.commit()  # 先提交并结束本事务，后台提取线程才能读到刚写入的版本
-        _extract_knowledge_async(goal.id, tutorial.id, version.id)
-        return {"tutorial": tutorial_dict(db, tutorial), "job": job, "demo": ai.is_demo}
+        return _save_outline_version(db, goal, tutorial, content, ai, job_id=job.id)
     except AIServiceError as exc:
         job.status = "failed"
         job.error_code = "llm_error"
@@ -947,6 +1082,105 @@ def _section_with_retry(
     raise AIServiceError("章节生成重试次数已用完")
 
 
+def _reading_materials_by_section(db: Session, goal_id: str, content: dict) -> dict[str, str]:
+    """为阅读规范的每一节复原「该节注入的材料原文」，供摘录溯源校验（Q001）做基准。
+
+    阅读规范章节生成时材料是按章注入的，但生成完成后各节的 materials_text 已不在手上；
+    这里用与 worker 完全一致的口径复原：节标题 → chapter_marker 提章号 → materials_context
+    按章取。取不到就留空串，spec_check 对空材料会跳过 Q001（不指控），不产生假阳性。
+    """
+    out: dict[str, str] = {}
+    for section in content.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        title = str(section.get("title", "") or "")
+        if not title:
+            continue
+        chapter = materials_service.chapter_marker(title)
+        try:
+            out[title] = materials_service.materials_context(
+                db, goal_id, chapter=chapter,
+            ) if chapter else materials_service.materials_context(db, goal_id, global_only=True)
+        except Exception:  # noqa: BLE001  材料复原失败不该阻断校验，留空即可
+            out[title] = ""
+    return out
+
+
+def _apply_exam_quality(
+    db: Session, content: dict, quality: dict, goal, tutorial_id: str, job_id: str,
+    *, verify_enabled: bool, version: int = 0,
+) -> None:
+    """试卷质量三层（L0 账目 / L1 盲解 / 跨卷重算）统一入口，就地改写 content 与 quality。
+
+    把三层收敛到一个函数，是为了让**两个调用点**（后台 _sections_worker 全量生成、
+    同步 regenerate_section 单节重写）用同一套顺序与同一套 quality 合并逻辑，
+    避免各写一遍时漏掉「L1 改完答案后要重算跨卷」这类顺序依赖。
+
+    content 会被就地改写（修复写回章节正文），quality 会被就地补 checks/issues/
+    exam_check/exam_verify 并重算 passed。调用方负责随后落库 content_json 与 quality_report。
+
+    L1 只在配置了真实模型且 verify_enabled 时跑；演示模式自动跳过（见 exam_verify）。
+    """
+    discipline = get_profile(goal.domain_key)
+    summary = exam_verify_service.run_exam_quality(
+        content,
+        goal_id=goal.id,
+        tutorial_id=tutorial_id,
+        job_id=job_id,
+        discipline=discipline,
+        verify_enabled=verify_enabled,
+    )
+    checks, issues = exam_verify_service.quality_from_summary(summary)
+    # checks 去重：exam_check 与 exam_verify 各自产出的检查项名不与 check_structure 冲突，
+    # 但同一份 quality 里不能出现两条同名（重算场景），先剔除旧的 exam 检查项名。
+    exam_names = set(exam_check_service.EXAM_CHECK_NAMES) | {"试卷答案盲解核验"}
+    base_checks = [c for c in quality.get("checks", []) if c.get("name") not in exam_names]
+    quality["checks"] = base_checks + checks
+    # issues：结构检查的 issues 保留在前，exam 的追加在后
+    base_issues = [i for i in quality.get("issues", []) if not str(i).startswith(("[E0", "[DEFECT]"))]
+    quality["issues"] = base_issues + issues
+    quality["passed"] = (
+        all(bool(c.get("passed", True)) for c in quality["checks"]) and not quality["issues"]
+    )
+    quality["exam_check"] = summary.get("l0")
+    l1 = summary.get("l1") or {}
+    quality["exam_verify"] = l1 if l1.get("enabled") else None
+
+    # ---- 规范专项校验（阅读摘录溯源 / 实践步骤与代码）----
+    # 按 scene 分派：exam 类已在上面 run_exam_quality 里校验过，这里只补 reading_guide
+    # 与 practical_tutorial。阅读规范需要材料原文做 Q001 逐字比对的基准。
+    spec_summary = spec_check_service.check_sections(
+        content,
+        materials_by_section=(
+            _reading_materials_by_section(db, goal.id, content)
+            if spec_check_service.is_reading_content(content.get("format_spec"))
+            else None
+        ),
+        domain_key=goal.domain_key,
+    )
+    if spec_summary.get("kind"):
+        quality["spec_check"] = spec_summary
+        spec_names = {"原文摘录溯源校验", "实践步骤与代码校验"}
+        quality["checks"] = [
+            c for c in quality["checks"] if c.get("name") not in spec_names
+        ] + spec_check_service.quality_checks(spec_summary)
+        quality["issues"] = quality["issues"] + spec_check_service.quality_issues(spec_summary)
+        quality["passed"] = (
+            all(bool(c.get("passed", True)) for c in quality["checks"]) and not quality["issues"]
+        )
+
+    # ---- 命题质量回流（P2 冷启动素材）----
+    # 把 L0 跨卷冲突（E017/E018）+ L1 缺陷沉淀成 QualityRecord，供 distill_principles
+    # 聚类成命题规律。fire-and-forget：回流失败不阻断教程交付（与知识提取同款约定）。
+    # 去重键含 version，所以版本号必须传对——传固定值会让新版本的新缺陷被误判为重复。
+    try:
+        proposition_service.reflow_quality_records(
+            db, goal, tutorial_id, version, summary.get("l0") or {}, l1,
+        )
+    except Exception as exc:  # noqa: BLE001  质量回流是增强环节，失败不阻断交付
+        logger.warning("命题质量回流失败（tutorial=%s v%s）：%s", tutorial_id, version, exc)
+
+
 def _merge_section_usage(results: dict[int, dict]) -> dict:
     """按大纲顺序汇总各节 usage（真实 provider usage 优先于估算）。"""
     usage = token_usage_dict()
@@ -977,8 +1211,9 @@ def _merge_section_usage(results: dict[int, dict]) -> dict:
 # 实测仅产出 1196 字符却烧掉 11095 completion_tokens。
 # 解法是把全书层挪到所有章节完成之后，喂给它各章概要（不是全书原文，成本极低）。
 
-READING_CHAPTER_DIGEST_CHARS = 3000      # 单章概要喂给全书层的上限
-READING_DIGEST_TOTAL_CHARS = 30000       # 全部章概要合计上限（约 2.1 万 token，单次调用可承受）
+READING_CHAPTER_DIGEST_CHARS = 3000      # 单章概要喂给全书层的上限（章数少时的理想值）
+READING_DIGEST_MIN_CHARS = 600           # 单章概要的下限：再低就只剩标题，失去整合价值
+READING_DIGEST_TOTAL_CHARS = 60000       # 全部章概要合计上限（约 4.2 万 token；加规范后仍远低于窗口）
 READING_PREFER_BLOCK_RE = re.compile(r"概要|概览|小结|导读")
 # 概要段落的结束标记：遇到「深度导读 / 核心概念详解」这类明确进入细节的标题就停，
 # 避免把深度层的大段内容也喂给全书层（既挤占预算，又让全书层陷进细节丢掉全局视角）。
@@ -1034,22 +1269,56 @@ def _extract_summary_segment(body: str, limit: int) -> str:
     return segment
 
 
-def _reading_chapters_of(outline: list[dict]) -> dict[int, str]:
-    """大纲索引 -> 归一化章号；没有章号的节不在结果里。
+def _reading_piece_titles(db: Session, goal_id: str) -> list[str]:
+    """材料无章号时的「篇」级标题清单（按篇切片的键来源）。
+
+    只扫标题行（piece_titles 内部不读正文进 prompt），成本可忽略。
+    全书级材料（目录/前言）不参与；第一份有篇结构的正文材料即为准。
+    """
+    from ..models import GoalMaterial
+
+    rows = (
+        db.query(GoalMaterial)
+        .filter(GoalMaterial.goal_id == goal_id, GoalMaterial.status == "ready")
+        .order_by(GoalMaterial.created_at.asc())
+        .all()
+    )
+    for row in rows:
+        if materials_service.is_global_material(str(row.filename or "")):
+            continue
+        titles = materials_service.piece_titles(materials_service._material_body(db, row))
+        if titles:
+            return titles
+    return []
+
+
+def _reading_chapters_of(outline: list[dict], piece_titles: list[str] | None = None) -> dict[int, str]:
+    """大纲索引 -> 切片键（归一化章号，或**与材料篇名逐字匹配**的篇键）。
 
     章号来自节标题（材料章节名逐字进入大纲，所以标题里必然带「第 N 章」）。
     归一化是必须的：大纲写「第 1 章」而文件名写「第一章」，不归一就永远匹配不上，
     按章注入会静默退化成「一节材料都拿不到」。
+
+    材料完全没有章号时（《毛选》卷文件：# 卷 → ## 时期 → ### 篇），键退为篇名 ——
+    但**只有节标题命中材料篇名清单才算篇层**：全书层与杂散节不在清单里，
+    仍归全书层（第二批吃各篇概要）。否则「任何无章号节都当篇」会把
+    全书认知地图 / 杂散节也塞进第一批并给它们切不出材料。
     """
+    pieces = {materials_service._norm_title(t) for t in (piece_titles or [])}
     result: dict[int, str] = {}
     for idx, item in enumerate(outline or []):
-        mark = materials_service.chapter_marker(str(item.get("title", "") or ""))
+        title = str(item.get("title", "") or "")
+        mark = materials_service.chapter_marker(title)
         if mark:
             result[idx] = mark
+            continue
+        norm = materials_service._norm_title(title)
+        if norm and norm in pieces:
+            result[idx] = f"piece::{norm}"
     return result
 
 
-def _reading_phase_plan(outline: list[dict]) -> dict:
+def _reading_phase_plan(outline: list[dict], piece_titles: list[str] | None = None) -> dict:
     """把大纲切成 章节层 / 全书层 两段，并给出章号映射。
 
     判据只看「节标题里有没有章号」，是确定性的，不依赖模型自觉：
@@ -1067,16 +1336,16 @@ def _reading_phase_plan(outline: list[dict]) -> dict:
     没有任何章号时（例如导读一篇论文、或材料没有章结构）返回 fallback=True：
     此时按章注入无从谈起，退回原有的全量注入 + 单批并行，不启用两阶段。
     """
-    chapters = _reading_chapters_of(outline)
-    if not chapters:
+    marks = _reading_chapters_of(outline, piece_titles)
+    if not marks:
         return {"fallback": True, "chapters": [], "book_level": [], "marks": {}}
-    chapter_idx = sorted(chapters)
-    book_level = [i for i in range(len(outline)) if i not in chapters]
+    chapter_idx = sorted(marks)
+    book_level = [i for i in range(len(outline)) if i not in marks]
     return {
         "fallback": False,
         "chapters": chapter_idx,
         "book_level": book_level,
-        "marks": chapters,
+        "marks": marks,
     }
 
 
@@ -1193,12 +1462,21 @@ def _reading_digest(section: dict, limit: int = READING_CHAPTER_DIGEST_CHARS) ->
 
 
 def _reading_digest_block(outline: list[dict], results: dict[int, dict], indices: list[int]) -> str:
-    """把各章概要拼成一个材料块，作为后置全书层的注入材料。
+    """把各章概要拼成一个材料块，作为全书层的注入材料。
 
-    这里刻意不注入全书原文：后置全书层的职责是「整合各章导读」，而各章导读本身就是
-    从原文提炼出来的。12 章 × 3000 字 ≈ 3.6 万字 ≈ 2.5 万 token，单次调用完全可承受；
-    换成全书原文则是 28 万 token，直接超窗口。
+    这里刻意不注入全书原文：全书层的职责是「整合各章导读」，而各章导读本身就是
+    从原文提炼出来的。换成全书原文是 28 万 token，直接超窗口。
+
+    单章额度随章数自适应：章数多时压缩每章额度，**保证没有一章被整章丢弃**。
+    曾用固定 3000 字/章 + 30000 字合计上限，18 章需要 54000 字，后 8 章被静默截掉，
+    于是「核心概念索引」漏条目、「阅读路线」漏章节，而且没有任何提示。
     """
+    # 自适应单章额度：章数越多每章越少，但不低于 READING_DIGEST_MIN_CHARS
+    n = max(1, len(indices))
+    per_chapter = max(
+        READING_DIGEST_MIN_CHARS,
+        min(READING_CHAPTER_DIGEST_CHARS, READING_DIGEST_TOTAL_CHARS // n),
+    )
     chunks: list[str] = []
     total = 0
     for idx in indices:
@@ -1207,7 +1485,7 @@ def _reading_digest_block(outline: list[dict], results: dict[int, dict], indices
             continue
         section = result.get("section") or {}
         title = str(section.get("title") or (outline[idx].get("title", "") if idx < len(outline) else ""))
-        digest = _reading_digest(section)
+        digest = _reading_digest(section, limit=per_chapter)
         if not digest:
             continue
         piece = f"\n\n===== {title} =====\n{digest}"
@@ -1260,9 +1538,16 @@ def _generate_section_task(
         # 全书层不经过这里——它在第二批由 worker 直接传 digest_block 作为 materials_text。
         # 其它规范 chapter 恒为 None，仍用传进来的全量 materials_text，行为不变。
         if chapter:
-            materials_text = materials_service.materials_context(
-                db, goal_id, chapter=chapter, all_chapters=all_chapters or []
-            )
+            if chapter.startswith("piece::"):
+                materials_text = materials_service.materials_context(
+                    db, goal_id, piece=chapter[len("piece::"):], all_chapters=all_chapters or [],
+                    global_max_chars=materials_service.READING_GLOBAL_MAX_CHARS,
+                )
+            else:
+                materials_text = materials_service.materials_context(
+                    db, goal_id, chapter=chapter, all_chapters=all_chapters or [],
+                    global_max_chars=materials_service.READING_GLOBAL_MAX_CHARS,
+                )
         criteria_by_id = {c["id"]: c for c in criteria_dicts}
         mapped = [criteria_by_id[cid] for cid in item.get("criteria_ids", []) if cid in criteria_by_id]
         # 配套文件名在生成章节时已确定（见 _generate_companions），提前注入，避免模型猜错双链目标；
@@ -1279,6 +1564,9 @@ def _generate_section_task(
         section_data = _with_rule_check(_normalize_section_raw(raw), raw)
         # 确定性兜底：模型偶尔把整篇文档写进一节，先按大纲标题剔除其它章节的整块内容
         section_data = prune_section_foreign_blocks(section_data, outline_titles or [])
+        # 阅读规范：模型把一章拆成多块时合并回单块，避免渲染层级错位（见函数 docstring）
+        if format_specs_service.is_reading_guide(jload(goal.format_spec_snapshot or "", {})):
+            section_data = _merge_reading_section_blocks(section_data)
         if format_specs_service.authoritative_snapshot(goal):
             section_data["title"] = item.get("title", "") or section_data.get("title", "")
         # 交付物章节统一用契约里的名称，避免模型把标题写成「目标：三项」
@@ -1387,8 +1675,9 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         # ---- 阅读教程规范：两阶段 + 按章注入（其它规范 phase["fallback"]=True，逐字走原路径）----
         reading_spec = content.get("format_spec") or jload(goal.format_spec_snapshot or "", {})
         reading_mode = format_specs_service.is_reading_guide(reading_spec)
+        piece_titles = _reading_piece_titles(db, goal.id) if reading_mode else []
         phase = (
-            _reading_phase_plan(outline) if reading_mode
+            _reading_phase_plan(outline, piece_titles) if reading_mode
             else {"fallback": True, "chapters": [], "book_level": [], "marks": {}}
         )
         if phase["fallback"]:
@@ -1607,12 +1896,13 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         }
         if contract:
             new_content["delivery_contract"] = contract
+        # 结构与交付契约检查先算一版（章节级质量），试卷账目/盲解核验放到配套文件
+        # 合并后统一跑一次——额外练习文件与章节并行生成，此处还没进 new_content。
         quality = check_structure(new_content, criteria_dicts)
         quality["issues"] = quality.get("issues", []) + format_specs_service.check_snapshot_delivery(
             content.get("format_spec") or jload(goal.format_spec_snapshot or "", {}),
             new_content,
         )
-        quality["passed"] = bool(quality.get("passed")) and not quality["issues"]
         draft.quality_report = jdump(quality)
         tutorial.status = "drafted" if quality.get("passed") else "drafted_with_issues"
 
@@ -1624,6 +1914,16 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         new_content["cheatsheet"] = companions["cheatsheet"]
         if bool(goal.generate_extra_exercises):
             new_content["extra_exercises"] = companions["extra_exercises"]
+        # ---- 试卷质量：L0 账目 + L1 盲解核验 + 跨卷重算（统一入口，就地改写 new_content）----
+        # 必须在 content_json 落库之前跑：两层都会改写章节 / 额外练习正文（题号、分值、
+        # 答案小节名、账目、被仲裁改正的客观题答案），改写结果要进版本与导出。
+        # 额外练习此刻已并入 new_content，所以一次调用即可覆盖章节 + 额外练习 + 跨卷。
+        _apply_exam_quality(
+            db, new_content, quality, goal, tutorial.id, job_id,
+            verify_enabled=settings.exam_verify_enabled, version=draft.version,
+        )
+        draft.quality_report = jdump(quality)
+        tutorial.status = "drafted" if quality.get("passed") else "drafted_with_issues"
         if companions["errors"]:
             _update_job(db, job_id, stage="；".join(companions["errors"])[:200])
             db.commit()
@@ -1682,6 +1982,48 @@ def _companions_worker(tutorial_id: str, job_id: str) -> None:
         _fail_job(db, job_id, "internal_error", f"{exc.__class__.__name__}: {exc}")
     finally:
         db.close()
+def _reading_section_materials(db: Session, goal_id: str, content: dict, item: dict) -> str:
+    """单节重写时该注入什么材料：阅读规范按篇注入，其它规范全量注入。
+
+    与 `_sections_worker` 的按篇注入必须一致，否则「重写某一节」会把整本书塞进 prompt
+    （实测 19 个文件 ≈15.4 万 token，直接超窗口），而正常生成时却只注入一篇。
+    非阅读规范或节标题认不出篇号时，退回全量注入，行为与从前一致。
+    """
+    spec = content.get("format_spec") or {}
+    if not format_specs_service.is_reading_guide(spec):
+        return materials_service.materials_context(db, goal_id)
+    outline = content.get("outline") or []
+    marks = [
+        m for m in (
+            materials_service.chapter_marker(str(o.get("title", "") or "")) for o in outline
+        ) if m
+    ]
+    chapter = materials_service.chapter_marker(str(item.get("title", "") or ""))
+    if not chapter:
+        norm = materials_service._norm_title(str(item.get("title", "") or ""))
+        if norm and norm in {materials_service._norm_title(t) for t in _reading_piece_titles(db, goal_id)}:
+            chapter = f"piece::{norm}"
+    if not chapter:
+        # 全书层节：重写时吃各章已生成的概要，而不是重读原文
+        results = {
+            idx: {"section": sec}
+            for idx, sec in enumerate(content.get("sections") or [])
+            if isinstance(sec, dict)
+        }
+        digest = _reading_digest_block(outline, results, [
+            i for i in range(len(outline))
+            if materials_service.chapter_marker(str(outline[i].get("title", "") or ""))
+        ])
+        return digest or materials_service.materials_context(
+            db, goal_id, global_only=True, global_max_chars=materials_service.READING_GLOBAL_MAX_CHARS
+        )
+    if chapter.startswith("piece::"):
+        return materials_service.materials_context(
+            db, goal_id, piece=chapter[len("piece::"):], all_chapters=marks, global_max_chars=materials_service.READING_GLOBAL_MAX_CHARS
+        )
+    return materials_service.materials_context(
+        db, goal_id, chapter=chapter, all_chapters=marks, global_max_chars=materials_service.READING_GLOBAL_MAX_CHARS
+    )
 
 
 def regenerate_section(db: Session, tutorial_id: str, section_id: str, ai: AIService) -> dict:
@@ -1708,7 +2050,7 @@ def regenerate_section(db: Session, tutorial_id: str, section_id: str, ai: AISer
     mapped = [criteria_by_id[cid] for cid in item.get("criteria_ids", []) if cid in criteria_by_id]
     ai.tutorial_id = tutorial.id
     ai.section_id = section_id
-    materials_text = materials_service.materials_context(db, goal.id)
+    materials_text = _reading_section_materials(db, goal.id, content, item)
     try:
         raw = ai.section(
             goal, profile, item, mapped or criteria_dicts, [o.get("title", "") for o in outline[:target_idx]], materials_text
@@ -1736,7 +2078,15 @@ def regenerate_section(db: Session, tutorial_id: str, section_id: str, ai: AISer
     )
     sections[target_idx] = section_data
     new_content = {**content, "outline": outline, "sections": sections}
+    # 试卷质量三层统一入口：单节重生成后同样要在落库前跑（重生成可能重新引入账目
+    # 错误），且跨卷一致性必须基于**整份文档**重算——只校验被重写的那一节会漏掉它与
+    # 其它卷的答案冲突。L1 盲解会对整份文档的所有试卷重新核验（不只重写的那节），
+    # 因为改一节答案可能影响跨卷一致性判定。
     quality = check_structure(new_content, criteria_dicts)
+    _apply_exam_quality(
+        db, new_content, quality, goal, tutorial.id, getattr(ai, "job_id", "") or "",
+        verify_enabled=settings.exam_verify_enabled, version=version.version + 1,
+    )
     new_version = TutorialVersion(
         tutorial_id=tutorial.id,
         version=version.version + 1,
@@ -2047,6 +2397,39 @@ def _normalize_deliverable_body(body: str, min_level: int = 3) -> str:
     return "\n".join(normalized)
 
 
+def _merge_reading_section_blocks(section: dict) -> dict:
+    """阅读教程规范：把被模型拆成多块的节合并回单块（确定性强制「一节一块」）。
+
+    规范要求「一节只输出一个 content 块，块 title 逐字等于节标题」。但模型偶尔会把
+    一章拆成多块并自拟块标题（实测第八篇被拆成「深度导读 · 核心概念详解」等 5 块）。
+    后果不是排版美观问题，是**标题层级错位**：`_render_deliverable_blocks` 在块标题
+    未被正文首行表达时，会给每块多插一层 `### {块标题}` 并把正文压到 `####` 起步，
+    于是第八篇的「本章概要/深度导读」比其它 17 篇深了一级。
+
+    修法：拼接所有块的 body、丢弃块 title，合成一个 title=节标题 的块。
+    块内的小标题（### 本章概要 / ### 深度导读 / #### …）本来就在 body 里，
+    合并后层级自动恢复一致。**只对 reading_guide 调用**：练习规范刻意用多块
+    （易错辨析 + 训练），无条件合并会破坏它。
+    """
+    blocks = [b for b in (section.get("content") or []) if isinstance(b, dict)]
+    if len(blocks) <= 1:
+        return section
+    title = str(section.get("title", "") or "").strip()
+    bodies = [str(b.get("body", "") or "").strip() for b in blocks]
+    bodies = [b for b in bodies if b]
+    if not bodies:
+        return section
+    merged = {
+        **section,
+        "content": [{
+            "type": "text",
+            "title": title,
+            "body": "\n\n".join(bodies),
+        }],
+    }
+    return merged
+
+
 def _render_deliverable_blocks(section: dict, lines: list[str]) -> None:
     """规范交付物专用渲染：不再追加教程通用栏目或重复块标题。"""
     section_title = _norm_ws(section.get("title", ""))
@@ -2239,6 +2622,12 @@ def export_markdown(db: Session, tutorial_id: str) -> tuple[str, str]:
     format_spec = content.get("format_spec") or format_specs_service.active_snapshot(goal)
     contract = content.get("delivery_contract") or {}
     content = align_section_titles(prune_foreign_section_blocks(content))
+    # 阅读规范：导出前合并被拆成多块的节，历史坏数据（如第八篇）重导出也干净
+    if format_specs_service.is_reading_guide(format_spec):
+        content["sections"] = [
+            _merge_reading_section_blocks(sec) if isinstance(sec, dict) else sec
+            for sec in (content.get("sections") or [])
+        ]
 
     lines: list[str] = []
     if str((format_spec or {}).get("name", "") or "").strip():

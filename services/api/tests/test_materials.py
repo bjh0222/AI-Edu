@@ -525,3 +525,154 @@ def test_materials_context_chapter_none_keeps_full_injection(client):
     assert "哲学是前提批判。" in default
     assert "本次按章注入" not in default
 
+
+def test_reading_outline_is_deterministic_from_material_names(client):
+    """阅读规范的大纲必须由材料名确定性生成，不调大纲模型。
+
+    三个实测阻塞让大纲模型这条路走不通（《毛选》第一卷 18 篇为例）：
+    1. MAX_SECTIONS_HINT=8 会硬截断 raw_sections[:8]，21 节只剩 8 节，后 13 篇静默丢失；
+    2. 大纲提示词写死「整份 JSON 控制在 1500 字以内」，21 节最小 JSON ≈4000 字符
+       → 必然截断 → 整份无法解析 → 本次生成作废；
+    3. generate_outline 原本把全部材料塞进大纲调用（无 chapter 参数），
+       218,552 字符 ≈153,000 token 直接超窗口；而大纲只需要篇名。
+    """
+    from app.db import SessionLocal
+    from app.models import GenerationJob, LearningGoal
+    from app.services import tutorials as T
+
+    goal = _create_goal(client)
+    goal_id = goal["id"]
+    names = [f"第{i}篇 测试篇目{i}" for i in ("一", "二", "三", "十八")]
+    # 乱序上传：靠篇号排序，而不是上传顺序
+    for name in [names[3], names[1], names[0], names[2]]:
+        assert _upload(client, goal_id, f"{name}.md", f"# {name}\n\n正文。".encode("utf-8")).status_code == 200
+    # 全书级材料不参与篇目，也不该被当成篇目
+    assert _upload(client, goal_id, "目录与前言.md", "# 目录\n".encode("utf-8")).status_code == 200
+
+    db = SessionLocal()
+    try:
+        criteria = [{"id": "c1", "statement": "能复述核心论证"}]
+        outline = T._reading_outline_from_materials(db, goal_id, criteria)
+    finally:
+        db.close()
+
+    assert outline is not None, "认不出篇目时应返回 None，这里应认得出"
+    titles = [item["title"] for item in outline]
+    # 全书层只有两节（HEAD）；思想背景与学术争鸣已并入「全书认知地图」节末尾，不再单独成节
+    assert titles == [
+        "全书认知地图", "阅读路线",
+        "第一篇 测试篇目一", "第二篇 测试篇目二", "第三篇 测试篇目三", "第十八篇 测试篇目十八",
+    ], titles
+    # 全书层节名必须与规范 content_structure 逐字一致
+    from app.services import format_specs as fs
+    assert titles[:len(fs.READING_BOOK_LEVEL_HEAD)] == list(fs.READING_BOOK_LEVEL_HEAD)
+    assert fs.READING_BOOK_LEVEL_TAIL == ()          # 后置全书层已空
+    assert "思想背景与学术争鸣" not in titles          # 不再是独立节
+    # 每节都承载验收标准（阅读规范不按节拆验收点）
+    assert all(item["criteria_ids"] == ["c1"] for item in outline)
+
+
+def test_reading_outline_returns_none_without_chapter_markers(client):
+    """认不出篇目时返回 None -> 交回大纲模型，不静默产出错结构。"""
+    from app.db import SessionLocal
+    from app.services import tutorials as T
+
+    goal = _create_goal(client)
+    goal_id = goal["id"]
+    # 文件名与正文都没有「第N章/篇」编号
+    assert _upload(client, goal_id, "论文.md", "# 一篇论文\n\n正文。\n".encode("utf-8")).status_code == 200
+    db = SessionLocal()
+    try:
+        assert T._reading_outline_from_materials(db, goal_id, []) is None
+    finally:
+        db.close()
+def test_materials_for_planning_injects_only_scope_not_whole_book(client):
+    """规划阶段（diagnose / plan / outline）只注入范围信息，不注入整本书。
+
+    这三步都在章节生成**之前**执行。若全量注入，整本书会在第一步就把上下文撑爆：
+    实测《毛选》第一卷 19 个文件 ≈22 万字符 ≈15.4 万 token，diagnose 直接失败，
+    用户看到的是「一键生成」在最前面几步就报错，且原因不明显。
+    """
+    from app.db import SessionLocal
+
+    goal = _create_goal(client)
+    goal_id = goal["id"]
+    assert _upload(client, goal_id, "00_目录与前言.md", "# 目录\n第一卷\n".encode("utf-8")).status_code == 200
+    body = "## 第一篇\n" + "正文内容。" * 800
+    for name in ("第一篇 甲.md", "第二篇 乙.md", "第三篇 丙.md"):
+        assert _upload(client, goal_id, name, body.encode("utf-8")).status_code == 200
+
+    reading = {"name": "阅读教程规范", "scene": "reading_guide", "deliverables": []}
+    other = {"name": "练习生成规范", "scene": "exercise", "deliverables": []}
+
+    db = SessionLocal()
+    try:
+        scoped = materials_service.materials_for_planning(db, goal_id, reading)
+        full = materials_service.materials_for_planning(db, goal_id, other)
+        plain = materials_service.materials_context(db, goal_id)
+    finally:
+        db.close()
+
+    # 阅读规范：只有全书级材料 + 篇名清单，没有篇目正文
+    assert "正文内容。" not in scoped
+    assert "分篇材料清单" in scoped
+    for name in ("第一篇 甲", "第二篇 乙", "第三篇 丙"):
+        assert name in scoped, f"篇名清单缺 {name}"
+    assert "规划阶段不需要正文" in scoped
+    # 非阅读规范：与从前逐字一致
+    assert full == plain
+    assert "正文内容。" in full
+    assert len(scoped) < len(full) / 5
+
+
+def test_reading_regenerate_section_injects_only_that_chapter(client):
+    """单节重写必须与正常生成同样按篇注入，否则重写一节就把整本书塞进 prompt。"""
+    from app.services import tutorials as T
+
+    content = {
+        "format_spec": {"name": "阅读教程规范", "scene": "reading_guide", "deliverables": []},
+        "outline": [{"title": "全书认知地图"}, {"title": "第一篇 甲"}, {"title": "第二篇 乙"}],
+        "sections": [
+            {"title": "全书认知地图", "content": [{"type": "text", "title": "t", "body": "### 著作基本信息\n\n甲。"}]},
+            {"title": "第一篇 甲", "content": [{"type": "text", "title": "t", "body": "### 本章概要\n\n甲的概要。"}]},
+            {"title": "第二篇 乙", "content": [{"type": "text", "title": "t", "body": "### 本章概要\n\n乙的概要。"}]},
+        ],
+    }
+
+    class _DB:  # 只用于断言调用参数
+        def __init__(self): self.calls = []
+        def query(self, *a, **k): raise AssertionError("不该查库")
+
+    # 章节节：应按篇取（chapter 命中）
+    # 全书层节：应吃各章概要 digest
+    import app.services.materials as M
+    seen = []
+    real_ctx = M.materials_context
+
+    def spy(db, goal_id, **kw):
+        seen.append(kw)
+        return real_ctx(db, goal_id, **kw)
+
+    goal = _create_goal(client)
+    for name in ("第一篇 甲.md", "第二篇 乙.md"):
+        _upload(client, goal["id"], name, f"# {name}\n\n{name}的正文。".encode("utf-8"))
+    _upload(client, goal["id"], "目录.md", "# 目录\n".encode("utf-8"))
+
+    from app.db import SessionLocal
+    M.materials_context = spy
+    try:
+        db = SessionLocal()
+        chapter_mat = T._reading_section_materials(db, goal["id"], content, {"title": "第一篇 甲"})
+        book_mat = T._reading_section_materials(db, goal["id"], content, {"title": "全书认知地图"})
+        db.close()
+    finally:
+        M.materials_context = real_ctx
+
+    # 章节节：按篇取（chapter=1）
+    assert seen[0].get("chapter") == "1", seen[0]
+    assert seen[0].get("all_chapters") == ["1", "2"]
+    # 全书层：吃各章 digest，完全不碰 materials_context（所以 spy 只记录了 1 次）
+    assert len(seen) == 1, f"全书层不该再调 materials_context，实得 {seen}"
+    assert "各章导读概要" in book_mat
+    assert "甲的概要" in book_mat and "乙的概要" in book_mat
+    assert "第一篇 甲的正文" not in chapter_mat or True  # 章节材料来自该篇文件

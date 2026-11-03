@@ -411,11 +411,114 @@ class TutorialContent(BaseModel):
     extra_exercises: Optional[ExtraExercisesOut] = None
 
 
+class ExamViolation(BaseModel):
+    """exam_check 的一条违规（错误码见 services/exam_check.CODES）。"""
+
+    code: str = ""
+    rule: str = ""
+    # 判定依据：指向规范里的具体条文，让「为什么算违规」可回溯到规范而非代码私货
+    basis: str = ""
+    detail: str = ""
+    auto_fixable: bool = False
+    # 本轮是否已被代码修好（用户要求「自动改，但只改一次」，改了什么必须可追溯）
+    fixed: bool = False
+    severity: str = "blocking"
+
+
+class ExamSectionCheck(BaseModel):
+    title: str = ""
+    spec: Optional[str] = None      # exam / exercise / None（非卷类章节不校验）
+    changed: bool = False           # 代码是否就地改写了这一节的正文
+    fixed: int = 0                  # 已自动修复的违规条数
+    violations: list[ExamViolation] = []
+
+
+class ExamCheckReport(BaseModel):
+    """L0 卷面账目校验结果。
+
+    必须暴露给前端：本层会**就地改写**章节正文（题号、分值括注、答案小节名、账目），
+    用户看不到改了什么就无法信任交付物，也无法在改错时回滚。
+    """
+
+    sections: list[ExamSectionCheck] = []
+    extra_exercises: Optional[ExamSectionCheck] = None
+    # 跨卷一致性（E017 母题重复 / E018 同母题不同答案），基于 L0+L1 之后的最终内容
+    cross: list[ExamViolation] = []
+
+
+class ExamVerifyPaper(BaseModel):
+    """L1 盲解核验对单份卷的结果。"""
+
+    title: str = ""
+    spec: str = ""
+    verified: int = 0                 # 盲解核验的题目数
+    conflicts: list[dict[str, Any]] = []   # 盲解与卷面答案的冲突（已送仲裁）
+    defects: list[dict[str, Any]] = []     # 题目本身缺陷（如选项不完备）
+    applied: list[dict[str, Any]] = []     # 本轮已自动改正的客观题答案
+    skipped: list[dict[str, Any]] = []     # 未改写的项及原因
+    changed: bool = False
+    error: str = ""
+
+
+class ExamVerifyReport(BaseModel):
+    """L1 盲解核验汇总（每份卷 1~2 次模型往返：盲解 + 冲突仲裁）。
+
+    与 L0 的区别：L0 是纯代码账目校验，L1 用「独立再解一遍」核对**答案内容对不对**。
+    必须暴露给用户：L1 会**改写客观题答案**（仅限 high 置信仲裁），用户要能看到
+    改了哪几题、依据是什么，以及哪些被判为「不改」及原因。
+    """
+
+    enabled: bool = False
+    demo: bool = False
+    skipped: str = ""
+    verified_total: int = 0
+    conflicts_total: int = 0
+    applied_total: int = 0
+    errors: list[str] = []
+    papers: list[ExamVerifyPaper] = []
+
+
+class SpecSectionCheck(BaseModel):
+    """单节的规范专项校验结果（阅读摘录溯源 / 实践步骤与代码）。"""
+
+    title: str = ""
+    passed: bool = True
+    blocking: int = 0
+    advisory: int = 0
+    codes: dict[str, int] = {}
+    violations: list[ExamViolation] = []
+    error: str = ""
+
+
+class SpecCheckReport(BaseModel):
+    """按规范 scene 分派的专项校验结果（services/spec_check.py）。
+
+    必须声明在 QualityReport 里：tutorials._apply_exam_quality 会写入
+    ``quality["spec_check"]``，而 QualityReport 是路由的 response_model——
+    未声明的字段会被 Pydantic **静默丢弃**，Q001（虚构引文）这类 blocking 结果
+    就永远到不了前端。这是实测踩过的坑（写入成功、响应里没有）。
+    """
+
+    # quote = 阅读教程规范（摘录溯源）/ practice = 实践性教程规范（步骤与代码）
+    # None = 本 scene 无专项校验（讲解型教程、试卷类走 exam_check）
+    kind: Optional[str] = None
+    passed: bool = True
+    blocking: int = 0
+    advisory: int = 0
+    sections: list[SpecSectionCheck] = []
+
+
 class QualityReport(BaseModel):
     passed: bool = False
     checks: list[dict[str, Any]] = []
     issues: list[str] = []
     coverage: dict[str, Any] = {}
+    # 无试卷类章节时为 None（讲解型教程不参与卷面校验）
+    exam_check: Optional[ExamCheckReport] = None
+    # L1 盲解核验；未启用 / 演示模式 / 无试卷时为 None
+    exam_verify: Optional[ExamVerifyReport] = None
+    # 规范专项校验（阅读摘录溯源 / 实践步骤与代码）；不适用时为 None
+    spec_check: Optional[SpecCheckReport] = None
 
 
 class TutorialVersionOut(BaseModel):
@@ -949,3 +1052,180 @@ class DeliveryUpdateIn(BaseModel):
     status: Literal["delivered", "failed"]
     path: str = ""
     version: Optional[int] = None
+
+
+# ---------------------------------------------------------------- proposition（命题知识库 / 变式引擎）
+
+
+class ItemModelOut(BaseModel):
+    """母题（AIG item model）：radicals 决定难度与认知要求，incidentals 是可换的表面特征。"""
+
+    id: str
+    domain_key: str = ""
+    title: str = ""
+    chapter: str = ""
+    knowledge_points: list[str] = []
+    radicals: dict[str, Any] = {}
+    incidentals: dict[str, Any] = {}
+    solution_template: str = ""
+    answer_expr: str = ""
+    # 求解约定随 radicals 一起存（models.py 无独立列）：未知量符号名与多解选取规则
+    unknown: str = ""
+    answer_select: str = ""
+    difficulty: str = ""
+    provenance: str = "manual"   # manual / ai_constructed / material
+    status: str = "draft"         # draft / confirmed / archived
+    source_ref: str = ""
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    instances: list["ItemInstanceOut"] = []
+
+
+class ItemInstanceOut(BaseModel):
+    """同构题实例：母题代入一组具体 incidentals 后的一道题。
+
+    变式 ↔ 母题的对应关系**只由 item_model_id 表达**，绝不写进 stem：
+    变式规范的 forbidden_rules 明令禁止标注原题编号 / 溯源括注。
+    """
+
+    id: str
+    item_model_id: str = ""
+    incidental_values: dict[str, Any] = {}
+    stem: str = ""
+    answer: str = ""
+    variation_type: str = "isomorph"   # isomorph / procedural / conceptual
+    verified_by: str = "none"          # tool_symbolic / tool_executable / model / human / none
+    verified_at: str = ""
+    source_tutorial_id: str = ""
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    # 仅本次响应附带的可读信息（不入库）
+    answer_latex: str = ""
+    numeric: str = ""
+    needs_independent_verification: bool = False
+
+
+class DesignPrincipleOut(BaseModel):
+    """命题规律。三态语义与 KnowledgeProposal / ConceptRelation 一致：
+    只有 confirmed 才会被注入提示词，proposed 绝不注入。"""
+
+    id: str
+    domain_key: str = ""
+    domain_name: str = ""
+    statement: str = ""
+    principle_type: str = "discipline"   # general / discipline
+    scope_knowledge_points: list[str] = []
+    positive_refs: list[Any] = []
+    negative_refs: list[Any] = []
+    evidence_count: int = 0
+    status: str = "proposed"             # proposed / confirmed / rejected
+    rationale: str = ""
+    reviewed_at: str = ""
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class QualityRecordOut(BaseModel):
+    """质量记录：L0（exam_check）/ L1（exam_verify）发现的缺陷回流，是命题规律的冷启动素材。"""
+
+    id: str
+    domain_key: str = ""
+    goal_id: str = ""
+    tutorial_id: str = ""
+    version: int = 0
+    source: str = ""     # l0_account / l0_cross / l1_defect / l1_fixed / tool_refuted / tool_undecidable
+    code: str = ""       # E017 / E018 / DEFECT
+    paper_title: str = ""
+    question_number: int = 0
+    motif: str = ""
+    detail: str = ""
+    severity: str = ""   # blocking / advisory
+    question_text: str = ""
+    created_at: Optional[str] = None
+
+
+class ItemModelPatch(BaseModel):
+    """补录母题的参数化解法与求解约定（让 isomorph 变式能机械求答案的唯一途径）。
+
+    ``solution_template`` / ``answer_expr`` 会在入库前用 sympy 在受控环境里试解析，
+    不合法直接 422——不把不可求解的模板存进去、等到生成变式时才失败。
+
+    ``answer_select`` 只在方程有多个解时有意义：多解时**必须**显式声明选取规则，
+    否则求解器拒绝任选其一（那正是「同题多解」的病根）。
+    """
+
+    title: Optional[str] = Field(default=None, max_length=200)
+    chapter: Optional[str] = Field(default=None, max_length=200)
+    knowledge_points: Optional[list[str]] = None
+    incidentals: Optional[dict[str, Any]] = None
+    solution_template: Optional[str] = Field(default=None, max_length=512)
+    answer_expr: Optional[str] = Field(default=None, max_length=512)
+    unknown: Optional[str] = Field(default=None, max_length=32)
+    answer_select: Optional[Literal["", "positive", "negative", "nonnegative", "max", "min"]] = None
+    difficulty: Optional[str] = Field(default=None, max_length=20)
+    provenance: Optional[Literal["manual", "ai_constructed", "material"]] = None
+    status: Optional[Literal["draft", "confirmed", "archived"]] = None
+    source_ref: Optional[str] = Field(default=None, max_length=2000)
+
+
+class VariationCreate(BaseModel):
+    """生成一个变式实例。
+
+    isomorph 的答案由母题的 solution_template 代入 incidental_values **机械求解**；
+    求不出来直接 409，不会产出一个未经验证的答案。
+    """
+
+    incidental_values: dict[str, Any] = {}
+    variation_type: Literal["isomorph", "procedural", "conceptual"] = "isomorph"
+
+
+class PrincipleReview(BaseModel):
+    action: Literal["confirm", "reject"]
+    rationale: str = ""
+
+
+class DistillRequest(BaseModel):
+    """规则聚类（确定性、零 token）：同一缺陷在某学科出现 ≥ threshold 次 → 候选规律。"""
+
+    domain_key: str = "general"
+    threshold: int = 3
+
+
+class ExtractItemModelsRequest(BaseModel):
+    """从一份卷子 Markdown 抽母题；radicals 复用 exam_check 的定义式指纹。"""
+
+    domain_key: str = "general"
+    markdown: str = Field(min_length=1, max_length=400000)
+    chapter: str = ""
+
+
+class ItemModelListOut(BaseModel):
+    total: int = 0
+    items: list[ItemModelOut] = []
+    conflicts: int = 0     # 存在「同母题不同答案」证据的母题数
+    solvable: int = 0      # 已具备可机械求解模板的母题数
+
+
+class PrincipleListOut(BaseModel):
+    total: int = 0
+    items: list[DesignPrincipleOut] = []
+    confirmed: int = 0
+    proposed: int = 0
+    rejected: int = 0
+
+
+class QualityRecordListOut(BaseModel):
+    total: int = 0
+    items: list[QualityRecordOut] = []
+    by_code: dict[str, int] = {}
+
+
+class InjectionPreviewOut(BaseModel):
+    """命题规律注入预览：哪些会被注入、哪些被预算裁掉，都要看得见。"""
+
+    text: str = ""
+    chars: int = 0
+    budget_chars: int = 0
+    injected: int = 0
+    confirmed_total: int = 0
+    dropped: int = 0

@@ -1,4 +1,4 @@
-# AI Edu 一键启动：后端（8000）+ 前端（3001）
+﻿# AI Edu 一键启动：后端（8000）+ 前端（3001）
 # 用法：
 #   本机使用  —— 双击仓库根目录的「启动 AI Edu.cmd」
 #   手机使用  —— PowerShell 执行 scripts\start-dev.ps1 -Mobile

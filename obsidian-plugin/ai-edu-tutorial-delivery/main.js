@@ -246,16 +246,19 @@ async function buildMultipartBody(file, kind) {
     .toString(36)
     .slice(2, 10)}`;
   const encoder = new TextEncoder();
-  const asciiName = String(file.name || "upload")
-    .replace(/[^\x20-\x7E]/g, "_")
-    .replace(/["\\]/g, "_");
+  // filename 只转义会破坏 Content-Disposition 结构的三个字符（双引号 / 反斜杠 / CR / LF），
+  // **保留原始 UTF-8 中文**。此前把非 ASCII 一律替换成下划线（"第一篇 x.md" -> "___ ___.md"），
+  // 而 Starlette 读的是这个基础 filename、不是 RFC 2231 的 filename*，于是所有中文名材料
+  // 落库后都变成下划线串，后端无法从文件名识别「第N章/篇」，阅读规范的分篇大纲随之失效。
+  const rawName = String(file.name || "upload");
+  const safeName = rawName.replace(/["\\\r\n]/g, "_");
   const contentType = /^[!-~]+$/.test(file.type || "") ? file.type : "application/octet-stream";
   const head = encoder.encode(
     `--${boundary}\r\n` +
       `Content-Disposition: form-data; name="kind"\r\n\r\n${kind}\r\n` +
       `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="file"; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(
-        file.name
+      `Content-Disposition: form-data; name="file"; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(
+        rawName
       )}\r\n` +
       `Content-Type: ${contentType}\r\n\r\n`
   );
@@ -295,6 +298,36 @@ function requestErrorMessage(data, response) {
   if (detail && detail.message) return detail.message;
   if (data && data.message) return data.message;
   return `AI Edu API HTTP ${response.status}`;
+}
+
+/**
+ * 从 requestUrl 抛出的异常里提取**可读原因**。
+ *
+ * Obsidian 的 requestUrl 对非 2xx 直接抛通用 Error（"Request failed, status 502"），
+ * 但异常对象上带着 status / json / text（响应体）。后端的真实原因在 detail.message 里
+ * （例如「模型请求被拒绝（HTTP 402）：Insufficient Balance…」）——不挖出来，
+ * 用户就只剩一句通用文案，完全不知道该查余额、查 Key 还是查网络。
+ * 真实事故：DeepSeek 402 欠费 → 后端 502 → 插件只显示 "Request failed, status 502"。
+ */
+function requestFailureMessage(error) {
+  if (!error) return "未知错误";
+  // 自己构造的业务错误（GenerationError 等）原样使用
+  if (error instanceof GenerationError) return error.message;
+  let data = null;
+  try {
+    // json 是 getter：响应体不是 JSON 时会抛，必须兜住
+    data = error.json;
+  } catch (_) {
+    data = null;
+  }
+  const detail = data && data.detail;
+  if (typeof detail === "string" && detail.trim()) return detail.trim();
+  if (detail && typeof detail.message === "string" && detail.message.trim()) return detail.message.trim();
+  if (data && typeof data.message === "string" && data.message.trim()) return data.message.trim();
+  if (typeof error.text === "string" && error.text.trim() && error.text.trim().length <= 300) {
+    return error.text.trim();
+  }
+  return error.message ? String(error.message) : String(error);
 }
 
 function fileNameFromResponse(response, fallback) {
@@ -716,10 +749,7 @@ class AIEduModal extends Modal {
         );
       }
     } catch (error) {
-      this.apiProbe = {
-        ok: false,
-        reason: error && error.message ? error.message : String(error),
-      };
+      this.apiProbe = { ok: false, reason: requestFailureMessage(error) };
       if (!this.busy && this.statusEl) {
         this.statusEl.setText(this.probeFailureText(this.apiProbe.reason));
       }
@@ -957,7 +987,7 @@ class AIEduModal extends Modal {
         }
         this.patchPendingMaterial(row.key, { status: "done", error: "" });
       } catch (error) {
-        const message = error && error.message ? error.message : String(error);
+        const message = requestFailureMessage(error);
         this.patchPendingMaterial(row.key, { status: "error", error: message });
         failed.push(`${row.file.name}：${message}`);
       }
@@ -1110,7 +1140,7 @@ class AIEduModal extends Modal {
       this.setBusy(false);
       const phase = error instanceof GenerationError ? error.phase : "generation";
       const prefix = phase === "delivery" ? "交付失败" : "生成失败";
-      this.statusEl.setText(`${prefix}：${error.message}`);
+      this.statusEl.setText(`${prefix}：${requestFailureMessage(error)}`);
       if (phase === "delivery" && this.markdown && this.tutorial) {
         this.showRetryDelivery();
       }
@@ -1153,7 +1183,7 @@ class AIEduModal extends Modal {
       if (!this.closed) this.close();
       new Notice(`已创建学习目标：${goal.title}`, 5000);
     } catch (error) {
-      this.statusEl.setText(`创建失败：${error.message}`);
+      this.statusEl.setText(`创建失败：${requestFailureMessage(error)}`);
       this.setBusy(false);
     }
   }
@@ -1250,7 +1280,7 @@ class AIEduModal extends Modal {
       this.setBusy(false);
       const phase = error instanceof GenerationError ? error.phase : "generation";
       const prefix = phase === "delivery" ? "交付失败" : "生成失败";
-      this.statusEl.setText(`${prefix}：${error.message}`);
+      this.statusEl.setText(`${prefix}：${requestFailureMessage(error)}`);
       if (phase === "delivery" && this.markdown && this.tutorial) {
         this.showRetryDelivery();
       }
@@ -1326,7 +1356,7 @@ class AIEduModal extends Modal {
       await this.loadAndDeliver();
     } catch (error) {
       this.setBusy(false);
-      this.statusEl.setText(`续跑失败：${error.message}`);
+      this.statusEl.setText(`续跑失败：${requestFailureMessage(error)}`);
     }
   }
 
@@ -1345,7 +1375,7 @@ class AIEduModal extends Modal {
       await this.resumePaused("proceed");
     } catch (error) {
       this.setBusy(false);
-      this.statusEl.setText(`修改计划失败：${error.message}`);
+      this.statusEl.setText(`修改计划失败：${requestFailureMessage(error)}`);
     }
   }
 
@@ -1566,7 +1596,7 @@ class AIEduModal extends Modal {
         await this.loadAndDeliver();
       } catch (error) {
         retry.disabled = false;
-        this.statusEl.setText(`交付失败：${error.message}`);
+        this.statusEl.setText(`交付失败：${requestFailureMessage(error)}`);
       }
     });
   }

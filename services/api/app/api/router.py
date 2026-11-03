@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from . import chat, format_specs, goals, health, io, knowledge, materials, practice, training, tutorials, model_settings
+from . import chat, format_specs, goals, health, io, knowledge, materials, practice, proposition, training, tutorials, model_settings
 
 api_router = APIRouter(prefix="/api")
 
@@ -15,6 +15,7 @@ api_router.include_router(materials.router)
 api_router.include_router(tutorials.router)
 api_router.include_router(practice.router)
 api_router.include_router(knowledge.router)
+api_router.include_router(proposition.router)
 api_router.include_router(chat.router)
 api_router.include_router(training.router)
 api_router.include_router(io.router)

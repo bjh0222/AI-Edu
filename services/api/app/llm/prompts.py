@@ -609,6 +609,32 @@ def _tutorial_file_name(goal) -> str:
     return f"{safe_obsidian_filename(goal.title)}-教程"
 
 
+def _proposition_block(hints: str) -> str:
+    """命题知识库注入块：已确认（confirmed）的命题规律，作为**软建议**注入。
+
+    三条硬约束（每条都来自架构调研，改前先读）：
+
+    1. **只注入 confirmed 态**：由 proposition.principles_for_injection 保证（proposed
+       态未经验证，注入它等于让没人核实过的经验影响交付）。本函数拿到的已是筛过的文本。
+    2. **位置在末尾区**：调用方必须把本块放在 materials 之后（≥93% 处）。CRE
+       （arXiv 2605.23170）实测中部区域 76% 的错误与填充文本匹配；命题规律若落进
+       材料海洋会被淹没。section / extra_exercises 的拼装已把它放在 _format_spec_block 之后。
+    3. **软建议、可被预算裁剪**：命题规律是经验不是铁律，走 1200 字符预算
+       （见 principles_for_injection），不挤占格式规范的结构权威。措辞用「优先/建议」，
+       不用「必须」——避免与 format_spec 的结构维度权威冲突（PRIME：冲突类型比模型规模更显著）。
+
+    hints 为空串时返回空串：冷启动（无任何 confirmed 规律）时本块完全不出现，
+    对既有提示词零影响。
+    """
+    text = str(hints or "").strip()
+    if not text:
+        return ""
+    return (
+        "\n本次命题可借鉴的已核实经验（软建议，与上面格式规范冲突时以规范为准）：\n"
+        f"{text}\n"
+    )
+
+
 def _retry_violation_block(retry_violations: list[str] | None) -> str:
     """上一稿违反硬性约束时的定向修正指令；只改被违反的部分，不重写整章。"""
     texts = [str(item).strip() for item in (retry_violations or []) if str(item).strip()]
@@ -666,8 +692,8 @@ _TEACHING_TASK = (
 
 
 _CHAPTER_DELIVERABLE_RE = re.compile(
-    r"^\s*(第\s*[0-9一二三四五六七八九十]+\s*章)"        # 章号
-    r"\s*([^（(]*?)"                                        # 章名
+    r"^\s*(第\s*[0-9一二三四五六七八九十]+\s*[章篇])"      # 章号 / 篇号
+    r"\s*([^（(]*?)"                                        # 章名 / 篇名
     r"\s*(?:单元检测卷|单元测验卷|单元试卷|检测卷|测验卷|测试卷|自测卷|模拟卷|练习卷|试卷)?$"
 )
 
@@ -782,7 +808,7 @@ def _deliverable_task(deliverable: str) -> str:
 def section(
     goal, discipline, outline_item, criteria_list, prior_titles, materials_text: str = "",
     companion_names: list[str] | None = None, retry_violations: list[str] | None = None,
-    truncated: bool = False,
+    truncated: bool = False, proposition_hints: str = "",
 ) -> tuple[str, str]:
     plan = outline_item.get("_teaching_plan") if isinstance(outline_item, dict) else None
     if not plan:
@@ -815,6 +841,7 @@ def section(
             f"{_materials_section(materials_text)}\n"
             f"{_format_spec_block('section', goal, section_deliverable)}"
             f"{_teaching_charter('section', plan, goal)}"
+            f"{_proposition_block(proposition_hints)}"
             f"{_retry_violation_block(retry_violations)}"
             f"{_truncation_block(truncated)}"
             "\n任务：直接生成当前交付物的成品，不得套用旧教程模板。\n"
@@ -842,6 +869,7 @@ def section(
         f"{_materials_section(materials_text)}\n"
         f"{_format_spec_block('section', goal)}"
         f"{_teaching_charter('section', plan, goal)}\n"
+        f"{_proposition_block(proposition_hints)}"
         f"{_teaching_plan_section(plan)}\n"
         f"{_companion_names_section(companion_names)}"
         f"{_retry_violation_block(retry_violations)}"
@@ -914,7 +942,7 @@ def cheatsheet(
 def extra_exercises(
     goal, discipline, outline_items, materials_text: str = "",
     retry_violations: list[str] | None = None,
-    exercise_spec: dict | None = None,
+    exercise_spec: dict | None = None, proposition_hints: str = "",
 ) -> tuple[str, str]:
     """额外练习配套文件：排版与结构完全交给「练习生成规范」，按教程大纲分节。
 
@@ -946,6 +974,7 @@ def extra_exercises(
         f"{_capability(goal)}\n"
         f"{_materials_section(materials_text)}\n"
         f"{spec_block}"
+        f"{_proposition_block(proposition_hints)}"
         f"{_retry_violation_block(retry_violations)}\n"
         f"统一文件名（反向双链只能使用）：[[{_tutorial_file_name(goal)}]]\n"
         f"{WIKILINK_RULE}"
@@ -1071,6 +1100,101 @@ def chat(goal, question, context) -> tuple[str, str]:
         "输出 JSON：{\"answer\": str}。"
     )
     return SYSTEM, user
+
+
+# ---------------------------------------------------------------- 试卷盲解核验
+#
+# 为什么需要这一步（实测数据，不是假设）：对最新生成的 5 套微积分卷客观验算 67 题，
+# 发现 21 处实质性错误（31%），且分布极不均匀——第四套 0 错，第三套 13 题错 10 题。
+# 同一个模型、同一份提示词、同一次生成，说明模型**有能力**出对题，缺的是独立复核。
+# 典型错误：y''(0) 算成 -9（真值 -5）、比值 4/(2+a_{n+1})→1 误算为 2、
+# 一道选择题真值 2√2-2≈0.828 而四个选项是 0 / 1/2 / 1 / 2（**无解**）。
+#
+# L0（exam_check）管账目：题号、分值、答案集合一致性——纯代码、零 token。
+# 但账目全对不代表答案对。数学正确性只能靠「独立再解一遍」，这是 L1。
+
+VERIFY_SYSTEM = (
+    "你是严格的试题审校者，具备该学科的完整解题能力。你的任务不是评价题目写得好不好，"
+    "而是**自己独立把每道题解出来**，再判断题目本身是否成立。\n"
+    "铁律：\n"
+    "1. 只输出 JSON；不输出 JSON 以外的任何文本。\n"
+    "2. 你会看到题干与选项，但**看不到参考答案**。必须先独立求解，再作答；"
+    "严禁猜测命题人意图或按「常见答案」蒙。\n"
+    "3. 解不出来就说解不出来（solved=false），不要编造过程。confidence 必须如实反映把握：\n"
+    "   - high：有完整严格推导，且对每一步都有把握；\n"
+    "   - medium：思路明确但某步未完全验算；\n"
+    "   - low：只能给出倾向性判断。\n"
+    "4. 选项题必须先算出结果，再回头看哪个选项与之相符；若**没有任何选项**与你的结果相符，"
+    "option_match 必须留空并在 question_defect 里写明「选项不完备」——这是最严重的题目缺陷，"
+    "绝不能挑一个最接近的凑数。\n"
+    "5. 发现题目本身有缺陷（条件不足、无法确定唯一答案、表述歧义、依赖超纲知识、"
+    "图形缺失导致不可解）时，如实写进 question_defect，不要替题目打圆场。\n"
+    "6. 数学表达式用 LaTeX；my_answer_text 给最简规范形式（如 e^{-1/2}、\\dfrac{1}{3}）。"
+)
+
+
+def verify_paper_questions(goal, discipline, paper_title: str, questions: list[dict]) -> tuple[str, str]:
+    """盲解核验提示词：逐题独立求解 + 判定题目是否成立。
+
+    ``questions`` 由 exam_check.build_verification_payload 构造，**不含参考答案**——
+    盲解的前提就是审校者看不到答案，否则模型会倾向于认同既有答案（确认偏误），
+    核验就失去意义。
+    """
+    user = (
+        f"学科：{discipline.display_name}\n"
+        f"学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
+        f"本次待核验的卷：{paper_title}\n\n"
+        f"题目（共 {len(questions)} 题，均不含参考答案）：\n"
+        f"{json.dumps(questions, ensure_ascii=False, indent=1)}\n\n"
+        "对每一题独立完成：\n"
+        "- 先自己求解，写出关键步骤与判定依据（reasoning 不超过 3 行，只要判分必需的转折）；\n"
+        "- 选择题：给出你算出的结果（my_answer_text），并指出哪个选项与之相符（option_match）；"
+        "没有相符选项就留空；\n"
+        "- 判断题：my_answer 用 \"T\"（正确）或 \"F\"（错误）；\n"
+        "- 填空题：my_answer_text 给最简规范形式；\n"
+        "- 解答/证明/综合题：my_answer_text 给最终结论（不是完整证明），"
+        "并在 reasoning 里写出关键步骤；\n"
+        "- 如实标注 confidence 与 solved；题目有缺陷就写 question_defect。\n\n"
+        "输出 JSON：{\"results\": [{\"number\": int, \"solved\": bool, \"my_answer\": str, "
+        "\"my_answer_text\": str, \"option_match\": str, \"confidence\": \"high|medium|low\", "
+        "\"question_defect\": str, \"reasoning\": str}]}\n"
+        "results 必须覆盖上面每一题的 number，不缺题、不串号、不增加题目。"
+    )
+    return VERIFY_SYSTEM, user
+
+
+def verify_answer_conflict(
+    goal, discipline, paper_title: str, conflicts: list[dict],
+) -> tuple[str, str]:
+    """答案冲突仲裁：盲解结果与卷面答案不一致时，判定谁对并给出正确答案。
+
+    为什么需要二次仲裁而不是直接采信盲解：盲解模型自己也会算错（实测第三套
+    y''(0) 就是算错的）。直接按盲解改答案，等于用一次未经验证的计算覆盖另一次
+    未经验证的计算。所以冲突必须**再解一遍**，且明确要求给出判定依据。
+
+    只有仲裁结果为 high 置信、且给出确定答案时，才允许自动改卷面答案；
+    否则只标记，交人工决定。用户要求「自动改，但只改一次」——这一轮就是唯一一轮。
+    """
+    user = (
+        f"学科：{discipline.display_name}\n"
+        f"卷名：{paper_title}\n\n"
+        f"以下题目的卷面答案与一次独立盲解结果不一致，需要你仲裁谁对：\n"
+        f"{json.dumps(conflicts, ensure_ascii=False, indent=1)}\n\n"
+        "对每一条冲突独立完成：\n"
+        "- 不要默认卷面答案对，也不要默认盲解对；自己重新完整求解一遍；\n"
+        "- 给出 correct_answer（选择题给选项字母；判断题给 T/F；其余给最简规范形式）；\n"
+        "- verdict 只能是 one of：paper_wrong（卷面答案错）/ blind_wrong（盲解错，卷面对）/"
+        "both_wrong（两个都错，以你的 correct_answer 为准）/ undecidable（你无法确定）；\n"
+        "- confidence 如实标注；把握不足时必须给 low 或 undecidable，不要硬判；\n"
+        "- reasoning 写清判定依据（哪一步分出对错），不超过 4 行；\n"
+        "- 若题目本身不成立（选项不完备、条件不足、无唯一答案），verdict 用 question_broken，"
+        "并在 question_defect 说明。\n\n"
+        "输出 JSON：{\"verdicts\": [{\"number\": int, \"verdict\": str, \"correct_answer\": str, "
+        "\"correct_answer_text\": str, \"confidence\": \"high|medium|low\", "
+        "\"question_defect\": str, \"reasoning\": str}]}\n"
+        "verdicts 必须覆盖上面每一条冲突的 number。"
+    )
+    return VERIFY_SYSTEM, user
 
 
 # ---------------------------------------------------------------- 画像建议

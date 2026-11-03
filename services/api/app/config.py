@@ -68,8 +68,10 @@ class Settings:
         # 删除学习目标前的 JSON 备份目录（不可逆操作的兜底）
         self.backup_dir = _resolve_path(os.getenv("BACKUP_DIR", "data/backups").strip() or "data/backups")
         self.material_max_bytes = int(os.getenv("MATERIAL_MAX_BYTES", str(20 * 1024 * 1024)) or 20 * 1024 * 1024)
-        # 材料正文入库上限（字符）：默认 20 万字，覆盖整本书的量级；仅防极端文件撑爆数据库
-        self.material_max_text_chars = int(os.getenv("MATERIAL_MAX_TEXT_CHARS", "200000") or 200000)
+        # 材料正文入库上限（字符）：默认 0 = 不截断，原文逐字入库（磁盘与 SQLite 都承受得住
+        # 整本书量级；用户明确要求「不要限制注入字数」）。设正数才启用截断保险丝，
+        # 截断会显式标记 extract_status='truncated' 并在注入时告知后段不可见。
+        self.material_max_text_chars = int(os.getenv("MATERIAL_MAX_TEXT_CHARS", "0") or 0)
         # 注入 prompt 的材料正文上限（字符）：0 表示不额外截断，文本材料按原始全文注入。
         # 这不同于上传时的入库保险丝 material_max_text_chars；只有显式设置正数时才启用
         # prompt 侧预算，并且 materials_context 会在正文中明确标注截断状态。
@@ -84,6 +86,11 @@ class Settings:
             "http://127.0.0.1:3000,http://localhost:3000,http://127.0.0.1:3001,http://localhost:3001,app://obsidian.md,capacitor://localhost",
         ).strip()
         self.demo_mode = os.getenv("DEMO_MODE", "1").strip() not in ("0", "false", "False")
+        # L1 试卷盲解核验开关：对每份卷额外发起 1~2 次模型往返（盲解 + 冲突仲裁），
+        # 用于揪出「账目全对但答案算错」的题目（实测最新一份卷 67 题里 21 处实质错误）。
+        # 默认开启；关掉可省 token，代价是答案正确性只靠 L0 账目校验、不再复核内容。
+        # 演示模式（未配置模型）下自动跳过，与此开关无关。
+        self.exam_verify_enabled = os.getenv("AIEDU_EXAM_VERIFY", "1").strip() not in ("0", "false", "False")
 
     @property
     def llm_configured(self) -> bool:

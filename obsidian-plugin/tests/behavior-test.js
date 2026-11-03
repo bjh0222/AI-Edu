@@ -86,6 +86,7 @@ fs.writeFileSync(
     "module.exports.__specGroupLabel = specGroupLabel;",
     "module.exports.__specPreviewMarkdown = specPreviewMarkdown;",
     "module.exports.__loopbackHostWarning = loopbackHostWarning;",
+    "module.exports.__requestFailureMessage = requestFailureMessage;",
     "module.exports.__MATERIAL_FALLBACK_LIMITS = MATERIAL_FALLBACK_LIMITS;",
     "module.exports.__buildMultipartBody = buildMultipartBody;",
   ].join("\n"),
@@ -98,6 +99,7 @@ const groupSpecs = pluginModule.__groupSpecs;
 const specGroupLabel = pluginModule.__specGroupLabel;
 const specPreviewMarkdown = pluginModule.__specPreviewMarkdown;
 const loopbackHostWarning = pluginModule.__loopbackHostWarning;
+const requestFailureMessage = pluginModule.__requestFailureMessage;
 const MATERIAL_FALLBACK_LIMITS = pluginModule.__MATERIAL_FALLBACK_LIMITS;
 const buildMultipartBody = pluginModule.__buildMultipartBody;
 assert(AIEduModal, "应能拿到 AIEduModal");
@@ -581,6 +583,35 @@ function makeModal() {
     `分组结果错误：${JSON.stringify(grouped)}`
   );
   assert.deepStrictEqual(groupSpecs([]), [], "空列表不应产出空分组");
+
+  // 12. 错误展示：requestUrl 抛通用错时必须挖出后端 detail.message
+  // 真实事故：DeepSeek 402 欠费 → 后端 502 → 插件曾只显示 "Request failed, status 502"
+  const err502 = new Error("Request failed, status 502");
+  err502.status = 502;
+  err502.json = {
+    code: "llm_error",
+    message: "模型请求被拒绝（HTTP 402）：Insufficient Balance (request_id: x)",
+  };
+  assert(
+    requestFailureMessage(err502).includes("Insufficient Balance"),
+    `502 应显示后端真实原因：${requestFailureMessage(err502)}`
+  );
+  const errDetailObj = new Error("Request failed, status 500");
+  errDetailObj.json = { detail: { code: "internal_error", message: "服务内部错误：ValueError: boom" } };
+  assert(
+    requestFailureMessage(errDetailObj).includes("ValueError: boom"),
+    "detail.message 应被提取"
+  );
+  const errDetailStr = new Error("Request failed, status 400");
+  errDetailStr.json = { detail: "标题不能为空" };
+  assert.strictEqual(requestFailureMessage(errDetailStr), "标题不能为空", "字符串 detail 应原样使用");
+  // json getter 抛错（响应体不是 JSON）时回落到 message
+  const errBadJson = new Error("Request failed, status 502");
+  Object.defineProperty(errBadJson, "json", { get() { throw new Error("not json"); } });
+  assert.strictEqual(requestFailureMessage(errBadJson), "Request failed, status 502", "json 抛错应回落");
+  // 无响应体可挖时回落到通用 message（至少保留状态码）
+  const plain = new Error("Request failed, status 503");
+  assert.strictEqual(requestFailureMessage(plain), "Request failed, status 503", "无响应体应回落 message");
 
   // 8. 材料预校验与 multipart 构造
   assert.strictEqual(validateMaterialFile(makeFile("a.md", 10), MATERIAL_FALLBACK_LIMITS), "", "md 应通过");
