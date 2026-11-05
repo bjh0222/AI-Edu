@@ -11,6 +11,7 @@ const items = [
   { href: "/goals", label: "学习目标", icon: "◎" },
   { href: "/knowledge", label: "知识网络", icon: "◉" },
   { href: "/training", label: "测试数据", icon: "◈" },
+  { href: "/proposition", label: "命题知识库", icon: "◆" },
   { href: "/settings", label: "偏好设置", icon: "⚙" },
 ];
 

@@ -9,6 +9,8 @@ from ..db import get_db
 from ..llm.provider import LLMError, OpenAICompatibleProvider
 from ..llm.service import AIService
 from ..models import LearningGoal, TrainingRecord
+from ..models import TutorialVersion
+from ..services.evaluation import EvaluationError, evaluate_version
 from ..services.utils import jload
 
 
@@ -154,3 +156,32 @@ def dismiss_user_profile_suggestion(db: Session = Depends(get_db)):
     completed_count = db.query(LearningGoal).filter(LearningGoal.completed.is_(True)).count()
     store.mark_profile_suggestion_seen(completed_count)
     return {"eligible": False, "completed_count": completed_count, "suggestion": None}
+
+
+class IndependentEvalPayload(BaseModel):
+    enabled: bool
+    api_key: str | None = Field(default=None, max_length=8192)
+
+
+@router.get("/evaluation")
+def get_evaluation_settings():
+    return store.public_config()["independent_eval"]
+
+
+@router.put("/evaluation")
+def update_evaluation_settings(payload: IndependentEvalPayload):
+    return store.save_independent_eval(payload.enabled, payload.api_key)["independent_eval"]
+
+
+@router.post("/evaluate/{version_id}")
+def run_independent_evaluation(version_id: str, db: Session = Depends(get_db)):
+    if not db.get(TutorialVersion, version_id):
+        raise HTTPException(404, "教程版本不存在")
+    try:
+        return evaluate_version(db, version_id)
+    except EvaluationError as exc:
+        message = str(exc)
+        raise HTTPException(
+            502,
+            {"code": "independent_eval_failed", "message": message},
+        ) from exc

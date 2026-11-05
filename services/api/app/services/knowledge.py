@@ -28,6 +28,7 @@ from ..models import (
     Tutorial,
     TutorialVersion,
 )
+from ..llm.prompts import dynamic_concept_limit
 from .utils import jdump, jload
 
 # 关系类型白名单与展示语义（方向：from ——类型→ to）
@@ -412,6 +413,33 @@ def upsert_relation(
 
 # ---------------------------------------------------------------- extraction
 
+# 每节注入知识提取的正文预算；教程很长时仍让每个章节保留可用证据。
+_SECTION_BODY_CHARS = 1500
+
+
+def _section_body_text(section: dict, limit: int = _SECTION_BODY_CHARS) -> str:
+    """从 v2 content[] 取正文块；v1 的 explanation/steps 仍保持兼容。"""
+    chunks: list[str] = []
+    for block in section.get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        body = str(block.get("body", "") or "").strip()
+        if not body:
+            continue
+        title = str(block.get("title", "") or "").strip()
+        chunks.append(f"{title}\n{body}" if title else body)
+    for block in section.get("explanation", []) or []:
+        if not isinstance(block, dict):
+            continue
+        body = str(block.get("body", "") or "").strip()
+        if body:
+            chunks.append(str(block.get("heading", "") or "") + "\n" + body)
+    text = "\n\n".join(part.strip() for part in chunks if part.strip())
+    if len(text) > limit:
+        text = text[:limit] + "\n…（正文已截断）"
+    return text
+
+
 def _tutorial_context(tutorial: Tutorial, version: TutorialVersion | None) -> dict:
     content = jload(version.content_json, {}) if version else {}
     outline = content.get("outline", [])
@@ -425,6 +453,7 @@ def _tutorial_context(tutorial: Tutorial, version: TutorialVersion | None) -> di
                 "prerequisites": [str(p) for p in s.get("prerequisites", [])],
                 "explanation_headings": [b.get("heading", "") for b in s.get("explanation", [])][:6],
                 "steps": [st.get("text", "") for st in s.get("steps", [])][:5],
+                "body": _section_body_text(s),
             }
         )
     return {
@@ -453,6 +482,7 @@ def _stable_context(context: dict) -> dict:
                 "prerequisites": s.get("prerequisites", []),
                 "explanation_headings": s.get("explanation_headings", []),
                 "steps": s.get("steps", []),
+                "body": s.get("body", ""),
             }
             for s in context.get("sections", [])
         ],
@@ -543,7 +573,9 @@ def extract_from_tutorial(
     extracted_titles: set[str] = set()
     title_to_section: dict[str, str] = {}
     added_concepts = 0
-    for raw in data.get("concepts", [])[:30]:
+    for raw in data.get("concepts", [])[:dynamic_concept_limit(
+        len(context.get("sections") or context.get("outline") or [])
+    )]:
         title = str(raw.get("title", "")).strip()
         if not title:
             continue
@@ -597,8 +629,8 @@ def extract_from_tutorial(
         if relation_type not in RELATION_TYPES:
             relation_type = "related"
         rationale = str(raw.get("rationale", "") or "")
-        # 分级策略：教程明确解释（带章节锚点）自动确认；仅推测保持待核实
-        confirmed = bool(section_id)
+        # 三条件分级：正文/结构锚点 + 可核依据 + 高置信；否则保持待核实
+        confirmed = bool(section_id) and len(rationale.strip()) >= 10 and float(raw.get("confidence", 0.5) or 0.5) >= 0.7
         relation = upsert_relation(
             db,
             source_concept.id,

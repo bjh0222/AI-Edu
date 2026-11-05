@@ -7,6 +7,7 @@ import { Button, Card, inputCls } from "@/components/ui";
 import AppearanceSettings from "@/components/AppearanceSettings";
 import ModelSettings from "@/components/ModelSettings";
 import FormatSpecs from "@/components/FormatSpecs";
+import IndependentEvalSettings from "@/components/IndependentEvalSettings";
 
 function errMsg(e: unknown): string {
   if (e instanceof ApiError) return e.message;
@@ -101,6 +102,7 @@ export default function SettingsPage() {
         <AppearanceSettings />
         <div className="lg:row-span-2"><ModelSettings /></div>
         <div className="lg:col-span-2"><FormatSpecs /></div>
+        <IndependentEvalSettings />
 
         <Card title="数据备份" desc="导出 / 导入版本化 JSON；导入前自动备份当前数据">
           <div className="grid gap-3 text-[12px]">

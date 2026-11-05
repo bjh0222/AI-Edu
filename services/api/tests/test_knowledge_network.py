@@ -83,8 +83,8 @@ def test_tutorial_generation_writes_knowledge(client):
     assert anchored, "概念应携带教程章节锚点"
     rel_with_anchor = [r for r in kb["relations"] if r["source_refs"]]
     assert rel_with_anchor, "教程顺序推导的先修关系应带章节依据"
-    confirmed = [r for r in rel_with_anchor if r["status"] == "confirmed"]
-    assert confirmed, "有章节锚点的关系应自动确认"
+    proposed = [r for r in rel_with_anchor if r["status"] == "proposed"]
+    assert proposed, "demo 推导关系置信度 0.6，未达三条件自动确认阈值应保持待核实"
 
     job_stage = client.get("/api/tutorials/" + tutorial_id).json()
     assert job_stage["id"] == tutorial_id

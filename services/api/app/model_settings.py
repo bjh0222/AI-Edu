@@ -62,6 +62,9 @@ def read_config() -> dict:
         if path.exists():
             config = json.loads(path.read_text(encoding="utf-8"))
             config.setdefault("user_profile", "")
+            eval_cfg = config.setdefault("independent_eval", {})
+            eval_cfg.setdefault("enabled", settings.independent_eval_enabled)
+            eval_cfg.setdefault("api_key", "")
             return config
         profiles = []
         if settings.llm_configured:
@@ -72,6 +75,10 @@ def read_config() -> dict:
             "active_id": "environment" if profiles else None,
             "profiles": profiles,
             "user_profile": "",
+            "independent_eval": {
+                "enabled": settings.independent_eval_enabled,
+                "api_key": "",
+            },
         }
 
 
@@ -90,10 +97,44 @@ def write_config(config: dict) -> None:
 
 def public_config() -> dict:
     config = read_config()
-    return {"active_id": config["active_id"], "user_profile": config.get("user_profile", ""), "profiles": [
-        {**{k: v for k, v in p.items() if k != "api_key"}, "has_key": bool(p.get("api_key"))}
-        for p in config["profiles"]
-    ]}
+    eval_cfg = config.get("independent_eval") or {}
+    key = str(eval_cfg.get("api_key") or "")
+    masked_key = ""
+    if key:
+        masked_key = f"...{key[-4:]}" if len(key) > 8 else "..."
+    return {
+        "active_id": config["active_id"],
+        "user_profile": config.get("user_profile", ""),
+        "profiles": [
+            {**{k: v for k, v in p.items() if k != "api_key"}, "has_key": bool(p.get("api_key"))}
+            for p in config["profiles"]
+        ],
+        "independent_eval": {
+            "enabled": bool(eval_cfg.get("enabled", settings.independent_eval_enabled)),
+            "has_key": bool(key),
+            "masked_key": masked_key,
+            "active_model": next(
+                (
+                    f"{p.get('name', '')} · {p.get('model', '')}"
+                    for p in config.get("profiles", [])
+                    if p.get("id") == config.get("active_id")
+                ),
+                "",
+            ),
+        },
+    }
+
+
+def save_independent_eval(enabled: bool, api_key: str | None = None) -> dict:
+    """保存评估开关与专用密钥；api_key=None 表示保留已有密钥，空串表示清除。"""
+    with _lock:
+        config = read_config()
+        eval_cfg = config.setdefault("independent_eval", {})
+        eval_cfg["enabled"] = bool(enabled)
+        if api_key is not None:
+            eval_cfg["api_key"] = api_key.strip()[:8192]
+        write_config(config)
+    return public_config()
 
 
 def save_user_profile(content: str) -> dict:

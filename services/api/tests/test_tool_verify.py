@@ -730,7 +730,7 @@ def test_run_batch_returns_sorted_results_with_metadata():
         {"number": 3, "type": "解答题", "question": "q3", "answer": "见解析",
          "sympy_code": "# UNFORMALIZABLE"},
     ]
-    out = tv.run_batch(items, domain_key="math_logic")
+    out = tv.run_batch(items, domain_key="math_logic", timeout=15)
     assert [r["number"] for r in out] == [1, 2, 3]
     assert [r["verdict"] for r in out] == ["confirmed", "confirmed", "undecidable"]
     assert all(r["capability"] == "symbolic" for r in out)
@@ -746,8 +746,8 @@ def test_run_batch_concurrent_matches_serial():
          "sympy_code": "RESULT = limit((cos(x))**(1/sin(x)**2), x, 0)"}
         for i in range(1, 7)
     ]
-    serial = tv.run_batch(items, domain_key="math_logic")
-    concurrent = tv.run_batch(items, domain_key="math_logic", max_workers=3)
+    serial = tv.run_batch(items, domain_key="math_logic", timeout=15)
+    concurrent = tv.run_batch(items, domain_key="math_logic", max_workers=3, timeout=15)
     assert [r["verdict"] for r in serial] == [r["verdict"] for r in concurrent]
     # range(1, 7) 从奇数起：奇数题给了错答案 e^{1/2} => refuted
     assert [r["verdict"] for r in concurrent] == [
@@ -786,7 +786,7 @@ def test_to_fix_verdicts_maps_refuted_to_paper_wrong_with_computed_answer():
     results = tv.run_batch(
         [{"number": 1, "type": "填空题", "question": "q", "answer": r"$e^{1/2}$",
           "sympy_code": "RESULT = limit((cos(x))**(1/sin(x)**2), x, 0)"}],
-        domain_key="math_logic",
+        domain_key="math_logic", timeout=15,
     )
     v = tv.to_fix_verdicts(results)[0]
     assert v["verdict"] == "paper_wrong"
@@ -802,7 +802,7 @@ def test_to_fix_verdicts_maps_confirmed_to_blind_wrong():
     results = tv.run_batch(
         [{"number": 1, "type": "填空题", "question": "q", "answer": r"$e^{-1/2}$",
           "sympy_code": "RESULT = limit((cos(x))**(1/sin(x)**2), x, 0)"}],
-        domain_key="math_logic",
+        domain_key="math_logic", timeout=15,
     )
     v = tv.to_fix_verdicts(results)[0]
     assert v["verdict"] == "blind_wrong"
@@ -871,7 +871,7 @@ def test_full_chain_with_exam_check_is_idempotent():
         items = [{"number": q.number, "type": q.kind, "question": q.stem,
                   "answer": paper.answers[q.number], "sympy_code": code[q.number]}
                  for q in paper.questions]
-        results = tv.run_batch(items, domain_key="math_logic")
+        results = tv.run_batch(items, domain_key="math_logic", timeout=15)
         verdicts = tv.to_fix_verdicts(results)
         md, applied, _skipped = ec.apply_answer_fixes(md, paper, verdicts)
         applied_history.append([a["correct_answer"] for a in applied])

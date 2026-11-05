@@ -34,6 +34,7 @@ from . import proposition as proposition_service
 from . import spec_check as spec_check_service
 from . import format_specs as format_specs_service
 from . import knowledge as knowledge_service
+from . import synthesis as synthesis_service
 from . import materials as materials_service
 from .utils import (
     add_usage,
@@ -1688,6 +1689,29 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         if not reading_mode:
             materials_text = materials_service.materials_context(db, goal.id)
 
+        generation_outline = outline
+        # 大纲后、并行章节前执行两个全局阶段；reading 两阶段保持原契约，
+        # 其全书层本来就后置整合各章概要，此处不重复注入（见 test_reading_guide_two_phase）。
+        if not reading_mode:
+            _update_job(
+                db, job_id, progress=4,
+                stage="生成全局知识梳理与教学蓝图",
+                status="running",
+            )
+            db.commit()
+            # 两个全局阶段共用一次独立模型会话；后续章节 worker 仍保持独立 AIService。
+            stage_ai = AIService(
+                db, goal_id=goal.id, tutorial_id=tutorial.id, job_id=job_id
+            )
+            synthesis_data, blueprint_data = synthesis_service.prepare(
+                goal, outline, teaching_plan, contract, stage_ai,
+            )
+            generation_outline = synthesis_service.attach_to_outline(
+                outline, synthesis_data, blueprint_data
+            )
+            _update_job(db, job_id, progress=5, stage="全局梳理与蓝图完成")
+            db.commit()
+
         def _chapter_for(idx: int) -> str | None:
             return reading_marks.get(idx) if reading_mode else None
 
@@ -1722,7 +1746,7 @@ def _sections_worker(tutorial_id: str, job_id: str) -> None:
         first_batch = (
             [(idx, outline[idx]) for idx in phase["chapters"]]
             if reading_mode
-            else list(enumerate(outline))
+            else list(enumerate(generation_outline))
         )
         with ThreadPoolExecutor(
             max_workers=min(MAX_SECTION_WORKERS, max(1, len(first_batch))),

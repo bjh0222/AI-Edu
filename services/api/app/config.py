@@ -91,6 +91,11 @@ class Settings:
         # 默认开启；关掉可省 token，代价是答案正确性只靠 L0 账目校验、不再复核内容。
         # 演示模式（未配置模型）下自动跳过，与此开关无关。
         self.exam_verify_enabled = os.getenv("AIEDU_EXAM_VERIFY", "1").strip() not in ("0", "false", "False")
+        # 独立 LLM 质量评估开关：默认关闭。设置页保存后，这个默认值会被
+        # model-settings.json 的 independent_eval.enabled 覆盖（便于运行时切换）。
+        self.independent_eval_enabled = os.getenv(
+            "AIEDU_INDEPENDENT_EVAL", "0"
+        ).strip().lower() not in ("0", "false", "false")
 
     @property
     def llm_configured(self) -> bool:

@@ -741,3 +741,64 @@ export interface ChatResponse {
   assistant: { id: string; role: string; content: string; created_at?: string };
   demo: boolean;
 }
+
+// ---------------------------------------------------------------- 命题知识库（最小档）
+
+export interface PropositionItemModel {
+  id: string;
+  domain_key: string;
+  title: string;
+  chapter: string;
+  knowledge_points: string[];
+  radicals: Record<string, unknown>;
+  incidentals: Record<string, unknown>;
+  solution_template: string;
+  answer_expr: string;
+  unknown: string;
+  answer_select: string;
+  difficulty: string;
+  provenance: string;
+  status: string;
+  source_ref: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface PropositionItemModelList {
+  total: number;
+  items: PropositionItemModel[];
+  conflicts: number;
+  solvable: number;
+}
+
+/** PATCH /api/proposition/item-models/{id}：只传要改的字段（后端逐字段可选）。 */
+export interface PropositionItemModelPatch {
+  title?: string;
+  chapter?: string;
+  solution_template?: string;
+  answer_expr?: string;
+  unknown?: string;
+  answer_select?: "" | "positive" | "negative" | "nonnegative" | "max" | "min";
+  difficulty?: string;
+  status?: "draft" | "confirmed" | "archived";
+}
+
+export interface PropositionPrinciple {
+  id: string;
+  domain_key: string;
+  domain_name: string;
+  statement: string;
+  principle_type: string;
+  evidence_count: number;
+  status: string;
+  rationale: string;
+  created_at?: string;
+}
+
+export interface PropositionPrincipleList {
+  total: number;
+  items: PropositionPrinciple[];
+  confirmed: number;
+  proposed: number;
+  rejected: number;
+}

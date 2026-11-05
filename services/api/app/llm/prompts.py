@@ -549,8 +549,8 @@ def outline(goal, discipline, criteria_list, materials_text: str = "") -> tuple[
         user = (
             f"学科：{discipline.display_name}\n"
             f"学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
-            f"已确认的验收标准：{json.dumps(criteria_list, ensure_ascii=False)}\n"
             f"{_hard_constraints_section(goal)}"
+            f"已确认的验收标准：{json.dumps(criteria_list, ensure_ascii=False)}\n"
             f"{_materials_section(materials_text)}\n"
             f"{_format_spec_block('outline', goal)}"
             f"{_teaching_charter('outline', {'rules': profile_data['rules']}, goal)}"
@@ -559,8 +559,8 @@ def outline(goal, discipline, criteria_list, materials_text: str = "") -> tuple[
         return _system_for(goal, "outline"), user
     user = (
         f"学科：{discipline.display_name}\n学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
-        f"已确认的验收标准：{json.dumps(criteria_list, ensure_ascii=False)}\n"
         f"{_hard_constraints_section(goal)}"
+        f"已确认的验收标准：{json.dumps(criteria_list, ensure_ascii=False)}\n"
         f"{_tier_prompt_block(goal)}"
         f"{_capability(goal)}\n"
         f"{_materials_section(materials_text)}\n"
@@ -805,6 +805,73 @@ def _deliverable_task(deliverable: str) -> str:
     )
 
 
+def synthesis(goal, outline: list[dict], teaching_plan: dict | None = None) -> tuple[str, str]:
+    """全局知识梳理：只做跨章节联系与体系结构，不做思想脉络级综合。"""
+    context = {
+        "outline": [
+            {"section_id": item.get("id", ""), "title": item.get("title", ""),
+             "purpose": item.get("purpose", ""), "content_type": item.get("content_type", ""),
+             "summary": item.get("summary", "")}
+            for item in outline
+        ],
+        "teaching_plan": teaching_plan or {},
+    }
+    user = (
+        f"{_hard_constraints_section(goal)}"
+        f"学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
+        f"大纲：{json.dumps(context, ensure_ascii=False)}\n\n"
+        "请做全局知识梳理（内部中间产物）。综合深度限定为跨章节联系与体系结构；"
+        "本阶段不做思想脉络、学术史或观点演变级综合。\n"
+        "- sections[i].dependencies：只列该节直接依赖或支撑的其它节 section_id，"
+        "每项写 dependency_id、relation_type（prerequisite_of/supports/applied_in/contrasts_with）和依据；\n"
+        "- global_structure：给出分层/分块结构，每块说明覆盖哪些 section_id 与该块作用；\n"
+        "- sections[i].global_position：一句话说明该节在整体体系中的作用；\n"
+        "- 只依据给定大纲与目标，不得编造大纲未包含的知识；不要复述完整教学过程。\n\n"
+        "输出 JSON：{\"sections\": [{\"section_id\": str, \"dependencies\": "
+        "[{\"dependency_id\": str, \"relation_type\": str, \"rationale\": str}], "
+        "\"global_position\": str}], \"global_structure\": "
+        "[{\"block\": str, \"purpose\": str, \"section_ids\": [str]}]}。"
+    )
+    return SYSTEM, user
+
+
+def blueprint(
+    goal, outline: list[dict], synthesis_data: dict, teaching_plan: dict | None = None,
+    delivery_contract: dict | None = None,
+) -> tuple[str, str]:
+    """教学蓝图：每个节只保留自己的片段；交付契约模式下契约仍决定结构。"""
+    contract_items = (delivery_contract or {}).get("items") or []
+    contract_block = (
+        f"交付契约：{json.dumps(delivery_contract, ensure_ascii=False)}\n"
+        "契约是结构硬边界：不得增加/合并/改写交付物；蓝图只影响每个交付物内部的内容取向、深度与例练选择。\n"
+        if contract_items else ""
+    )
+    context = {
+        "outline": [
+            {"section_id": item.get("id", ""), "title": item.get("title", ""),
+             "content_type": item.get("content_type", ""), "summary": item.get("summary", "")}
+            for item in outline
+        ],
+        "synthesis": synthesis_data,
+        "teaching_plan": teaching_plan or {},
+    }
+    user = (
+        f"{_hard_constraints_section(goal)}"
+        f"学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
+        f"{contract_block}"
+        f"大纲与全局梳理：{json.dumps(context, ensure_ascii=False)}\n\n"
+        "请为每个 section 生成教学蓝图片段（内部中间产物）。要求：\n"
+        "- depth：该节教到什么深度（直觉/原理/结论分层只按知识需要选择，不机械套三层）；\n"
+        "- method：根据 content_type 选择教法与讲解重点；\n"
+        "- practice_focus：例题/练习取向，只列取向与覆盖点，不写完整题目；\n"
+        "- bridges：与前后节的衔接点，依据只使用 synthesis 的依赖关系；\n"
+        "- 不改变章节结构，不新增或删除章节，不输出章节正文；不编造大纲外知识。\n\n"
+        "输出 JSON：{\"sections\": [{\"section_id\": str, \"depth\": str, \"method\": str, "
+        "\"practice_focus\": str, \"bridges\": [str]}]}。"
+    )
+    return SYSTEM, user
+
+
 def section(
     goal, discipline, outline_item, criteria_list, prior_titles, materials_text: str = "",
     companion_names: list[str] | None = None, retry_violations: list[str] | None = None,
@@ -814,10 +881,15 @@ def section(
     if not plan:
         plan = normalize_teaching_plan({}, parse_teaching_profile(context_text=goal_context_text(goal)))
     outline_for_prompt = (
-        {key: value for key, value in outline_item.items() if key not in ("_teaching_plan", "_deliverable")}
+        {
+            key: value for key, value in outline_item.items()
+            if key not in ("_teaching_plan", "_deliverable", "_synthesis", "_blueprint")
+        }
         if isinstance(outline_item, dict)
         else outline_item
     )
+    synthesis = outline_item.get("_synthesis") if isinstance(outline_item, dict) else None
+    blueprint = outline_item.get("_blueprint") if isinstance(outline_item, dict) else None
     deliverable = outline_item.get("_deliverable") if isinstance(outline_item, dict) else None
     if _format_spec_active(goal):
         section_deliverable = str(
@@ -835,7 +907,10 @@ def section(
             f"学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
             f"当前交付物：{section_deliverable or '按格式规范生成'}\n"
             f"{_chapter_scope_block(section_deliverable, format_specs_service.is_reading_guide(snapshot_spec))}"
+            f"{_hard_constraints_section(goal)}"
             f"本章大纲：{json.dumps(outline_for_prompt, ensure_ascii=False)}\n"
+            f"本节全局定位：{json.dumps(synthesis or {}, ensure_ascii=False)}\n"
+            f"本节教学蓝图：{json.dumps(blueprint or {}, ensure_ascii=False)}\n"
             f"相关验收标准：{json.dumps(criteria_list, ensure_ascii=False)}\n"
             f"{_hard_constraints_section(goal)}"
             f"{_materials_section(materials_text)}\n"
@@ -864,6 +939,8 @@ def section(
         f"本章大纲：{json.dumps(outline_for_prompt, ensure_ascii=False)}\n"
         f"相关验收标准：{json.dumps(criteria_list, ensure_ascii=False)}\n"
         f"{_hard_constraints_section(goal)}"
+        f"本节全局定位：{json.dumps(synthesis or {}, ensure_ascii=False)}\n"
+        f"本节教学蓝图：{json.dumps(blueprint or {}, ensure_ascii=False)}\n"
         f"{_tier_prompt_block(goal)}"
         f"{_capability(goal)}\n"
         f"{_materials_section(materials_text)}\n"
@@ -1066,18 +1143,27 @@ def format_spec_match(requirement: str, candidates: list[dict]) -> tuple[str, st
     return system, user
 
 
+def dynamic_concept_limit(section_count: int) -> int:
+    """知识提取概念上限：按章节数动态伸缩，替代导致大教程削顶的固定 12。"""
+    return min(30, max(8, int(section_count or 0) * 2))
+
+
 def knowledge_extract(goal, tutorial, context: dict, existing: list) -> tuple[str, str]:
+    section_count = len(context.get("sections") or context.get("outline") or [])
+    concept_limit = dynamic_concept_limit(section_count)
     user = (
+        f"{_hard_constraints_section(goal)}"
         f"学习目标：{json.dumps(_goal_ctx(goal), ensure_ascii=False)}\n"
         f"教程：{tutorial.title}\n"
         f"教程结构（outline 与 sections 均含 section_id）：{json.dumps(context, ensure_ascii=False)}\n"
         f"已有概念（用于去重，勿重复输出）：{json.dumps(existing, ensure_ascii=False)}\n\n"
         "从教程结构中提取结构化知识。要求：\n"
         "- concepts：只提取教程结构直接体现的概念 / 学习单元；title 简明稳定；definition 一句话；"
-        "section_id 指向最直接解释该概念的章节；已有概念（按名称）不要重复输出；最多 12 个。\n"
+        f"section_id 指向最直接解释该概念的章节；已有概念（按名称）不要重复输出；最多 {concept_limit} 个。\n"
         "- relations：只写有依据的关系；from_title/to_title 必须能在 concepts 或已有概念中找到；"
         "relation_type 只能取 prerequisite_of / part_of / explains / applied_in / contrasts_with / related；"
-        "带 section_id 表示教程明确解释（会自动确认），纯推测则留空 section_id 并降低 confidence；"
+        "section_id 必须指向教程中明确解释该关系的章节，rationale 写出至少一句正文依据；"
+        "仅当 section_id、rationale 和 confidence>=0.7 都具备时才会自动确认；纯推测则留空 section_id 并降低 confidence；"
         "不为图谱美观添加无依据的边；最多 20 条。\n"
         "- domain_key 只能使用规范学科 key（例如 math_logic / cs_it / philosophy_ethics / "
         "psychology_cognition / economics_business），跨学科概念填写它主要服务的规范学科；"
